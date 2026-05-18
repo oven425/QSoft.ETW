@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="ConsoleApplication_ETW/ConsoleApplication_ETW.vcxproj" />
+  <Project Path="QSoft.ETW/QSoft.ETW.csproj" />
+</Solution>
