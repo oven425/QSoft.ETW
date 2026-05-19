@@ -18,5 +18,11 @@
     <ClCompile Include="ConsoleApplication_ETW.cpp">
       <Filter>來源檔案</Filter>
     </ClCompile>
+    <ClCompile Include="QueryAllTraces.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="KernelTraceControl.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>
