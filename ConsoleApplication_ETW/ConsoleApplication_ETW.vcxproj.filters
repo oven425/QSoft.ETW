@@ -21,15 +21,18 @@
     <ClCompile Include="QueryAllTraces.cpp">
       <Filter>來源檔案</Filter>
     </ClCompile>
-    <ClCompile Include="KernelTraceControl.cpp">
+    <ClCompile Include="ETW.cpp">
       <Filter>來源檔案</Filter>
     </ClCompile>
-    <ClCompile Include="ETW.cpp">
+    <ClCompile Include="KernelTrace.cpp">
       <Filter>來源檔案</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ETW.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelTrace.h">
       <Filter>標頭檔</Filter>
     </ClInclude>
   </ItemGroup>

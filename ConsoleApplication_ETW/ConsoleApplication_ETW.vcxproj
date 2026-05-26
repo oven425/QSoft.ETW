@@ -130,11 +130,12 @@
   <ItemGroup>
     <ClCompile Include="ConsoleApplication_ETW.cpp" />
     <ClCompile Include="ETW.cpp" />
-    <ClCompile Include="KernelTraceControl.cpp" />
+    <ClCompile Include="KernelTrace.cpp" />
     <ClCompile Include="QueryAllTraces.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ETW.h" />
+    <ClInclude Include="KernelTrace.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -1,12 +1,13 @@
 #pragma once
-#include<atlstr.h>
-#include <evntrace.h>
+#include "KernelTrace.h"
+#include <tchar.h>
 class ETW
 {
 public:
 	void Save(const TCHAR* filename = _T("test.etl"));
+	void SaveKernel();
 	void Open(const TCHAR* filename = _T("test.etl"));
-//private:
-//	static void EVENT_RECORD_CALLBACK(PEVENT_RECORD EventRecord);
+private:
+	KernelTrace m_KenerlTrace;
 };
 

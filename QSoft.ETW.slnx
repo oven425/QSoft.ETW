@@ -5,5 +5,6 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="ConsoleApplication_ETW/ConsoleApplication_ETW.vcxproj" Id="4ccf1cd2-f67a-47b6-9674-b5f86271e219" />
+  <Project Path="ConsoleApp_ETW/ConsoleApp_ETW.csproj" Id="315e47bb-d9cf-4d4e-827c-6b765a87ac45" />
   <Project Path="QSoft.ETW/QSoft.ETW.csproj" />
 </Solution>

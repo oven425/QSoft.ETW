@@ -1,8 +1,10 @@
 #include "ETW.h"
 #include <vector>
+#include <iostream>
 #include <windows.h>
 #include <evntrace.h>
 #include <strsafe.h>
+
 #define LOGFILE_PATH L"test.etl"
 #define LOGSESSION_NAME L"My Event Trace Session"
 
@@ -13,13 +15,107 @@ static const GUID SessionGuid =
 static const GUID ProviderGuid =
 { 0xd8909c24, 0x5be9, 0x4502, {0x98, 0xca, 0xab, 0x7b, 0xdc, 0x24, 0x89, 0x9d } };
 //{331c3b3a-2005-44c2-ac5e-77220c37d6b4}
+EVENT_TRACE_PROPERTIES* AllocateTraceProperties(const wchar_t* logFilePath, const wchar_t* sessionName)
+{
+	auto filelen = ::wcslen(logFilePath);
+    auto sessionlen = ::wcslen(sessionName);
+    auto BufferSize = sizeof(EVENT_TRACE_PROPERTIES) + filelen + sessionlen;
+    BufferSize = BufferSize + 81920000;
+    auto pSessionProperties = (EVENT_TRACE_PROPERTIES*)malloc(BufferSize);
+    ZeroMemory(pSessionProperties, BufferSize);
+	return pSessionProperties;
+}
+void ETW::SaveKernel()
+{
+    const wchar_t* kernelEtl = L"kernel.etl";
+    const wchar_t* userEtl = L"user.etl";
+    const wchar_t* mergedEtl = L"merged.etl";
+
+    // 確保日誌資料夾存在
+    //CreateDirectory(L"C:\\Logs", NULL);
+
+    TRACEHANDLE hKernelSession = 0;
+    TRACEHANDLE hUserSession = 0;
+    ULONG status = ERROR_SUCCESS;
+
+    wprintf(L"=== 1. 配置 ETW 屬性緩衝區 ===\n");
+    // Kernel 固定綁定 KERNEL_LOGGER_NAME
+    PEVENT_TRACE_PROPERTIES pKernelProps = AllocateTraceProperties(kernelEtl, KERNEL_LOGGER_NAME);
+    pKernelProps->EnableFlags = EVENT_TRACE_FLAG_PROCESS | EVENT_TRACE_FLAG_THREAD | EVENT_TRACE_FLAG_CSWITCH;
+
+    // User Trace 自訂 Session 名稱
+    const wchar_t* myUserSessionName = L"MyUserTraceSession";
+    PEVENT_TRACE_PROPERTIES pUserProps = AllocateTraceProperties(userEtl, myUserSessionName);
+
+    // -------------------------------------------------------------
+    wprintf(L"=== 2. 啟動 Trace Sessions ===\n");
+
+    // 啟動 Kernel 追蹤 (無額外 Stack Walking 事件需求可傳入空陣列)
+    status = this->m_KenerlTrace.StartKernelTrace(&hKernelSession, pKernelProps, 0);
+    if (status != ERROR_SUCCESS) {
+        wprintf(L"StartKernelTrace 失敗，錯誤代碼: %lu (是否未開管理員權限?)\n", status);
+        goto CLEANUP;
+    }
+    wprintf(L"-> Kernel 追蹤已啟動，寫入中: \n");
+
+    // 啟動 User 追蹤
+    status = StartTrace(&hUserSession, myUserSessionName, pUserProps);
+    if (status != ERROR_SUCCESS) {
+        wprintf(L"StartTrace (User) 失敗，錯誤代碼: %lu\n", status);
+        goto CLEANUP;
+    }
+    wprintf(L"-> User 追蹤已啟動，寫入中: \n");
+
+    // 在這裡你可以透過 EnableTraceEx2 將你特定的 Provider GUID 掛載到 hUserSession 
+    // 為了範例簡潔，此處略過特定 Provider 的掛載
+
+    // -------------------------------------------------------------
+    wprintf(L"=== 3. 正在收集資料 (模擬系統運行 5 秒) ===\n");
+    Sleep(5000);
+
+    // -------------------------------------------------------------
+    wprintf(L"=== 4. 停止 Sessions 以確保快取全部寫入硬碟 ===\n");
+
+    // 停止 Kernel 追蹤
+    status = ControlTrace(hKernelSession, KERNEL_LOGGER_NAME, pKernelProps, EVENT_TRACE_CONTROL_STOP);
+    if (status == ERROR_SUCCESS) wprintf(L"-> Kernel 追蹤已成功停止並存檔。\n");
+
+    // 停止 User 追蹤
+    status = ControlTrace(hUserSession, myUserSessionName, pUserProps, EVENT_TRACE_CONTROL_STOP);
+    if (status == ERROR_SUCCESS) wprintf(L"-> User 追蹤已成功停止並存檔。\n");
+
+    // -------------------------------------------------------------
+    wprintf(L"=== 5. 合併 ETL 檔案 ===\n");
+    {
+        // 建立要合併的來源檔案路徑陣列
+        LPCWSTR traceFiles[] = { kernelEtl, userEtl };
+        ULONG fileCount = sizeof(traceFiles) / sizeof(traceFiles[0]);
+
+        // 執行合併：EVENT_TRACE_MERGE_EXTENDED_DATA_DEFAULT 會自動注入符號解析與 OS Build 所需的元數據
+        status = this->m_KenerlTrace.CreateMergedTraceFile(mergedEtl, traceFiles, fileCount, EVENT_TRACE_MERGE_EXTENDED_DATA_DEFAULT);
+
+        if (status == ERROR_SUCCESS) {
+            wprintf(L"🎉 恭喜！合併成功！\n");
+            wprintf(L"最終成品檔案位於: %ls\n", mergedEtl);
+            wprintf(L"您現在可以直接將此檔案拖入 Windows Performance Analyzer (WPA) 進行分析。\n");
+        }
+        else {
+            wprintf(L"CreateMergedTraceFile 失敗，錯誤代碼: %lu\n", status);
+        }
+    }
+
+CLEANUP:
+    if (pKernelProps) free(pKernelProps);
+    if (pUserProps) free(pUserProps);
+    return;
+}
 
 void ETW::Save(const TCHAR* filename)
 {
     EVENT_TRACE_PROPERTIES all = { 0 };
     ULONG querycount = 0;
     auto status = QueryAllTraces(NULL, 0, &querycount);
-    std::vector< EVENT_TRACE_PROPERTIES*> properties(querycount);
+    std::vector<EVENT_TRACE_PROPERTIES*> properties(querycount);
     properties.resize(querycount);
 
 
