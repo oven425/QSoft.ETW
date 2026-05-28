@@ -19,10 +19,26 @@ EVENT_TRACE_PROPERTIES* AllocateTraceProperties(const wchar_t* logFilePath, cons
 {
 	auto filelen = ::wcslen(logFilePath);
     auto sessionlen = ::wcslen(sessionName);
-    auto BufferSize = sizeof(EVENT_TRACE_PROPERTIES) + filelen + sessionlen;
+    auto BufferSize = sizeof(EVENT_TRACE_PROPERTIES) + (filelen + 1) * sizeof(wchar_t) + (sessionlen + 1) * sizeof(wchar_t);
     BufferSize = BufferSize + 81920000;
     auto pSessionProperties = (EVENT_TRACE_PROPERTIES*)malloc(BufferSize);
     ZeroMemory(pSessionProperties, BufferSize);
+    
+    // === 關鍵初始化 ===
+    pSessionProperties->Wnode.BufferSize = BufferSize;
+    pSessionProperties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+    pSessionProperties->Wnode.ClientContext = 1; // QPC clock resolution
+    pSessionProperties->LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL | EVENT_TRACE_SYSTEM_LOGGER_MODE;
+    pSessionProperties->MaximumFileSize = 1024; // MB
+    pSessionProperties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+    pSessionProperties->LogFileNameOffset = sizeof(EVENT_TRACE_PROPERTIES) + (sessionlen + 1) * sizeof(wchar_t);
+    
+    // 複製名稱
+    StringCbCopy((LPWSTR)((char*)pSessionProperties + pSessionProperties->LoggerNameOffset), 
+                 (sessionlen + 1) * sizeof(wchar_t), sessionName);
+    StringCbCopy((LPWSTR)((char*)pSessionProperties + pSessionProperties->LogFileNameOffset), 
+                 (filelen + 1) * sizeof(wchar_t), logFilePath);
+    
 	return pSessionProperties;
 }
 void ETW::SaveKernel()
@@ -41,7 +57,28 @@ void ETW::SaveKernel()
     wprintf(L"=== 1. 配置 ETW 屬性緩衝區 ===\n");
     // Kernel 固定綁定 KERNEL_LOGGER_NAME
     PEVENT_TRACE_PROPERTIES pKernelProps = AllocateTraceProperties(kernelEtl, KERNEL_LOGGER_NAME);
-    pKernelProps->EnableFlags = EVENT_TRACE_FLAG_PROCESS | EVENT_TRACE_FLAG_THREAD | EVENT_TRACE_FLAG_CSWITCH;
+    pKernelProps->Wnode.Guid = SessionGuid;
+    
+    // 加入所有可用的 Kernel Trace Flags
+    pKernelProps->EnableFlags = 
+        EVENT_TRACE_FLAG_PROCESS              |  // 進程建立/終止
+        EVENT_TRACE_FLAG_THREAD               |  // 線程建立/終止
+        EVENT_TRACE_FLAG_IMAGE_LOAD           |  // 模組載入
+        EVENT_TRACE_FLAG_DISK_IO              |  // 磁碟 I/O
+        EVENT_TRACE_FLAG_DISK_FILE_IO         |  // 磁碟檔案 I/O
+        EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS   |  // 內存頁面缺陷
+        EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS   |  // 硬頁面缺陷 (實際讀寫)
+        EVENT_TRACE_FLAG_NETWORK_TCPIP        |  // 網絡 TCP/IP
+        EVENT_TRACE_FLAG_REGISTRY             |  // 登錄檔操作
+        EVENT_TRACE_FLAG_DBGPRINT             |  // 調試列印
+        EVENT_TRACE_FLAG_PROCESS_COUNTERS     |  // 進程計數器
+        EVENT_TRACE_FLAG_CSWITCH              |  // 上下文切換
+        EVENT_TRACE_FLAG_DPC                  |  // 延遲過程調用
+        EVENT_TRACE_FLAG_INTERRUPT            |  // 中斷
+        EVENT_TRACE_FLAG_SYSTEMCALL           |  // 系統調用
+        EVENT_TRACE_FLAG_DISK_IO_INIT         |  // 磁碟 I/O 初始化
+        EVENT_TRACE_FLAG_ALPC                 |  // ALPC 操作
+        EVENT_TRACE_FLAG_SPLIT_IO;               // 分割 I/O 操作
 
     // User Trace 自訂 Session 名稱
     const wchar_t* myUserSessionName = L"MyUserTraceSession";
@@ -270,4 +307,83 @@ void ETW::Open(const TCHAR* filename)
 
     CloseTrace(hTrace);
 
+}
+#pragma comment(lib, "tdh.lib")
+
+#define MAX_GUID_SIZE 39
+void ETW::AllProviders()
+{
+    DWORD status = ERROR_SUCCESS;
+    PROVIDER_ENUMERATION_INFO* penum = NULL;    // Buffer that contains provider information
+    PROVIDER_ENUMERATION_INFO* ptemp = NULL;
+    DWORD BufferSize = 0;                       // Size of the penum buffer
+    HRESULT hr = S_OK;                          // Return value for StringFromGUID2
+    WCHAR StringGuid[MAX_GUID_SIZE];
+    DWORD RegisteredMOFCount = 0;
+    DWORD RegisteredManifestCount = 0;
+
+    // Retrieve the required buffer size.
+
+    status = TdhEnumerateProviders(penum, &BufferSize);
+
+    // Allocate the required buffer and call TdhEnumerateProviders. The list of 
+    // providers can change between the time you retrieved the required buffer 
+    // size and the time you enumerated the providers, so call TdhEnumerateProviders
+    // in a loop until the function does not return ERROR_INSUFFICIENT_BUFFER.
+
+    while (ERROR_INSUFFICIENT_BUFFER == status)
+    {
+        ptemp = (PROVIDER_ENUMERATION_INFO*)realloc(penum, BufferSize);
+        if (NULL == ptemp)
+        {
+            wprintf(L"Allocation failed (size=%lu).\n", BufferSize);
+            goto cleanup;
+        }
+
+        penum = ptemp;
+        ptemp = NULL;
+
+        status = TdhEnumerateProviders(penum, &BufferSize);
+    }
+
+    if (ERROR_SUCCESS != status)
+    {
+        wprintf(L"TdhEnumerateProviders failed with %lu.\n", status);
+    }
+    else
+    {
+        // Loop through the list of providers and print the provider's name, GUID, 
+        // and the source of the information (MOF class or instrumentation manifest).
+
+        for (DWORD i = 0; i < penum->NumberOfProviders; i++)
+        {
+            hr = StringFromGUID2(penum->TraceProviderInfoArray[i].ProviderGuid, StringGuid, ARRAYSIZE(StringGuid));
+
+            if (FAILED(hr))
+            {
+                wprintf(L"StringFromGUID2 failed with 0x%x\n", hr);
+                goto cleanup;
+            }
+
+            wprintf(L"Provider name: %s\nProvider GUID: %s\nSource: %s\n\n",
+                (LPWSTR)((PBYTE)(penum)+penum->TraceProviderInfoArray[i].ProviderNameOffset),
+                StringGuid,
+                (penum->TraceProviderInfoArray[i].SchemaSource) ? L"WMI MOF class" : L"XML manifest");
+
+            (penum->TraceProviderInfoArray[i].SchemaSource) ? RegisteredMOFCount++ : RegisteredManifestCount++;
+        }
+
+        wprintf(L"\nThere are %d registered providers; %lu are registered via MOF class and\n%lu are registered via a manifest.\n",
+            penum->NumberOfProviders,
+            RegisteredMOFCount,
+            RegisteredManifestCount);
+    }
+
+cleanup:
+
+    if (penum)
+    {
+        free(penum);
+        penum = NULL;
+    }
 }

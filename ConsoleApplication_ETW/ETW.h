@@ -7,6 +7,7 @@ public:
 	void Save(const TCHAR* filename = _T("test.etl"));
 	void SaveKernel();
 	void Open(const TCHAR* filename = _T("test.etl"));
+	void AllProviders();
 private:
 	KernelTrace m_KenerlTrace;
 };
