@@ -2,6 +2,7 @@
 using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -11,27 +12,27 @@ namespace QSoft.ETW
     public partial class ETW
     {
         [LibraryImport("Tdh.dll", SetLastError = true)]
-        private static partial uint TdhEnumerateProviders(
-            Span<byte> buffer,
-            ref uint bufferSize);
+        private static partial uint TdhEnumerateProviders(Span<byte> buffer, ref uint bufferSize);
 
         private const uint ERROR_SUCCESS = 0;
         private const uint ERROR_INSUFFICIENT_BUFFER = 122;
-        private const int MAX_GUID_SIZE = 39;
+
 
         // 結構體定義
         [StructLayout(LayoutKind.Sequential)]
         private struct ProviderEnumerationInfo
         {
             public uint NumberOfProviders;
+            public uint Reserved;
+            //_Field_size_(NumberOfProviders) TRACE_PROVIDER_INFO TraceProviderInfoArray[ANYSIZE_ARRAY];
         }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct TraceProviderInfo
         {
             public Guid ProviderGuid;
-            public uint ProviderNameOffset;
             public uint SchemaSource;  // 0 = XML manifest, 1 = WMI MOF class
+            public uint ProviderNameOffset;
         }
         public void EnumerateProviders()
         {
@@ -40,7 +41,6 @@ namespace QSoft.ETW
 
             try
             {
-                // 第一次呼叫取得所需的緩衝區大小
                 uint status = TdhEnumerateProviders([], ref bufferSize);
 
                 while (status == ERROR_INSUFFICIENT_BUFFER && bufferSize > 0)
@@ -62,7 +62,6 @@ namespace QSoft.ETW
                     return;
                 }
 
-                // 使用 MemoryMarshal 而非 fixed/Marshal
                 ReadOnlySpan<byte> bufferSpan = new ReadOnlySpan<byte>(buffer, 0, (int)bufferSize);
                 ProcessProviders(bufferSpan);
             }
@@ -87,16 +86,14 @@ namespace QSoft.ETW
             uint registeredManifestCount = 0;
 
             int structSize = Marshal.SizeOf<TraceProviderInfo>();
-
+            int offset = Marshal.SizeOf<ProviderEnumerationInfo>();
             for (uint i = 0; i < numberOfProviders; i++)
             {
                 try
                 {
-                    // 計算偏移並使用 MemoryMarshal 讀取結構
-                    int offset = sizeof(uint) + (int)i * structSize;
-                    var providerInfo = MemoryMarshal.Read<TraceProviderInfo>(buffer.Slice(offset));
+                    
+                    var providerInfo = MemoryMarshal.Read<TraceProviderInfo>(buffer[offset..]);
 
-                    // 提取提供者名稱
                     string providerName = ExtractProviderName(buffer, providerInfo.ProviderNameOffset);
                     string source = providerInfo.SchemaSource != 0 ? "WMI MOF class" : "XML manifest";
 
@@ -109,6 +106,8 @@ namespace QSoft.ETW
                         registeredMOFCount++;
                     else
                         registeredManifestCount++;
+
+                    offset += structSize;
                 }
                 catch (Exception ex)
                 {
@@ -128,18 +127,16 @@ namespace QSoft.ETW
                 if (offset >= buffer.Length)
                     return "Unknown";
 
-                // 使用 MemoryMarshal.Cast 將字節 Span 轉換為 char Span
-                ReadOnlySpan<byte> stringData = buffer.Slice((int)offset);
+                ReadOnlySpan<byte> stringData = buffer[(int)offset..];
                 ReadOnlySpan<char> charSpan = MemoryMarshal.Cast<byte, char>(stringData);
 
-                // 尋找空終止符
                 int nullIndex = charSpan.IndexOf('\0');
                 if (nullIndex > 0)
                 {
-                    return new string(charSpan.Slice(0, nullIndex));
+                    return new string(charSpan[..nullIndex]);
                 }
 
-                return new string(charSpan.Slice(0, Math.Min(charSpan.Length, 260)));
+                return new string(charSpan[..Math.Min(charSpan.Length, 260)]);
             }
             catch
             {
