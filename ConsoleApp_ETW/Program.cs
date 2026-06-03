@@ -3,4 +3,5 @@ using QSoft.ETW;
 
 Console.WriteLine("Hello, World!");
 ETW etw = new ETW();
-etw.EnumerateProviders();
+//etw.EnumerateProviders();
+etw.Save();

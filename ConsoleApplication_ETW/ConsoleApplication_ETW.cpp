@@ -7,7 +7,7 @@ int main()
 {
     ETW etw;
     etw.AllProviders();
-    //etw.Save();
+    etw.Save();
     etw.SaveKernel();
     etw.Open();
 }

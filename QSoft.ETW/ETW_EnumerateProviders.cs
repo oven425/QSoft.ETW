@@ -17,8 +17,6 @@ namespace QSoft.ETW
         private const uint ERROR_SUCCESS = 0;
         private const uint ERROR_INSUFFICIENT_BUFFER = 122;
 
-
-        // 結構體定義
         [StructLayout(LayoutKind.Sequential)]
         private struct ProviderEnumerationInfo
         {
@@ -76,7 +74,6 @@ namespace QSoft.ETW
 
         private static void ProcessProviders(ReadOnlySpan<byte> buffer)
         {
-            // 讀取提供者數量
             var enumInfo = MemoryMarshal.Read<ProviderEnumerationInfo>(buffer);
             uint numberOfProviders = enumInfo.NumberOfProviders;
 

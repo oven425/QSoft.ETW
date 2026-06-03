@@ -167,7 +167,7 @@ void ETW::Save(const TCHAR* filename)
     // which get appended to the end of the session properties structure.
 
     BufferSize = sizeof(EVENT_TRACE_PROPERTIES) + sizeof(LOGFILE_PATH) + sizeof(LOGSESSION_NAME);
-    BufferSize = BufferSize + 81920000;
+    BufferSize = BufferSize;
     pSessionProperties = (EVENT_TRACE_PROPERTIES*)malloc(BufferSize);
     if (NULL == pSessionProperties)
     {
