@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -12,19 +13,22 @@ namespace QSoft.ETW
     {
         const string LOGFILE_PATH = "test.etl";
         const string LOGSESSION_NAME = "My Event Trace Session";
-        public void Save()
+        public void Start()
         {
             byte[] filename_buf = Encoding.Unicode.GetBytes(LOGFILE_PATH);
             byte[] session_buf = Encoding.Unicode.GetBytes(LOGSESSION_NAME);
-            var buffersize = Marshal.SizeOf<EVENT_TRACE_PROPERTIES>() + filename_buf.Length + session_buf.Length;
+            var sz_1 = Marshal.SizeOf<EVENT_TRACE_PROPERTIES>();
+            var sz_2 = filename_buf.Length+2;
+            var sz_3 = session_buf.Length+2;
+            var buffersize = sz_1 + sz_2 + sz_3;
 
             var buffer = new byte[buffersize];
             var span = buffer.AsSpan();
             MemoryMarshal.Write(span, new EVENT_TRACE_PROPERTIES
             {
-                BufferSize = (uint)buffersize,
                 Wnode = new()
                 {
+                    BufferSize = (uint)buffersize,
                     Flags = WNODE_FLAG_TRACED_GUID,
                     ClientContext = 1,
                     Guid = Guid.NewGuid()
@@ -32,27 +36,60 @@ namespace QSoft.ETW
                 LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL | EVENT_TRACE_SYSTEM_LOGGER_MODE,
                 EnableFlags = EVENT_TRACE_FLAG_PROCESS | EVENT_TRACE_FLAG_THREAD | EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_FORWARD_WMI,
                 MaximumFileSize = 100,
-                LoggerNameOffset = (uint)Marshal.SizeOf<EVENT_TRACE_PROPERTIES>(),
-                LogFileNameOffset = (uint)(Marshal.SizeOf<EVENT_TRACE_PROPERTIES>() + filename_buf.Length)
+                LoggerNameOffset = (uint)sz_1,
+                LogFileNameOffset = (uint)(sz_1 + sz_3)
             });
-            span = span[Marshal.SizeOf<EVENT_TRACE_PROPERTIES>()..];
+            span = span[(sz_1 + sz_3)..];
             filename_buf.CopyTo(span);
-            //pSessionProperties->Wnode.BufferSize = BufferSize;
-            //pSessionProperties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-            //pSessionProperties->Wnode.ClientContext = 1; //QPC clock resolution
-            //pSessionProperties->Wnode.Guid = SessionGuid;
-            //pSessionProperties->LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL | EVENT_TRACE_SYSTEM_LOGGER_MODE;
-            //pSessionProperties->EnableFlags = EVENT_TRACE_FLAG_PROCESS | EVENT_TRACE_FLAG_THREAD | EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_FORWARD_WMI;
-            //pSessionProperties->MaximumFileSize = 100;  // 1 MB
-            //pSessionProperties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-            //pSessionProperties->LogFileNameOffset = sizeof(EVENT_TRACE_PROPERTIES) + sizeof(LOGSESSION_NAME);
-            //StringCbCopy((LPWSTR)((char*)pSessionProperties + pSessionProperties->LogFileNameOffset), sizeof(LOGFILE_PATH), LOGFILE_PATH);
+            var buffrt1 = AllocateTraceProperties(LOGFILE_PATH, LOGSESSION_NAME);
+            var hr = StartTrace(out var pttm, LOGSESSION_NAME, buffrt1);
 
-            var hr = StartTrace(out var pttm, LOGSESSION_NAME, buffer);
+
+
+
         }
+
+        public void Stop()
+        {
+            var hr = ControlTrace(IntPtr.Zero, LOGSESSION_NAME, [], EVENT_TRACE_CONTROL_STOP);
+        }
+
+        byte[] AllocateTraceProperties(string logFilePath, string sessionName)
+        {
+            byte[] filename_buf = Encoding.Unicode.GetBytes(logFilePath);
+            byte[] session_buf = Encoding.Unicode.GetBytes(sessionName);
+            var sz_1 = Marshal.SizeOf<EVENT_TRACE_PROPERTIES>();
+            var sz_2 = filename_buf.Length + 2;
+            var sz_3 = session_buf.Length + 2;
+            var buffersize = sz_1 + sz_2 + sz_3;
+
+            byte[] buf = new byte[buffersize];
+
+            
+            EVENT_TRACE_PROPERTIES pp = new();
+            pp.Wnode.BufferSize = (uint)buffersize;
+            pp.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+            pp.Wnode.ClientContext = 1; // QPC clock resolution
+            pp.LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL | EVENT_TRACE_SYSTEM_LOGGER_MODE;
+            pp.MaximumFileSize = 1024; // MB
+            pp.LoggerNameOffset = (uint)sz_1;
+            pp.LogFileNameOffset = (uint)(sz_1 + sz_3);
+            MemoryMarshal.Write(buf, pp);
+            session_buf.CopyTo(buf.AsSpan((int)pp.LoggerNameOffset));
+            filename_buf.CopyTo(buf.AsSpan((int)pp.LogFileNameOffset));
+            return buf;
+        }
+
         [LibraryImport("Advapi32.dll", EntryPoint = "StartTraceW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
         [return: MarshalAs(UnmanagedType.U4)]
         internal static partial uint StartTrace(out IntPtr DeviceInfoSet, string InstanceName, Span<byte> Properties);
+
+        [LibraryImport("Advapi32.dll", EntryPoint = "ControlTraceW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+        [return: MarshalAs(UnmanagedType.U4)]
+        internal static partial uint ControlTrace(IntPtr TraceId, string InstanceName, Span<byte> Properties, uint ControlCode);
+        const uint EVENT_TRACE_CONTROL_QUERY = 0;
+        const uint EVENT_TRACE_CONTROL_STOP = 1;
+        const uint EVENT_TRACE_CONTROL_UPDATE = 2;
 
         const uint WNODE_FLAG_TRACED_GUID = 0x00020000; // denotes a trace
 

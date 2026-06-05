@@ -3,5 +3,9 @@ using QSoft.ETW;
 
 Console.WriteLine("Hello, World!");
 ETW etw = new ETW();
+etw.QueryAllTraces();
 //etw.EnumerateProviders();
-etw.Save();
+etw.Stop();
+etw.Start();
+await Task.Delay(10000);
+etw.Stop();
