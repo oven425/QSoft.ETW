@@ -3,7 +3,7 @@ using QSoft.ETW;
 
 Console.WriteLine("Hello, World!");
 ETW etw = new ETW();
-etw.QueryAllTraces();
+etw.QueryAllTraces().Where(x=>x.SessionName == "MySession");
 //etw.EnumerateProviders();
 etw.Stop();
 etw.Start();

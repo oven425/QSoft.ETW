@@ -161,14 +161,4 @@ namespace QSoft.ETW
         public uint Flags;
     }
 
-
-    //        EXTERN_C
-    //ULONG
-    //WMIAPI
-    //StartTraceW(
-    //    _Out_ CONTROLTRACE_ID* TraceId,
-    //    _In_ LPCWSTR InstanceName,
-    //    _Inout_ PEVENT_TRACE_PROPERTIES Properties
-    //    );
-
 }
