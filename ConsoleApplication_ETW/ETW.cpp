@@ -15,11 +15,11 @@ static const GUID SessionGuid =
 static const GUID ProviderGuid =
 { 0xd8909c24, 0x5be9, 0x4502, {0x98, 0xca, 0xab, 0x7b, 0xdc, 0x24, 0x89, 0x9d } };
 //{331c3b3a-2005-44c2-ac5e-77220c37d6b4}
-EVENT_TRACE_PROPERTIES* AllocateTraceProperties(const wchar_t* logFilePath, const wchar_t* sessionName)
+EVENT_TRACE_PROPERTIES* AllocateTraceProperties(const TCHAR* logFilePath, const TCHAR* sessionName)
 {
-	auto filelen = ::wcslen(logFilePath);
-    auto sessionlen = ::wcslen(sessionName);
-    auto BufferSize = sizeof(EVENT_TRACE_PROPERTIES) + (filelen + 1) * sizeof(wchar_t) + (sessionlen + 1) * sizeof(wchar_t);
+	auto filelen = ::_tcslen(logFilePath);
+    auto sessionlen = ::_tcslen(sessionName);
+    auto BufferSize = sizeof(EVENT_TRACE_PROPERTIES) + (filelen + 1) * sizeof(TCHAR) + (sessionlen + 1) * sizeof(TCHAR);
     BufferSize = BufferSize + 81920000;
     auto pSessionProperties = (EVENT_TRACE_PROPERTIES*)malloc(BufferSize);
     ZeroMemory(pSessionProperties, BufferSize);
@@ -31,21 +31,21 @@ EVENT_TRACE_PROPERTIES* AllocateTraceProperties(const wchar_t* logFilePath, cons
     pSessionProperties->LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL | EVENT_TRACE_SYSTEM_LOGGER_MODE;
     pSessionProperties->MaximumFileSize = 1024; // MB
     pSessionProperties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-    pSessionProperties->LogFileNameOffset = sizeof(EVENT_TRACE_PROPERTIES) + (sessionlen + 1) * sizeof(wchar_t);
+    pSessionProperties->LogFileNameOffset = sizeof(EVENT_TRACE_PROPERTIES) + (sessionlen + 1) * sizeof(TCHAR);
     
     // 複製名稱
     StringCbCopy((LPWSTR)((char*)pSessionProperties + pSessionProperties->LoggerNameOffset), 
-                 (sessionlen + 1) * sizeof(wchar_t), sessionName);
+                 (sessionlen + 1) * sizeof(TCHAR), sessionName);
     StringCbCopy((LPWSTR)((char*)pSessionProperties + pSessionProperties->LogFileNameOffset), 
-                 (filelen + 1) * sizeof(wchar_t), logFilePath);
+                 (filelen + 1) * sizeof(TCHAR), logFilePath);
     
 	return pSessionProperties;
 }
 void ETW::SaveKernel()
 {
-    const wchar_t* kernelEtl = L"kernel.etl";
-    const wchar_t* userEtl = L"user.etl";
-    const wchar_t* mergedEtl = L"merged.etl";
+    const TCHAR* kernelEtl = _T("kernel.etl");
+    const TCHAR* userEtl = _T("user.etl");
+    const TCHAR* mergedEtl = _T("merged.etl");
 
     // 確保日誌資料夾存在
     //CreateDirectory(L"C:\\Logs", NULL);
@@ -81,11 +81,11 @@ void ETW::SaveKernel()
         EVENT_TRACE_FLAG_SPLIT_IO;               // 分割 I/O 操作
 
     // User Trace 自訂 Session 名稱
-    const wchar_t* myUserSessionName = L"MyUserTraceSession";
+    const TCHAR* myUserSessionName = L"MyUserTraceSession";
     PEVENT_TRACE_PROPERTIES pUserProps = AllocateTraceProperties(userEtl, myUserSessionName);
 
     // -------------------------------------------------------------
-    wprintf(L"=== 2. 啟動 Trace Sessions ===\n");
+    _tprintf(_T("=== 2. 啟動 Trace Sessions ===\n"));
 
     // 啟動 Kernel 追蹤 (無額外 Stack Walking 事件需求可傳入空陣列)
     status = this->m_KenerlTrace.StartKernelTrace(&hKernelSession, pKernelProps, 0);
