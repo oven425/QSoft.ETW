@@ -3,9 +3,11 @@ using QSoft.ETW;
 
 Console.WriteLine("Hello, World!");
 ETW etw = new ETW();
-etw.QueryAllTraces().Where(x=>x.SessionName == "MySession");
+//etw.QueryAllTraces().Where(x => x.SessionName == "MySession");
 //etw.EnumerateProviders();
 etw.Stop();
 etw.Start();
-await Task.Delay(10000);
+await Task.Delay(TimeSpan.FromSeconds(30));
 etw.Stop();
+
+etw.Open("test.etl");

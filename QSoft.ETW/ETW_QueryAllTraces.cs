@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -39,6 +40,10 @@ namespace QSoft.ETW
             //var hr = QueryAllTraces(buffer, count, out count);
 
             List<TraceData> ll = [];
+            //using MemoryHandle pin = buffer.AsMemory().Pin();
+            //nint baseAddress = (nint)pin.Pointer;
+            //var gcHandle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+            //nint baseAddress = gcHandle.AddrOfPinnedObject();
             unsafe
             {
                 Span<IntPtr> pps = stackalloc IntPtr[64];
@@ -48,7 +53,7 @@ namespace QSoft.ETW
                     {
                         byte* pUnit = pbuf + (i * unit_size);
                         pps[i] = (IntPtr)pUnit;
-
+                        
                         EVENT_TRACE_PROPERTIES* pp = (EVENT_TRACE_PROPERTIES*)pUnit;
 
                         pp->Wnode.BufferSize = (uint)unit_size;
