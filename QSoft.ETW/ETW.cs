@@ -130,7 +130,7 @@ namespace QSoft.ETW
             System.Diagnostics.Trace.Write("=== 2. 啟動 Trace Sessions ===\n");
 
             // 啟動 Kernel 追蹤 (無額外 Stack Walking 事件需求可傳入空陣列)
-            status = StartKernelTrace(hKernelSession, pKernelProps, 0);
+            status = StartKernelTrace(out hKernelSession, pKernelProps, 0);
             if (status != ERROR_SUCCESS)
             {
                 System.Diagnostics.Trace.Write($"StartKernelTrace 失敗，錯誤代碼: {status} (是否未開管理員權限?)\n");
@@ -201,10 +201,10 @@ namespace QSoft.ETW
         [return: MarshalAs(UnmanagedType.U4)]
         internal static partial uint ControlTrace(IntPtr TraceId, string InstanceName, Span<byte> Properties, uint ControlCode);
 
+        // 修正：加上 out，才能取回 kernel session handle
         [LibraryImport("KernelTraceControl.dll", EntryPoint = "StartKernelTrace", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.U4)]
-        internal static partial uint StartKernelTrace(IntPtr TraceHandle, Span<byte> Properties, uint cStackTracingEventIds);
-
+        internal static partial uint StartKernelTrace(out IntPtr TraceHandle, Span<byte> Properties, uint cStackTracingEventIds);
         [LibraryImport("KernelTraceControl.dll", EntryPoint = "CreateMergedTraceFile", StringMarshalling = StringMarshalling.Utf16)]
         internal static partial uint CreateMergedTraceFile(
        [MarshalAs(UnmanagedType.LPWStr)] string wszMergedFileName,
