@@ -152,92 +152,74 @@ public enum EtwLogFileMode : uint
     /// <summary>ETW buffers 加入 triage dump Win8+</summary>
     AddToTriageDump         = 0x80000000,
 }
-public sealed class EtwSessionBuilder
+public sealed class SessionBuilder
 {
-    private string _sessionName      = "My Event Trace Session";
-    private string _logFilePath      = "user.etl";
-    private string _kernelLogFilePath = string.Empty;   // 空 = 不啟動 kernel trace
-    private string _mergedLogFilePath = string.Empty;   // 空 = 不合併
-    private uint   _maxFileSizeMb    = 100;
-    private EtwLogFileMode _logFileMode  = EtwLogFileMode.Sequential;
-    private EtwEnableFlags _enableFlags  = EtwEnableFlags.None;
+    internal string _sessionName      = "My Event Trace Session";
+    internal string _logFilePath      = $"{DateTime.Now:yyyyMMdd_HHmmss}.etl";
+    //internal string _kernelLogFilePath = string.Empty;   // 空 = 不啟動 kernel trace
+    //internal string _mergedLogFilePath = string.Empty;   // 空 = 不合併
+    internal uint   _maxFileSizeMb    = 100;
+    internal EtwLogFileMode _logFileMode  = EtwLogFileMode.Sequential;
+    internal EtwEnableFlags _enableFlags  = EtwEnableFlags.None;
     private int    _clientContext    = 1;  // 1=QPC, 2=SystemTime, 3=CpuCycle
 
-    public EtwSessionBuilder WithSessionName(string name)    { _sessionName = name;      return this; }
-    public EtwSessionBuilder WithLogFile(string path)        { _logFilePath = path;       return this; }
-    public EtwSessionBuilder WithMaxFileSize(uint mb)        { _maxFileSizeMb = mb;       return this; }
-    public EtwSessionBuilder WithQpcClock()                  { _clientContext = 1;        return this; }
-    public EtwSessionBuilder WithSystemTimeClock()           { _clientContext = 2;        return this; }
-    public EtwSessionBuilder WithCpuCycleClock()             { _clientContext = 3;        return this; }
+    public SessionBuilder WithSessionName(string name)    { _sessionName = name;      return this; }
+    public SessionBuilder WithLogFile(string path)        { _logFilePath = path;       return this; }
+    public SessionBuilder WithMaxFileSize(uint mb)        { _maxFileSizeMb = mb;       return this; }
+    public SessionBuilder WithQpcClock()                  { _clientContext = 1;        return this; }
+    public SessionBuilder WithSystemTimeClock()           { _clientContext = 2;        return this; }
+    public SessionBuilder WithCpuCycleClock()             { _clientContext = 3;        return this; }
 
-    /// <summary>啟用 kernel trace，ETL 寫入 <paramref name="kernelEtlPath"/>。</summary>
-    public EtwSessionBuilder WithKernelTrace(string kernelEtlPath = "kernel.etl")
-    {
-        _kernelLogFilePath = kernelEtlPath;
-        return this;
-    }
-
-    /// <summary>停止後自動合併 kernel + user ETL 至 <paramref name="mergedEtlPath"/>。</summary>
-    public EtwSessionBuilder WithMergedOutput(string mergedEtlPath = "merged.etl")
-    {
-        _mergedLogFilePath = mergedEtlPath;
-        return this;
-    }
-
-    public EtwSessionBuilder AsSystemLogger()
+    public SessionBuilder AsSystemLogger()
     {
         _logFileMode |= EtwLogFileMode.SystemLogger;
         return this;
     }
 
-    public EtwSessionBuilder WithLogFileMode(EtwLogFileMode mode) { _logFileMode = mode; return this; }
+    public SessionBuilder WithLogFileMode(EtwLogFileMode mode) { _logFileMode = mode; return this; }
 
     // ── EnableFlags 便利方法 ──────────────────────────────────────────
-    public EtwSessionBuilder TrackProcesses()        => Enable(EtwEnableFlags.Process);
-    public EtwSessionBuilder TrackProcessCounters()  => Enable(EtwEnableFlags.ProcessCounters);
-    public EtwSessionBuilder TrackThreads()          => Enable(EtwEnableFlags.Thread);
-    public EtwSessionBuilder TrackImageLoad()        => Enable(EtwEnableFlags.ImageLoad);
-    public EtwSessionBuilder TrackContextSwitches()  => Enable(EtwEnableFlags.CSwitch);
-    public EtwSessionBuilder TrackDispatcher()       => Enable(EtwEnableFlags.Dispatcher);
-    public EtwSessionBuilder TrackDpc()              => Enable(EtwEnableFlags.Dpc);
-    public EtwSessionBuilder TrackInterrupts()       => Enable(EtwEnableFlags.Interrupt);
-    public EtwSessionBuilder TrackSystemCalls()      => Enable(EtwEnableFlags.SystemCall);
-    public EtwSessionBuilder TrackDiskIo()           => Enable(EtwEnableFlags.DiskIo);
-    public EtwSessionBuilder TrackDiskFileIo()       => Enable(EtwEnableFlags.DiskIo | EtwEnableFlags.DiskFileIo);
-    public EtwSessionBuilder TrackDiskIoInit()       => Enable(EtwEnableFlags.DiskIoInit);
-    public EtwSessionBuilder TrackDriver()           => Enable(EtwEnableFlags.Driver);
-    public EtwSessionBuilder TrackFileIo()           => Enable(EtwEnableFlags.FileIo);
-    public EtwSessionBuilder TrackFileIoInit()       => Enable(EtwEnableFlags.FileIoInit);
-    public EtwSessionBuilder TrackMemoryPageFaults() => Enable(EtwEnableFlags.MemoryPageFaults);
-    public EtwSessionBuilder TrackMemoryHardFaults() => Enable(EtwEnableFlags.MemoryHardFaults);
-    public EtwSessionBuilder TrackVirtualAlloc()     => Enable(EtwEnableFlags.VirtualAlloc);
-    public EtwSessionBuilder TrackVaMap()            => Enable(EtwEnableFlags.VaMap);
-    public EtwSessionBuilder TrackNetwork()          => Enable(EtwEnableFlags.NetworkTcpIp);
-    public EtwSessionBuilder TrackRegistry()         => Enable(EtwEnableFlags.Registry);
-    public EtwSessionBuilder TrackAlpc()             => Enable(EtwEnableFlags.Alpc);
-    public EtwSessionBuilder TrackSplitIo()          => Enable(EtwEnableFlags.SplitIo);
-    public EtwSessionBuilder TrackJob()              => Enable(EtwEnableFlags.Job);
-    public EtwSessionBuilder TrackProfile()          => Enable(EtwEnableFlags.Profile);
-    public EtwSessionBuilder TrackDbgPrint()         => Enable(EtwEnableFlags.DbgPrint);
-    public EtwSessionBuilder SuppressSysConfig()     => Enable(EtwEnableFlags.NoSysConfig);
-    public EtwSessionBuilder ForwardToWmi()          => Enable(EtwEnableFlags.ForwardWmi);
-    public EtwSessionBuilder WithEnableFlags(EtwEnableFlags flags) { _enableFlags = flags; return this; }
+    public SessionBuilder TrackProcesses()        => Enable(EtwEnableFlags.Process);
+    public SessionBuilder TrackProcessCounters()  => Enable(EtwEnableFlags.ProcessCounters);
+    public SessionBuilder TrackThreads()          => Enable(EtwEnableFlags.Thread);
+    public SessionBuilder TrackImageLoad()        => Enable(EtwEnableFlags.ImageLoad);
+    public SessionBuilder TrackContextSwitches()  => Enable(EtwEnableFlags.CSwitch);
+    public SessionBuilder TrackDispatcher()       => Enable(EtwEnableFlags.Dispatcher);
+    public SessionBuilder TrackDpc()              => Enable(EtwEnableFlags.Dpc);
+    public SessionBuilder TrackInterrupts()       => Enable(EtwEnableFlags.Interrupt);
+    public SessionBuilder TrackSystemCalls()      => Enable(EtwEnableFlags.SystemCall);
+    public SessionBuilder TrackDiskIo()           => Enable(EtwEnableFlags.DiskIo);
+    public SessionBuilder TrackDiskFileIo()       => Enable(EtwEnableFlags.DiskIo | EtwEnableFlags.DiskFileIo);
+    public SessionBuilder TrackDiskIoInit()       => Enable(EtwEnableFlags.DiskIoInit);
+    public SessionBuilder TrackDriver()           => Enable(EtwEnableFlags.Driver);
+    public SessionBuilder TrackFileIo()           => Enable(EtwEnableFlags.FileIo);
+    public SessionBuilder TrackFileIoInit()       => Enable(EtwEnableFlags.FileIoInit);
+    public SessionBuilder TrackMemoryPageFaults() => Enable(EtwEnableFlags.MemoryPageFaults);
+    public SessionBuilder TrackMemoryHardFaults() => Enable(EtwEnableFlags.MemoryHardFaults);
+    public SessionBuilder TrackVirtualAlloc()     => Enable(EtwEnableFlags.VirtualAlloc);
+    public SessionBuilder TrackVaMap()            => Enable(EtwEnableFlags.VaMap);
+    public SessionBuilder TrackNetwork()          => Enable(EtwEnableFlags.NetworkTcpIp);
+    public SessionBuilder TrackRegistry()         => Enable(EtwEnableFlags.Registry);
+    public SessionBuilder TrackAlpc()             => Enable(EtwEnableFlags.Alpc);
+    public SessionBuilder TrackSplitIo()          => Enable(EtwEnableFlags.SplitIo);
+    public SessionBuilder TrackJob()              => Enable(EtwEnableFlags.Job);
+    public SessionBuilder TrackProfile()          => Enable(EtwEnableFlags.Profile);
+    public SessionBuilder TrackDbgPrint()         => Enable(EtwEnableFlags.DbgPrint);
+    public SessionBuilder SuppressSysConfig()     => Enable(EtwEnableFlags.NoSysConfig);
+    public SessionBuilder ForwardToWmi()          => Enable(EtwEnableFlags.ForwardWmi);
+    public SessionBuilder WithEnableFlags(EtwEnableFlags flags) { _enableFlags = flags; return this; }
 
     public Session Build()
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(_sessionName);
         ArgumentException.ThrowIfNullOrWhiteSpace(_logFilePath);
 
-        return new Session(
-            _sessionName,
-            _logFilePath,
-            _kernelLogFilePath,
-            _mergedLogFilePath,
+        return new Session(this,
             _maxFileSizeMb,
             _logFileMode,
             _enableFlags,
             (uint)_clientContext);
     }
 
-    private EtwSessionBuilder Enable(EtwEnableFlags flag) { _enableFlags |= flag; return this; }
+    private SessionBuilder Enable(EtwEnableFlags flag) { _enableFlags |= flag; return this; }
 }

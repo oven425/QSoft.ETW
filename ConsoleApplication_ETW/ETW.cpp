@@ -93,7 +93,7 @@ void ETW::SaveKernel()
         wprintf(L"StartKernelTrace 失敗，錯誤代碼: %lu (是否未開管理員權限?)\n", status);
         goto CLEANUP;
     }
-    wprintf(L"-> Kernel 追蹤已啟動，寫入中: \n");
+    _tprintf(_T("-> Kernel 追蹤已啟動，寫入中: \n"));
 
     // 啟動 User 追蹤
     status = StartTrace(&hUserSession, myUserSessionName, pUserProps);
@@ -101,28 +101,28 @@ void ETW::SaveKernel()
         wprintf(L"StartTrace (User) 失敗，錯誤代碼: %lu\n", status);
         goto CLEANUP;
     }
-    wprintf(L"-> User 追蹤已啟動，寫入中: \n");
+    _tprintf(_T("-> User 追蹤已啟動，寫入中: \n"));
 
     // 在這裡你可以透過 EnableTraceEx2 將你特定的 Provider GUID 掛載到 hUserSession 
     // 為了範例簡潔，此處略過特定 Provider 的掛載
 
     // -------------------------------------------------------------
-    wprintf(L"=== 3. 正在收集資料 (模擬系統運行 5 秒) ===\n");
+    _tprintf(_T("=== 3. 正在收集資料 (模擬系統運行 5 秒) ===\n"));
     Sleep(5000);
 
     // -------------------------------------------------------------
-    wprintf(L"=== 4. 停止 Sessions 以確保快取全部寫入硬碟 ===\n");
+    _tprintf(_T("=== 4. 停止 Sessions 以確保快取全部寫入硬碟 ===\n"));
 
     // 停止 Kernel 追蹤
     status = ControlTrace(hKernelSession, KERNEL_LOGGER_NAME, pKernelProps, EVENT_TRACE_CONTROL_STOP);
-    if (status == ERROR_SUCCESS) wprintf(L"-> Kernel 追蹤已成功停止並存檔。\n");
+    if (status == ERROR_SUCCESS) _tprintf(_T("-> Kernel 追蹤已成功停止並存檔。\n"));
 
     // 停止 User 追蹤
     status = ControlTrace(hUserSession, myUserSessionName, pUserProps, EVENT_TRACE_CONTROL_STOP);
-    if (status == ERROR_SUCCESS) wprintf(L"-> User 追蹤已成功停止並存檔。\n");
+    if (status == ERROR_SUCCESS) _tprintf(_T("-> User 追蹤已成功停止並存檔。\n"));
 
     // -------------------------------------------------------------
-    wprintf(L"=== 5. 合併 ETL 檔案 ===\n");
+    _tprintf(_T("=== 5. 合併 ETL 檔案 ===\n"));
     {
         // 建立要合併的來源檔案路徑陣列
         LPCWSTR traceFiles[] = { kernelEtl, userEtl };
@@ -132,12 +132,12 @@ void ETW::SaveKernel()
         status = this->m_KenerlTrace.CreateMergedTraceFile(mergedEtl, traceFiles, fileCount, EVENT_TRACE_MERGE_EXTENDED_DATA_DEFAULT);
 
         if (status == ERROR_SUCCESS) {
-            wprintf(L"🎉 恭喜！合併成功！\n");
-            wprintf(L"最終成品檔案位於: %ls\n", mergedEtl);
-            wprintf(L"您現在可以直接將此檔案拖入 Windows Performance Analyzer (WPA) 進行分析。\n");
+            _tprintf(_T("🎉 恭喜！合併成功！\n"));
+            _tprintf(_T("最終成品檔案位於: %ls\n"), mergedEtl);
+            _tprintf(_T("您現在可以直接將此檔案拖入 Windows Performance Analyzer (WPA) 進行分析。\n"));
         }
         else {
-            wprintf(L"CreateMergedTraceFile 失敗，錯誤代碼: %lu\n", status);
+            _tprintf(_T("CreateMergedTraceFile 失敗，錯誤代碼: %lu\n"), status);
         }
     }
 

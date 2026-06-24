@@ -12,15 +12,13 @@ namespace QSoft.ETW;
 /// </list>
 /// </summary>
 public sealed class Session(
-    string   sessionName,
-    string   userLogFilePath,
-    string   kernelLogFilePath,   // 空字串 = 不啟動 kernel trace
-    string   mergedLogFilePath,   // 空字串 = 不合併
+    SessionBuilder builder,
     uint     maxFileSizeMb,
     EtwLogFileMode logFileMode,
     EtwEnableFlags enableFlags,
     uint     clientContext) : IDisposable
 {
+    
     // ── Win32 constants ───────────────────────────────────────────────
     private const uint WnodeFlagTracedGuid      = 0x00020000;
     private const uint ControlStop              = 1;
@@ -41,17 +39,16 @@ public sealed class Session(
     private bool    _disposed;
 
     // ── Public properties ─────────────────────────────────────────────
-    public string         SessionName       => sessionName;
-    public string         UserLogFilePath   => userLogFilePath;
-    public string         KernelLogFilePath => kernelLogFilePath;
-    public string         MergedLogFilePath => mergedLogFilePath;
+    public string UserLogFilePath => $"user_{builder._logFilePath}";
+    public string KernelLogFilePath => $"kernel_{builder._logFilePath}";
+    public string MergedLogFilePath => builder._logFilePath;
     public EtwLogFileMode LogFileMode       => logFileMode;
     public EtwEnableFlags EnableFlags       => enableFlags;
     public bool           IsUserRunning     => _userHandle   != IntPtr.Zero;
     public bool           IsKernelRunning   => _kernelHandle != IntPtr.Zero;
     public bool           IsRunning         => IsUserRunning || IsKernelRunning;
-    public bool           HasKernelTrace    => !string.IsNullOrEmpty(kernelLogFilePath);
-    public bool           WillMerge         => !string.IsNullOrEmpty(mergedLogFilePath);
+    //public bool           HasKernelTrace    => !string.IsNullOrEmpty(kernelLogFilePath);
+    //public bool           WillMerge         => !string.IsNullOrEmpty(mergedLogFilePath);
 
     // ── Public operations ─────────────────────────────────────────────
 
@@ -65,18 +62,18 @@ public sealed class Session(
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (IsRunning) return ErrorSuccess;   // 冪等
 
-        // ── Step 1：Kernel trace ──────────────────────────────────────
-        if (HasKernelTrace)
-        {
-            _kernelBuffer = BuildKernelBuffer();
+        //// ── Step 1：Kernel trace ──────────────────────────────────────
+        ////if (HasKernelTrace)
+        //{
+        //    _kernelBuffer = BuildKernelBuffer();
 
-            var kHr = ETW.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
-            if (kHr != ErrorSuccess)
-            {
-                _kernelHandle = IntPtr.Zero;
-                return kHr;               // kernel 失敗直接回傳，不繼續
-            }
-        }
+        //    var kHr = ETW.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
+        //    if (kHr != ErrorSuccess)
+        //    {
+        //        _kernelHandle = IntPtr.Zero;
+        //        return kHr;               // kernel 失敗直接回傳，不繼續
+        //    }
+        //}
 
         // ── Step 2：User trace ────────────────────────────────────────
         _userBuffer = BuildUserBuffer();
@@ -85,7 +82,7 @@ public sealed class Session(
         ref var props = ref MemoryMarshal.AsRef<EVENT_TRACE_PROPERTIES>(_userBuffer.AsSpan());
         props.Wnode.Guid = Guid.NewGuid();
 
-        var hr = ETW.StartTrace(out _userHandle, sessionName, _userBuffer);
+        var hr = ETW.StartTrace(out _userHandle, builder._sessionName, _userBuffer);
         if (hr != ErrorSuccess)
         {
             _userHandle = IntPtr.Zero;
@@ -102,11 +99,11 @@ public sealed class Session(
     {
         uint hr = ErrorSuccess;
 
-        if (StopKernel() is var kHr && kHr != ErrorSuccess) hr = kHr;
+        //if (StopKernel() is var kHr && kHr != ErrorSuccess) hr = kHr;
         if (StopUser()   is var uHr && uHr != ErrorSuccess) hr = uHr;
 
         // ── Step 3：Merge ETL ─────────────────────────────────────────
-        if (!IsRunning && WillMerge)
+        //if (!IsRunning && WillMerge)
             if (MergeEtlFiles() is var mHr && mHr != ErrorSuccess) hr = mHr;
 
         return hr;
@@ -118,15 +115,17 @@ public sealed class Session(
     /// </summary>
     public uint MergeEtlFiles()
     {
-        if (!WillMerge) return ErrorSuccess;
+        //if (!WillMerge) return ErrorSuccess;
 
         // kernel 排第一：WPA 需要 kernel metadata 在前以正確解析符號
-        string[] sources = HasKernelTrace
-            ? [kernelLogFilePath, userLogFilePath]
-            : [userLogFilePath];
+        //string[] sources = HasKernelTrace
+        //    ? [kernelLogFilePath, userLogFilePath]
+        //    : [userLogFilePath];
+
+        var sources = new string[] {this.KernelLogFilePath, this.UserLogFilePath };
 
         return ETW.CreateMergedTraceFile(
-            mergedLogFilePath,
+            this.MergedLogFilePath,
             sources,
             (uint)sources.Length,
             MergeExtendedDataDefault);
@@ -156,8 +155,8 @@ public sealed class Session(
     private uint StopUser()
     {
         if (!IsUserRunning) return ErrorSuccess;
-        _userBuffer ??= BuildUserBuffer();
-        var hr = ETW.ControlTrace(_userHandle, sessionName, _userBuffer, ControlStop);
+        //_userBuffer ??= BuildUserBuffer();
+        var hr = ETW.ControlTrace(_userHandle, builder._sessionName, _userBuffer, ControlStop);
         if (hr is ErrorSuccess or ErrorAlreadyStopped) _userHandle = IntPtr.Zero;
         return hr is ErrorAlreadyStopped ? ErrorSuccess : hr;
     }
@@ -170,7 +169,7 @@ public sealed class Session(
     /// </summary>
     private byte[] BuildKernelBuffer()
     {
-        var fileNameBuf = Encoding.Unicode.GetBytes(kernelLogFilePath);
+        var fileNameBuf = Encoding.Unicode.GetBytes(this.KernelLogFilePath);
         var sessionBuf  = Encoding.Unicode.GetBytes(KernelLoggerName);
 
         int szProps   = Marshal.SizeOf<EVENT_TRACE_PROPERTIES>();
@@ -206,8 +205,8 @@ public sealed class Session(
     /// </summary>
     private byte[] BuildUserBuffer()
     {
-        var fileNameBuf = Encoding.Unicode.GetBytes(userLogFilePath);
-        var sessionBuf  = Encoding.Unicode.GetBytes(sessionName);
+        var fileNameBuf = Encoding.Unicode.GetBytes(this.UserLogFilePath);
+        var sessionBuf  = Encoding.Unicode.GetBytes(builder._sessionName);
 
         int szProps   = Marshal.SizeOf<EVENT_TRACE_PROPERTIES>();
         int szSession = sessionBuf.Length  + 2;
