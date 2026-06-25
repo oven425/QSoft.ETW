@@ -14,7 +14,6 @@ namespace QSoft.ETW;
 public sealed class Session(
     SessionBuilder builder,
     uint     maxFileSizeMb,
-    EtwLogFileMode logFileMode,
     EtwEnableFlags enableFlags,
     uint     clientContext) : IDisposable
 {
@@ -42,13 +41,11 @@ public sealed class Session(
     public string UserLogFilePath => $"user_{builder._logFilePath}";
     public string KernelLogFilePath => $"kernel_{builder._logFilePath}";
     public string MergedLogFilePath => builder._logFilePath;
-    public EtwLogFileMode LogFileMode       => logFileMode;
+    public EtwLogFileMode LogFileMode       => builder._logFileMode;
     public EtwEnableFlags EnableFlags       => enableFlags;
     public bool           IsUserRunning     => _userHandle   != IntPtr.Zero;
     public bool           IsKernelRunning   => _kernelHandle != IntPtr.Zero;
     public bool           IsRunning         => IsUserRunning || IsKernelRunning;
-    //public bool           HasKernelTrace    => !string.IsNullOrEmpty(kernelLogFilePath);
-    //public bool           WillMerge         => !string.IsNullOrEmpty(mergedLogFilePath);
 
     // ── Public operations ─────────────────────────────────────────────
 
@@ -62,18 +59,18 @@ public sealed class Session(
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (IsRunning) return ErrorSuccess;   // 冪等
 
-        //// ── Step 1：Kernel trace ──────────────────────────────────────
-        ////if (HasKernelTrace)
-        //{
-        //    _kernelBuffer = BuildKernelBuffer();
+        // ── Step 1：Kernel trace ──────────────────────────────────────
+        //if (HasKernelTrace)
+        {
+            _kernelBuffer = BuildKernelBuffer();
 
-        //    var kHr = ETW.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
-        //    if (kHr != ErrorSuccess)
-        //    {
-        //        _kernelHandle = IntPtr.Zero;
-        //        return kHr;               // kernel 失敗直接回傳，不繼續
-        //    }
-        //}
+            var kHr = ETW.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
+            if (kHr != ErrorSuccess)
+            {
+                _kernelHandle = IntPtr.Zero;
+                return kHr;               // kernel 失敗直接回傳，不繼續
+            }
+        }
 
         // ── Step 2：User trace ────────────────────────────────────────
         _userBuffer = BuildUserBuffer();
@@ -99,7 +96,7 @@ public sealed class Session(
     {
         uint hr = ErrorSuccess;
 
-        //if (StopKernel() is var kHr && kHr != ErrorSuccess) hr = kHr;
+        if (StopKernel() is var kHr && kHr != ErrorSuccess) hr = kHr;
         if (StopUser()   is var uHr && uHr != ErrorSuccess) hr = uHr;
 
         // ── Step 3：Merge ETL ─────────────────────────────────────────
@@ -155,7 +152,7 @@ public sealed class Session(
     private uint StopUser()
     {
         if (!IsUserRunning) return ErrorSuccess;
-        //_userBuffer ??= BuildUserBuffer();
+        _userBuffer ??= BuildUserBuffer();
         var hr = ETW.ControlTrace(_userHandle, builder._sessionName, _userBuffer, ControlStop);
         if (hr is ErrorSuccess or ErrorAlreadyStopped) _userHandle = IntPtr.Zero;
         return hr is ErrorAlreadyStopped ? ErrorSuccess : hr;
@@ -187,7 +184,7 @@ public sealed class Session(
                 ClientContext = clientContext,
                 Guid          = SystemTraceControlGuid,  // kernel trace 強制規定
             },
-            LogFileMode       = (uint)logFileMode,
+            LogFileMode       = (uint)this.LogFileMode,
             MaximumFileSize   = maxFileSizeMb,
             EnableFlags       = (uint)enableFlags,   // 指定要收集的 kernel 事件種類
             LoggerNameOffset  = (uint)szProps,
@@ -223,7 +220,7 @@ public sealed class Session(
                 ClientContext = clientContext,
                 // Guid: written via ref in Start()
             },
-            LogFileMode       = (uint)logFileMode,
+            LogFileMode       = (uint)this.LogFileMode,
             MaximumFileSize   = maxFileSizeMb,
             // EnableFlags: user session 透過 EnableTraceEx2 掛載 provider，不在這裡設定
             LoggerNameOffset  = (uint)szProps,

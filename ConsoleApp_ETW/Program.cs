@@ -12,8 +12,16 @@ Console.WriteLine("Hello, World!");
 
 //etw.Open("test.etl");
 
+//var allreace = ETW.QueryAllTraces();
+//allreace.Where(x => x.SessionName.Contains("My")).Stop();
+
 
 var builder = new SessionBuilder()
+    .AsSystemLogger()
+    .TrackContextSwitches()
+    .TrackDiskFileIo()
+    .TrackFileIo()
+    .TrackImageLoad()
     .WithLogFile("123.etl");
 
 var session = builder.Build();
