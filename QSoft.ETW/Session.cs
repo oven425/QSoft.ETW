@@ -173,7 +173,7 @@ public sealed class Session(
         int szSession = sessionBuf.Length  + 2;
         int szFile    = fileNameBuf.Length + 2;
         int total     = szProps + szSession + szFile;
-
+        total = total+819200;
         var buf = new byte[total];
         MemoryMarshal.Write(buf, new EVENT_TRACE_PROPERTIES
         {
@@ -182,11 +182,11 @@ public sealed class Session(
                 BufferSize    = (uint)total,
                 Flags         = WnodeFlagTracedGuid,
                 ClientContext = clientContext,
-                Guid          = SystemTraceControlGuid,  // kernel trace 強制規定
+                Guid          = SystemTraceControlGuid,
             },
             LogFileMode       = (uint)this.LogFileMode,
             MaximumFileSize   = maxFileSizeMb,
-            EnableFlags       = (uint)enableFlags,   // 指定要收集的 kernel 事件種類
+            EnableFlags       = (uint)enableFlags,
             LoggerNameOffset  = (uint)szProps,
             LogFileNameOffset = (uint)(szProps + szSession),
         });

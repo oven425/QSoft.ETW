@@ -10,6 +10,9 @@
 
 static const GUID SessionGuid =
 { 0xae44cb98, 0xbd11, 0x4069, { 0x80, 0x93, 0x77, 0xe, 0xc9, 0x25, 0x8a, 0x12 } };
+static const GUID SystemTraceControlGuid = 
+{ 0x9e814aad, 0x3204, 0x11d2, {0x9a, 0x82, 0x00, 0x60, 0x08, 0xa8, 0x69, 0x39} };
+
 
 // {D8909C24-5BE9-4502-98CA-AB7BDC24899D}
 static const GUID ProviderGuid =
@@ -57,7 +60,7 @@ void ETW::SaveKernel()
     wprintf(L"=== 1. 配置 ETW 屬性緩衝區 ===\n");
     // Kernel 固定綁定 KERNEL_LOGGER_NAME
     PEVENT_TRACE_PROPERTIES pKernelProps = AllocateTraceProperties(kernelEtl, KERNEL_LOGGER_NAME);
-    pKernelProps->Wnode.Guid = SessionGuid;
+    pKernelProps->Wnode.Guid = SystemTraceControlGuid;
     
     // 加入所有可用的 Kernel Trace Flags
     pKernelProps->EnableFlags = 
