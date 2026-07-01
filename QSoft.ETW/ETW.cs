@@ -202,9 +202,12 @@ namespace QSoft.ETW
         internal static partial uint ControlTrace(IntPtr TraceId, string InstanceName, Span<byte> Properties, uint ControlCode);
 
         // 修正：加上 out，才能取回 kernel session handle
+        // 注意：第 4 參數 pStackTracingEventIds 必須宣告，否則 x64 的 R9 含垃圾值
+        //       當 cStackTracingEventIds == 0 && pStackTracingEventIds != NULL 時，
+        //       原生函式回傳 ERROR_INVALID_PARAMETER (87)
         [LibraryImport("KernelTraceControl.dll", EntryPoint = "StartKernelTrace", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.U4)]
-        internal static partial uint StartKernelTrace(out IntPtr TraceHandle, Span<byte> Properties, uint cStackTracingEventIds);
+        internal static partial uint StartKernelTrace(out IntPtr TraceHandle, Span<byte> Properties, uint cStackTracingEventIds, IntPtr pStackTracingEventIds = default);
         [LibraryImport("KernelTraceControl.dll", EntryPoint = "CreateMergedTraceFile", StringMarshalling = StringMarshalling.Utf16)]
         internal static partial uint CreateMergedTraceFile(
         [MarshalAs(UnmanagedType.LPWStr)] string wszMergedFileName,

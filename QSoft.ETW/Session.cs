@@ -14,7 +14,6 @@ namespace QSoft.ETW;
 public sealed class Session(
     SessionBuilder builder,
     uint     maxFileSizeMb,
-    EtwEnableFlags enableFlags,
     uint     clientContext) : IDisposable
 {
     
@@ -42,7 +41,7 @@ public sealed class Session(
     public string KernelLogFilePath => $"kernel_{builder._logFilePath}";
     public string MergedLogFilePath => builder._logFilePath;
     public EtwLogFileMode LogFileMode       => builder._logFileMode;
-    public EtwEnableFlags EnableFlags       => enableFlags;
+    public EtwEnableFlags EnableFlags       => builder._enableFlags;
     public bool           IsUserRunning     => _userHandle   != IntPtr.Zero;
     public bool           IsKernelRunning   => _kernelHandle != IntPtr.Zero;
     public bool           IsRunning         => IsUserRunning || IsKernelRunning;
@@ -77,7 +76,7 @@ public sealed class Session(
 
         // Guid 在 buffer 建立後透過 ref 直接寫入（不重建整個 buffer）
         ref var props = ref MemoryMarshal.AsRef<EVENT_TRACE_PROPERTIES>(_userBuffer.AsSpan());
-        props.Wnode.Guid = Guid.NewGuid();
+        //props.Wnode.Guid = Guid.NewGuid();
 
         var hr = ETW.StartTrace(out _userHandle, builder._sessionName, _userBuffer);
         if (hr != ErrorSuccess)
@@ -173,23 +172,24 @@ public sealed class Session(
         int szSession = sessionBuf.Length  + 2;
         int szFile    = fileNameBuf.Length + 2;
         int total     = szProps + szSession + szFile;
-        total = total+819200;
-        var buf = new byte[total];
-        MemoryMarshal.Write(buf, new EVENT_TRACE_PROPERTIES
+        var ppe = new EVENT_TRACE_PROPERTIES
         {
             Wnode = new WNODE_HEADER
             {
-                BufferSize    = (uint)total,
-                Flags         = WnodeFlagTracedGuid,
+                BufferSize = (uint)total,
+                Flags = WnodeFlagTracedGuid,
                 ClientContext = clientContext,
-                Guid          = SystemTraceControlGuid,
+                Guid = SystemTraceControlGuid,
             },
-            LogFileMode       = (uint)this.LogFileMode,
-            MaximumFileSize   = maxFileSizeMb,
-            EnableFlags       = (uint)enableFlags,
-            LoggerNameOffset  = (uint)szProps,
+            BufferSize = 64,   // per-trace-buffer size in KB（對應 C++ pSessionProperties->BufferSize = 64）
+            LogFileMode = (uint)(this.LogFileMode | EtwLogFileMode.SystemLogger),
+            MaximumFileSize = maxFileSizeMb,
+            EnableFlags = (uint)builder._enableFlags,
+            LoggerNameOffset = (uint)szProps,
             LogFileNameOffset = (uint)(szProps + szSession),
-        });
+        };
+        var buf = new byte[total];
+        MemoryMarshal.Write(buf, ppe);
 
         sessionBuf.CopyTo(buf.AsSpan(szProps));
         fileNameBuf.CopyTo(buf.AsSpan(szProps + szSession));

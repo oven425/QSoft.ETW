@@ -23,7 +23,7 @@ EVENT_TRACE_PROPERTIES* AllocateTraceProperties(const TCHAR* logFilePath, const 
 	auto filelen = ::_tcslen(logFilePath);
     auto sessionlen = ::_tcslen(sessionName);
     auto BufferSize = sizeof(EVENT_TRACE_PROPERTIES) + (filelen + 1) * sizeof(TCHAR) + (sessionlen + 1) * sizeof(TCHAR);
-    BufferSize = BufferSize + 81920000;
+    //BufferSize = BufferSize + 81920000;
     auto pSessionProperties = (EVENT_TRACE_PROPERTIES*)malloc(BufferSize);
     ZeroMemory(pSessionProperties, BufferSize);
     
@@ -32,10 +32,10 @@ EVENT_TRACE_PROPERTIES* AllocateTraceProperties(const TCHAR* logFilePath, const 
     pSessionProperties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
     pSessionProperties->Wnode.ClientContext = 1; // QPC clock resolution
     pSessionProperties->LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL | EVENT_TRACE_SYSTEM_LOGGER_MODE;
-    pSessionProperties->MaximumFileSize = 1024; // MB
+    pSessionProperties->MaximumFileSize = 128;
     pSessionProperties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
     pSessionProperties->LogFileNameOffset = sizeof(EVENT_TRACE_PROPERTIES) + (sessionlen + 1) * sizeof(TCHAR);
-    
+    pSessionProperties->BufferSize = 64;
     // 複製名稱
     StringCbCopy((LPWSTR)((char*)pSessionProperties + pSessionProperties->LoggerNameOffset), 
                  (sessionlen + 1) * sizeof(TCHAR), sessionName);
@@ -57,7 +57,7 @@ void ETW::SaveKernel()
     TRACEHANDLE hUserSession = 0;
     ULONG status = ERROR_SUCCESS;
 
-    wprintf(L"=== 1. 配置 ETW 屬性緩衝區 ===\n");
+    _tprintf(_T("=== 1. 配置 ETW 屬性緩衝區 ===\n"));
     // Kernel 固定綁定 KERNEL_LOGGER_NAME
     PEVENT_TRACE_PROPERTIES pKernelProps = AllocateTraceProperties(kernelEtl, KERNEL_LOGGER_NAME);
     pKernelProps->Wnode.Guid = SystemTraceControlGuid;
@@ -101,7 +101,7 @@ void ETW::SaveKernel()
     // 啟動 User 追蹤
     status = StartTrace(&hUserSession, myUserSessionName, pUserProps);
     if (status != ERROR_SUCCESS) {
-        wprintf(L"StartTrace (User) 失敗，錯誤代碼: %lu\n", status);
+        _tprintf(_T("StartTrace (User) 失敗，錯誤代碼: %lu\n"), status);
         goto CLEANUP;
     }
     _tprintf(_T("-> User 追蹤已啟動，寫入中: \n"));
@@ -176,7 +176,7 @@ void ETW::Save(const TCHAR* filename)
     pSessionProperties = (EVENT_TRACE_PROPERTIES*)malloc(BufferSize);
     if (NULL == pSessionProperties)
     {
-        wprintf(L"Unable to allocate %d bytes for properties structure.\n", BufferSize);
+        _tprintf(_T("Unable to allocate %d bytes for properties structure.\n"), BufferSize);
         goto cleanup;
     }
 
@@ -201,7 +201,7 @@ void ETW::Save(const TCHAR* filename)
     status = StartTrace((PTRACEHANDLE)&SessionHandle, LOGSESSION_NAME, pSessionProperties);
     if (ERROR_SUCCESS != status)
     {
-        wprintf(L"StartTrace() failed with %lu\n", status);
+        _tprintf(_T("StartTrace() failed with %lu\n"), status);
         goto cleanup;
     }
 
@@ -223,7 +223,7 @@ void ETW::Save(const TCHAR* filename)
     //    goto cleanup;
     //}
 
-    wprintf(L"wait 10 second.\n");
+    _tprintf(_T("wait 10 second.\n"));
     ::Sleep(10000);
 
 cleanup:
@@ -248,7 +248,7 @@ cleanup:
 
         if (ERROR_SUCCESS != status)
         {
-            wprintf(L"ControlTrace(stop) failed with %lu\n", status);
+            _tprintf(_T("ControlTrace(stop) failed with %lu\n"), status);
         }
         //CreateMergeFile();
     }
