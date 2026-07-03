@@ -39,7 +39,8 @@ public sealed class Session(
 
     // ── Public properties ─────────────────────────────────────────────
     public string UserLogFilePath => $"user_{builder._logFilePath}";
-    public string KernelLogFilePath => $"kernel_{builder._logFilePath}";
+    //public string KernelLogFilePath => $"kernel_{builder._logFilePath}";
+    public string KernelLogFilePath => $"kernel.etl";
     public string MergedLogFilePath => builder._logFilePath;
     public EtwLogFileMode LogFileMode       => builder._logFileMode;
     public EtwEnableFlags EnableFlags       => enableFlags;
@@ -48,7 +49,7 @@ public sealed class Session(
     public bool           IsRunning         => IsUserRunning || IsKernelRunning;
 
     // ── Public operations ─────────────────────────────────────────────
-
+    KernelTrace m_KernelTrace = new KernelTrace();
     /// <summary>
     /// 依序啟動 kernel trace（若有設定）與 user trace。
     /// </summary>
@@ -63,8 +64,11 @@ public sealed class Session(
         //if (HasKernelTrace)
         {
             _kernelBuffer = BuildKernelBuffer();
-
+            File.WriteAllBytes("kernelps", _kernelBuffer);
+            var dddd = MemoryMarshal.AsRef<EVENT_TRACE_PROPERTIES>(_kernelBuffer);
+            //var kHr = m_KernelTrace.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
             var kHr = ETW.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
+            var err = Marshal.GetLastWin32Error();
             if (kHr != ErrorSuccess)
             {
                 _kernelHandle = IntPtr.Zero;
@@ -168,12 +172,14 @@ public sealed class Session(
     {
         var fileNameBuf = Encoding.Unicode.GetBytes(this.KernelLogFilePath);
         var sessionBuf  = Encoding.Unicode.GetBytes(KernelLoggerName);
-
+        //const TCHAR* kernelEtl = _T("kernel.etl");
+        //const TCHAR* userEtl = _T("user.etl");
+        //const TCHAR* mergedEtl = _T("merged.etl");
         int szProps   = Marshal.SizeOf<EVENT_TRACE_PROPERTIES>();
         int szSession = sessionBuf.Length  + 2;
         int szFile    = fileNameBuf.Length + 2;
         int total     = szProps + szSession + szFile;
-        total = total+819200;
+
         var buf = new byte[total];
         MemoryMarshal.Write(buf, new EVENT_TRACE_PROPERTIES
         {

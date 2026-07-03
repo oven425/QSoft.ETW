@@ -7,7 +7,7 @@ int main()
 {
     ETW etw;
     etw.CurrentTraces();
-    etw.AllProviders();
+    //etw.AllProviders();
     //etw.Save();
     etw.SaveKernel();
     //etw.Open();

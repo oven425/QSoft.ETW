@@ -23,7 +23,7 @@ EVENT_TRACE_PROPERTIES* AllocateTraceProperties(const TCHAR* logFilePath, const 
 	auto filelen = ::_tcslen(logFilePath);
     auto sessionlen = ::_tcslen(sessionName);
     auto BufferSize = sizeof(EVENT_TRACE_PROPERTIES) + (filelen + 1) * sizeof(TCHAR) + (sessionlen + 1) * sizeof(TCHAR);
-    BufferSize = BufferSize + 81920000;
+    //BufferSize = BufferSize + 81920000;
     auto pSessionProperties = (EVENT_TRACE_PROPERTIES*)malloc(BufferSize);
     ZeroMemory(pSessionProperties, BufferSize);
     
@@ -89,9 +89,21 @@ void ETW::SaveKernel()
 
     // -------------------------------------------------------------
     _tprintf(_T("=== 2. 啟動 Trace Sessions ===\n"));
+    //auto fs = ::fopen("kernelps", "wb");
+    //::fwrite(pKernelProps, 1, pKernelProps->Wnode.BufferSize, fs);
+    //::fclose(fs);
 
+
+    auto fs = ::fopen("kernelps", "rb");
+    fseek(fs, 0, SEEK_END);
+    auto len = ftell(fs);
+    fseek(fs, 0, SEEK_SET);
+    std::vector<unsigned char> bbuf(len);
+    ::fread(&bbuf[0], 1, len, fs);
+    ::fclose(fs);
+    PEVENT_TRACE_PROPERTIES k1 = (PEVENT_TRACE_PROPERTIES)&bbuf[0];
     // 啟動 Kernel 追蹤 (無額外 Stack Walking 事件需求可傳入空陣列)
-    status = this->m_KenerlTrace.StartKernelTrace(&hKernelSession, pKernelProps, 0);
+    status = this->m_KenerlTrace.StartKernelTrace(&hKernelSession, k1, 0);
     if (status != ERROR_SUCCESS) {
         wprintf(L"StartKernelTrace 失敗，錯誤代碼: %lu (是否未開管理員權限?)\n", status);
         goto CLEANUP;
@@ -365,7 +377,7 @@ void ETW::CurrentTraces()
             {
                 TCHAR sessionGuid[50];
                 (void)StringFromGUID2(sessions[i]->Wnode.Guid, sessionGuid, _countof(sessionGuid));
-
+                
                 wprintf(
                     _T("Session GUID: %ls\n"
                     "Session ID: %llu\n"

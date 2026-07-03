@@ -12,8 +12,8 @@ Console.WriteLine("Hello, World!");
 
 //etw.Open("test.etl");
 
-//var allreace = ETW.QueryAllTraces();
-//allreace.Where(x => x.SessionName.Contains("My")).Stop();
+var allreace = ETW.QueryAllTraces();
+allreace.Where(x => x.SessionName.Contains("My")).Stop();
 
 
 var builder = new SessionBuilder()

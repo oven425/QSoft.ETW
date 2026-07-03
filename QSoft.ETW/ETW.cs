@@ -204,7 +204,7 @@ namespace QSoft.ETW
         // 修正：加上 out，才能取回 kernel session handle
         [LibraryImport("KernelTraceControl.dll", EntryPoint = "StartKernelTrace", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.U4)]
-        internal static partial uint StartKernelTrace(out IntPtr TraceHandle, Span<byte> Properties, uint cStackTracingEventIds);
+        internal static partial uint StartKernelTrace(out IntPtr TraceHandle, byte[] Properties, uint cStackTracingEventIds);
         [LibraryImport("KernelTraceControl.dll", EntryPoint = "CreateMergedTraceFile", StringMarshalling = StringMarshalling.Utf16)]
         internal static partial uint CreateMergedTraceFile(
         [MarshalAs(UnmanagedType.LPWStr)] string wszMergedFileName,
