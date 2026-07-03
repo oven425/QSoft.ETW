@@ -216,7 +216,6 @@ public sealed class SessionBuilder
 
         return new Session(this,
             _maxFileSizeMb,
-            _enableFlags,
             (uint)_clientContext);
     }
 
