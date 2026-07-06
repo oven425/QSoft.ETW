@@ -1,6 +1,12 @@
 ﻿using System.Runtime.InteropServices;
 using System.Security.Principal;
 
+if (args.Length > 0 && string.Equals(args[0], "listproviders", StringComparison.OrdinalIgnoreCase))
+{
+    PrintRegisteredProviders();
+    return 0;
+}
+
 int durationSeconds = 10;
 if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSeconds > 0)
 {
@@ -45,11 +51,13 @@ unsafe
             if (userHandle != 0 && userProps is { IsInvalid: false })
             {
                 _ = NativeMethods.ControlTraceW(userHandle, null, userProps.Pointer, EtwConstants.EVENT_TRACE_CONTROL_STOP);
+                ReportTraceStatistics("User", userProps.Pointer);
             }
 
             if (kernelHandle != 0 && kernelProps is { IsInvalid: false })
             {
                 _ = NativeMethods.ControlTraceW(kernelHandle, null, kernelProps.Pointer, EtwConstants.EVENT_TRACE_CONTROL_STOP);
+                ReportTraceStatistics("Kernel", kernelProps.Pointer);
             }
 
             userProps?.Dispose();
@@ -89,7 +97,66 @@ static void ThrowIfError(int win32Error, string apiName)
     }
 }
 
-static unsafe EventTracePropertiesHandle AllocateProperties(string sessionName, string logFileName, Guid wnodeGuid, uint logFileMode, uint enableFlags)
+static void ThrowIfFalse(bool succeeded, string apiName)
+{
+    if (!succeeded)
+    {
+        int win32Error = Marshal.GetLastPInvokeError();
+        throw new InvalidOperationException($"{apiName} 失敗，Win32 錯誤碼 {win32Error} (0x{win32Error:X}).");
+    }
+}
+
+static void EnablePrivilege(string privilegeName)
+{
+    // 部分 Kernel Trace Flags（例如 EVENT_TRACE_FLAG_PROFILE）需要呼叫端權束啟用對應的
+    // 特殊權限。即使以系統管理員身份執行，權束預設仍會停用大部分特殊權限，
+    // 必須明確透過 AdjustTokenPrivileges 啟用，否則 StartKernelTrace 會回傳
+    // ERROR_PRIVILEGE_NOT_HELD (1314)。
+    ThrowIfFalse(
+        NativeMethods.OpenProcessToken(
+            NativeMethods.GetCurrentProcess(),
+            EtwConstants.TOKEN_ADJUST_PRIVILEGES | EtwConstants.TOKEN_QUERY,
+            out nint tokenHandle),
+        nameof(NativeMethods.OpenProcessToken));
+
+    try
+    {
+        ThrowIfFalse(
+            NativeMethods.LookupPrivilegeValueW(null, privilegeName, out LUID luid),
+            nameof(NativeMethods.LookupPrivilegeValueW));
+
+        var tokenPrivileges = new TOKEN_PRIVILEGES
+        {
+            PrivilegeCount = 1,
+            Luid = luid,
+            Attributes = EtwConstants.SE_PRIVILEGE_ENABLED,
+        };
+
+        bool adjusted = NativeMethods.AdjustTokenPrivileges(tokenHandle, false, ref tokenPrivileges, 0, 0, 0);
+        int lastError = Marshal.GetLastPInvokeError();
+        if (!adjusted || lastError == EtwConstants.ERROR_NOT_ALL_ASSIGNED)
+        {
+            throw new InvalidOperationException(
+                $"啟用權限 \"{privilegeName}\" 失敗，Win32 錯誤碼 {lastError} (0x{lastError:X})，請確認已使用系統管理員身份執行。");
+        }
+    }
+    finally
+    {
+        _ = NativeMethods.CloseHandle(tokenHandle);
+    }
+}
+
+static (uint MinimumBuffers, uint MaximumBuffers) GetRecommendedBufferCounts()
+{
+    // 依處理器數量估算合理的緩衝區數量下限/上限，避免高頻 Kernel 旗標（CSWITCH/DPC/
+    // INTERRUPT/SYSTEMCALL/DISK_IO 等）在系統負載高時因緩衝區不足而遺失事件。
+    int processorCount = Math.Max(Environment.ProcessorCount, 1);
+    uint minimumBuffers = (uint)(processorCount * 4);
+    uint maximumBuffers = minimumBuffers * 4;
+    return (minimumBuffers, maximumBuffers);
+}
+
+static unsafe EventTracePropertiesHandle AllocateProperties(string sessionName, string logFileName, Guid wnodeGuid, uint logFileMode, uint enableFlags, uint minimumBuffers, uint maximumBuffers)
 {
     int propsSize = sizeof(EVENT_TRACE_PROPERTIES);
     int loggerNameBytes = (sessionName.Length + 1) * sizeof(char);
@@ -104,6 +171,8 @@ static unsafe EventTracePropertiesHandle AllocateProperties(string sessionName, 
     props->Wnode.ClientContext = 1; // QPC 時間戳記解析度
     props->Wnode.Flags = EtwConstants.WNODE_FLAG_TRACED_GUID;
     props->BufferSize = EtwConstants.DefaultBufferSizeKb; // 每個緩衝區大小 (KB)；未設定時為 0，不符合最小需求
+    //props->MinimumBuffers = minimumBuffers;
+    //props->MaximumBuffers = maximumBuffers;
     props->LogFileMode = logFileMode;
     props->EnableFlags = enableFlags;
     props->LoggerNameOffset = (uint)propsSize;
@@ -124,8 +193,25 @@ static unsafe void StopExistingSession(string sessionName, EVENT_TRACE_PROPERTIE
     _ = NativeMethods.ControlTraceW(0, sessionName, props, EtwConstants.EVENT_TRACE_CONTROL_STOP);
 }
 
+static unsafe void ReportTraceStatistics(string label, EVENT_TRACE_PROPERTIES* props)
+{
+    Console.WriteLine(
+        $"[{label}] BuffersWritten={props->BuffersWritten}, EventsLost={props->EventsLost}, LogBuffersLost={props->LogBuffersLost}, RealTimeBuffersLost={props->RealTimeBuffersLost}");
+
+    if (props->EventsLost > 0 || props->LogBuffersLost > 0 || props->RealTimeBuffersLost > 0)
+    {
+        Console.Error.WriteLine(
+            $"警告：[{label}] Session 偵測到事件遺失（EventsLost={props->EventsLost}, LogBuffersLost={props->LogBuffersLost}, RealTimeBuffersLost={props->RealTimeBuffersLost}），" +
+            "本次蒐集到的資料可能不完整；遺失的事件無法復原，此為偵測結果，若持續發生請考慮加大 Buffer 設定或減少啟用的旗標/Provider。");
+    }
+}
+
 static unsafe EventTracePropertiesHandle StartKernelTrace(string logFileName, out ulong sessionHandle)
 {
+    // EnableFlags 包含 EVENT_TRACE_FLAG_PROFILE（取樣式效能分析），需要
+    // SeSystemProfilePrivilege，必須在啟動前先啟用。
+    EnablePrivilege(EtwConstants.SE_SYSTEM_PROFILE_NAME);
+
     const uint enableFlags =
         EtwConstants.EVENT_TRACE_FLAG_PROCESS |
         EtwConstants.EVENT_TRACE_FLAG_THREAD |
@@ -142,30 +228,40 @@ static unsafe EventTracePropertiesHandle StartKernelTrace(string logFileName, ou
         EtwConstants.EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS |
         EtwConstants.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS |
         EtwConstants.EVENT_TRACE_FLAG_VIRTUAL_ALLOC |
+        EtwConstants.EVENT_TRACE_FLAG_VAMAP |
         EtwConstants.EVENT_TRACE_FLAG_NETWORK_TCPIP |
         EtwConstants.EVENT_TRACE_FLAG_REGISTRY |
         EtwConstants.EVENT_TRACE_FLAG_DBGPRINT |
+        EtwConstants.EVENT_TRACE_FLAG_JOB |
         EtwConstants.EVENT_TRACE_FLAG_ALPC |
         EtwConstants.EVENT_TRACE_FLAG_SPLIT_IO |
+        EtwConstants.EVENT_TRACE_FLAG_DEBUG_EVENTS |
         EtwConstants.EVENT_TRACE_FLAG_DRIVER |
         EtwConstants.EVENT_TRACE_FLAG_PROFILE |
         EtwConstants.EVENT_TRACE_FLAG_FILE_IO |
-        EtwConstants.EVENT_TRACE_FLAG_FILE_IO_INIT |
-        EtwConstants.EVENT_TRACE_FLAG_NO_SYSCONFIG;
+        EtwConstants.EVENT_TRACE_FLAG_FILE_IO_INIT;
+
+    (uint minimumBuffers, uint maximumBuffers) = GetRecommendedBufferCounts();
 
     EventTracePropertiesHandle handle = AllocateProperties(
         EtwConstants.KERNEL_LOGGER_NAME,
         logFileName,
         EtwConstants.SystemTraceControlGuid,
         EtwConstants.EVENT_TRACE_FILE_MODE_SEQUENTIAL,
-        enableFlags);
+        enableFlags,
+        minimumBuffers,
+        maximumBuffers);
 
     try
     {
         StopExistingSession(EtwConstants.KERNEL_LOGGER_NAME, handle.Pointer);
 
+        STACK_TRACING_EVENT_ID stackTracingEventId = default;
+        stackTracingEventId.EventGuid = EtwConstants.PerfInfoGuid;
+        stackTracingEventId.Type = EtwConstants.EVENT_TYPE_SAMPLED_PROFILE;
+
         ThrowIfError(
-            NativeMethods.StartKernelTrace(out sessionHandle, handle.Pointer, null, 0),
+            NativeMethods.StartKernelTrace(out sessionHandle, handle.Pointer, &stackTracingEventId, 1),
             nameof(NativeMethods.StartKernelTrace));
 
         return handle;
@@ -179,8 +275,10 @@ static unsafe EventTracePropertiesHandle StartKernelTrace(string logFileName, ou
 
 static unsafe EventTracePropertiesHandle StartUserTrace(string sessionName, string logFileName, out ulong sessionHandle)
 {
+    (uint minimumBuffers, uint maximumBuffers) = GetRecommendedBufferCounts();
+
     EventTracePropertiesHandle handle = AllocateProperties(
-        sessionName, logFileName, Guid.NewGuid(), EtwConstants.EVENT_TRACE_FILE_MODE_SEQUENTIAL, 0);
+        sessionName, logFileName, Guid.NewGuid(), EtwConstants.EVENT_TRACE_FILE_MODE_SEQUENTIAL, 0, minimumBuffers, maximumBuffers);
 
     sessionHandle = 0;
 
@@ -237,6 +335,67 @@ static void MergeTraceFiles(string mergedFileName, string kernelLogFile, string 
     ThrowIfError(result, nameof(NativeMethods.CreateMergedTraceFile));
 }
 
+static unsafe List<(string Name, Guid ProviderGuid, bool IsMof)> GetRegisteredProviders()
+{
+    // TdhEnumerateProviders 會回傳目前電腦上所有已註冊 MOF/Manifest 的 ETW Provider，
+    // 與 `logman query providers` 顯示的清單相同。由於註冊數量會變動，必須依官方建議
+    // 以迴圈方式重試直到不再回傳 ERROR_INSUFFICIENT_BUFFER。
+    const int ProviderEnumerationHeaderSize = 8; // NumberOfProviders (4 bytes) + Reserved (4 bytes)
+
+    uint bufferSize = 0;
+    uint status = NativeMethods.TdhEnumerateProviders(null, ref bufferSize);
+
+    byte* buffer = null;
+    try
+    {
+        while (status == EtwConstants.ERROR_INSUFFICIENT_BUFFER)
+        {
+            if (buffer != null)
+            {
+                NativeMemory.Free(buffer);
+            }
+
+            buffer = (byte*)NativeMemory.Alloc(bufferSize);
+            status = NativeMethods.TdhEnumerateProviders(buffer, ref bufferSize);
+        }
+
+        ThrowIfError((int)status, nameof(NativeMethods.TdhEnumerateProviders));
+
+        uint providerCount = *(uint*)buffer;
+        var infoArray = (TRACE_PROVIDER_INFO*)(buffer + ProviderEnumerationHeaderSize);
+
+        var providers = new List<(string Name, Guid ProviderGuid, bool IsMof)>((int)providerCount);
+        for (uint i = 0; i < providerCount; i++)
+        {
+            TRACE_PROVIDER_INFO info = infoArray[i];
+            var namePtr = (char*)(buffer + info.ProviderNameOffset);
+            providers.Add((new string(namePtr), info.ProviderGuid, info.SchemaSource != 0));
+        }
+
+        return providers;
+    }
+    finally
+    {
+        if (buffer != null)
+        {
+            NativeMemory.Free(buffer);
+        }
+    }
+}
+
+static void PrintRegisteredProviders()
+{
+    List<(string Name, Guid ProviderGuid, bool IsMof)> providers = GetRegisteredProviders();
+    providers.Sort((left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
+
+    foreach ((string name, Guid providerGuid, bool isMof) in providers)
+    {
+        Console.WriteLine($"{providerGuid:B}  {name}  [{(isMof ? "MOF" : "Manifest")}]");
+    }
+
+    Console.WriteLine($"共列舉出 {providers.Count} 個目前電腦上已註冊的 ETW Provider。");
+}
+
 
 [StructLayout(LayoutKind.Sequential)]
 internal struct WNODE_HEADER
@@ -285,6 +444,14 @@ internal struct ENABLE_TRACE_PARAMETERS
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct TRACE_PROVIDER_INFO
+{
+    public Guid ProviderGuid;
+    public uint SchemaSource;
+    public uint ProviderNameOffset;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct STACK_TRACING_EVENT_ID
 {
     public Guid EventGuid;
@@ -296,6 +463,21 @@ internal struct STACK_TRACING_EVENT_ID
     public byte Reserved4;
     public byte Reserved5;
     public byte Reserved6;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct LUID
+{
+    public uint LowPart;
+    public int HighPart;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct TOKEN_PRIVILEGES
+{
+    public uint PrivilegeCount;
+    public LUID Luid;
+    public uint Attributes;
 }
 internal sealed unsafe class EventTracePropertiesHandle : SafeHandle
 {
@@ -334,6 +516,18 @@ internal static class EtwConstants
     public static readonly Guid SystemTraceControlGuid = new("9e814aad-3204-11d2-9a82-006008a86939");
     public const string KERNEL_LOGGER_NAME = "NT Kernel Logger";
 
+    // PerfInfo Provider（EVENT_TRACE_FLAG_PROFILE 產生的 CPU 取樣事件）；Type 46 為 SampledProfile，
+    // 用於 STACK_TRACING_EVENT_ID，讓取樣式效能分析事件附帶呼叫堆疊。
+    public static readonly Guid PerfInfoGuid = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
+    public const byte EVENT_TYPE_SAMPLED_PROFILE = 46;
+
+    public const string SE_SYSTEM_PROFILE_NAME = "SeSystemProfilePrivilege";
+    public const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+    public const uint TOKEN_QUERY = 0x0008;
+    public const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+    public const int ERROR_NOT_ALL_ASSIGNED = 1300;
+    public const uint ERROR_INSUFFICIENT_BUFFER = 122;
+
     public const uint EVENT_TRACE_CONTROL_STOP = 1;
 
     public const uint EVENT_TRACE_FILE_MODE_SEQUENTIAL = 0x00000001;
@@ -355,16 +549,22 @@ internal static class EtwConstants
     public const uint EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS = 0x00001000;
     public const uint EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS = 0x00002000;
     public const uint EVENT_TRACE_FLAG_VIRTUAL_ALLOC = 0x00004000;
+    public const uint EVENT_TRACE_FLAG_VAMAP = 0x00008000; // map/unmap (excluding images)，Win8 以上
     public const uint EVENT_TRACE_FLAG_NETWORK_TCPIP = 0x00010000;
     public const uint EVENT_TRACE_FLAG_REGISTRY = 0x00020000;
     public const uint EVENT_TRACE_FLAG_DBGPRINT = 0x00040000;
+    public const uint EVENT_TRACE_FLAG_JOB = 0x00080000; // job start & end，Threshold 以上
     public const uint EVENT_TRACE_FLAG_ALPC = 0x00100000;
     public const uint EVENT_TRACE_FLAG_SPLIT_IO = 0x00200000;
+    public const uint EVENT_TRACE_FLAG_DEBUG_EVENTS = 0x00400000; // debugger events (break/continue/...)，Threshold 以上
     public const uint EVENT_TRACE_FLAG_DRIVER = 0x00800000;
     public const uint EVENT_TRACE_FLAG_PROFILE = 0x01000000;
     public const uint EVENT_TRACE_FLAG_FILE_IO = 0x02000000;
     public const uint EVENT_TRACE_FLAG_FILE_IO_INIT = 0x04000000;
     public const uint EVENT_TRACE_FLAG_NO_SYSCONFIG = 0x10000000;
+    public const uint EVENT_TRACE_FLAG_ENABLE_RESERVE = 0x20000000; // Reserved
+    public const uint EVENT_TRACE_FLAG_FORWARD_WMI = 0x40000000; // Can forward to WMI
+    public const uint EVENT_TRACE_FLAG_EXTENSION = 0x80000000; // Indicates more flags
 
     public const uint EVENT_CONTROL_CODE_ENABLE_PROVIDER = 1;
     public const byte TRACE_LEVEL_VERBOSE = 5;
@@ -409,5 +609,33 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport("KernelTraceControl.dll", EntryPoint = "CreateMergedTraceFile", StringMarshalling = StringMarshalling.Utf16)]
     public static partial int CreateMergedTraceFile(string mergedFileName, string[] traceFileNames, uint traceFileCount, uint extendedDataFlags);
+
+    [LibraryImport("tdh.dll", EntryPoint = "TdhEnumerateProviders")]
+    public static partial uint TdhEnumerateProviders(byte* pBuffer, ref uint pBufferSize);
+
+    [LibraryImport("kernel32.dll")]
+    public static partial nint GetCurrentProcess();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool CloseHandle(nint handle);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool OpenProcessToken(nint processHandle, uint desiredAccess, out nint tokenHandle);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "LookupPrivilegeValueW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool LookupPrivilegeValueW(string? systemName, string name, out LUID luid);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool AdjustTokenPrivileges(
+        nint tokenHandle,
+        [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+        ref TOKEN_PRIVILEGES newState,
+        uint bufferLengthInBytes,
+        nint previousState,
+        nint returnLengthInBytes);
 }
 //tracerpt驗證etl檔案內容
