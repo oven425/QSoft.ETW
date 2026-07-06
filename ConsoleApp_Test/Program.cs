@@ -130,8 +130,28 @@ static unsafe EventTracePropertiesHandle StartKernelTrace(string logFileName, ou
         EtwConstants.EVENT_TRACE_FLAG_PROCESS |
         EtwConstants.EVENT_TRACE_FLAG_THREAD |
         EtwConstants.EVENT_TRACE_FLAG_IMAGE_LOAD |
+        EtwConstants.EVENT_TRACE_FLAG_PROCESS_COUNTERS |
+        EtwConstants.EVENT_TRACE_FLAG_CSWITCH |
+        EtwConstants.EVENT_TRACE_FLAG_DPC |
+        EtwConstants.EVENT_TRACE_FLAG_INTERRUPT |
+        EtwConstants.EVENT_TRACE_FLAG_SYSTEMCALL |
         EtwConstants.EVENT_TRACE_FLAG_DISK_IO |
-        EtwConstants.EVENT_TRACE_FLAG_NETWORK_TCPIP;
+        EtwConstants.EVENT_TRACE_FLAG_DISK_FILE_IO |
+        EtwConstants.EVENT_TRACE_FLAG_DISK_IO_INIT |
+        EtwConstants.EVENT_TRACE_FLAG_DISPATCHER |
+        EtwConstants.EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS |
+        EtwConstants.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS |
+        EtwConstants.EVENT_TRACE_FLAG_VIRTUAL_ALLOC |
+        EtwConstants.EVENT_TRACE_FLAG_NETWORK_TCPIP |
+        EtwConstants.EVENT_TRACE_FLAG_REGISTRY |
+        EtwConstants.EVENT_TRACE_FLAG_DBGPRINT |
+        EtwConstants.EVENT_TRACE_FLAG_ALPC |
+        EtwConstants.EVENT_TRACE_FLAG_SPLIT_IO |
+        EtwConstants.EVENT_TRACE_FLAG_DRIVER |
+        EtwConstants.EVENT_TRACE_FLAG_PROFILE |
+        EtwConstants.EVENT_TRACE_FLAG_FILE_IO |
+        EtwConstants.EVENT_TRACE_FLAG_FILE_IO_INIT |
+        EtwConstants.EVENT_TRACE_FLAG_NO_SYSCONFIG;
 
     EventTracePropertiesHandle handle = AllocateProperties(
         EtwConstants.KERNEL_LOGGER_NAME,
@@ -323,8 +343,28 @@ internal static class EtwConstants
     public const uint EVENT_TRACE_FLAG_PROCESS = 0x00000001;
     public const uint EVENT_TRACE_FLAG_THREAD = 0x00000002;
     public const uint EVENT_TRACE_FLAG_IMAGE_LOAD = 0x00000004;
+    public const uint EVENT_TRACE_FLAG_PROCESS_COUNTERS = 0x00000008;
+    public const uint EVENT_TRACE_FLAG_CSWITCH = 0x00000010;
+    public const uint EVENT_TRACE_FLAG_DPC = 0x00000020;
+    public const uint EVENT_TRACE_FLAG_INTERRUPT = 0x00000040;
+    public const uint EVENT_TRACE_FLAG_SYSTEMCALL = 0x00000080;
     public const uint EVENT_TRACE_FLAG_DISK_IO = 0x00000100;
+    public const uint EVENT_TRACE_FLAG_DISK_FILE_IO = 0x00000200;
+    public const uint EVENT_TRACE_FLAG_DISK_IO_INIT = 0x00000400;
+    public const uint EVENT_TRACE_FLAG_DISPATCHER = 0x00000800;
+    public const uint EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS = 0x00001000;
+    public const uint EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS = 0x00002000;
+    public const uint EVENT_TRACE_FLAG_VIRTUAL_ALLOC = 0x00004000;
     public const uint EVENT_TRACE_FLAG_NETWORK_TCPIP = 0x00010000;
+    public const uint EVENT_TRACE_FLAG_REGISTRY = 0x00020000;
+    public const uint EVENT_TRACE_FLAG_DBGPRINT = 0x00040000;
+    public const uint EVENT_TRACE_FLAG_ALPC = 0x00100000;
+    public const uint EVENT_TRACE_FLAG_SPLIT_IO = 0x00200000;
+    public const uint EVENT_TRACE_FLAG_DRIVER = 0x00800000;
+    public const uint EVENT_TRACE_FLAG_PROFILE = 0x01000000;
+    public const uint EVENT_TRACE_FLAG_FILE_IO = 0x02000000;
+    public const uint EVENT_TRACE_FLAG_FILE_IO_INIT = 0x04000000;
+    public const uint EVENT_TRACE_FLAG_NO_SYSCONFIG = 0x10000000;
 
     public const uint EVENT_CONTROL_CODE_ENABLE_PROVIDER = 1;
     public const byte TRACE_LEVEL_VERBOSE = 5;

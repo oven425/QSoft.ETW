@@ -1,5 +1,6 @@
 ﻿using System.Runtime.InteropServices;
 using System.Text;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace QSoft.ETW;
 
@@ -66,7 +67,29 @@ public sealed class Session(
             File.WriteAllBytes("kernelps", _kernelBuffer);
             var dddd = MemoryMarshal.AsRef<EVENT_TRACE_PROPERTIES>(_kernelBuffer);
             //var kHr = m_KernelTrace.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
-            var kHr = ETW.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
+            uint kHr = 0;
+            //unsafe
+            //{
+            //    fixed (byte* ptr = _kernelBuffer)
+            //    {
+            //        kHr = ETW.StartKernelTrace(out _kernelHandle, ptr, 0);
+            //    }
+            //}
+
+            GCHandle handle = GCHandle.Alloc(_kernelBuffer, GCHandleType.Pinned);
+
+            try
+            {
+                IntPtr ptr = handle.AddrOfPinnedObject();
+                kHr = ETW.StartKernelTrace(out _kernelHandle, ptr, 0);
+            }
+            finally
+            {
+                if (handle.IsAllocated)
+                    handle.Free();
+            }
+
+            //kHr = ETW.StartKernelTrace(out _kernelHandle, _kernelBuffer, 0);
             var err = Marshal.GetLastWin32Error();
             if (kHr != ErrorSuccess)
             {
@@ -179,9 +202,6 @@ public sealed class Session(
         int szFile    = fileNameBuf.Length + 2;
         int total     = szProps + szSession + szFile;
         var ppe = new EVENT_TRACE_PROPERTIES
-
-        var buf = new byte[total];
-        MemoryMarshal.Write(buf, new EVENT_TRACE_PROPERTIES
         {
             Wnode = new WNODE_HEADER
             {
@@ -197,6 +217,8 @@ public sealed class Session(
             LoggerNameOffset = (uint)szProps,
             LogFileNameOffset = (uint)(szProps + szSession),
         };
+
+        //MemoryMarshal.Write(buf, 
         var buf = new byte[total];
         MemoryMarshal.Write(buf, ppe);
 
