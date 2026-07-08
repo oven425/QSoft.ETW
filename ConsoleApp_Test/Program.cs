@@ -2,15 +2,15 @@
 //using System.Runtime.InteropServices;
 //using System.Security.Principal;
 
-using ConsoleApp_Test;
 
-TraceSession session = new TraceSessionBuilder()
+
+using QSoft.ETW;
+using System.Text;
+Console.OutputEncoding = Encoding.UTF8;
+using TraceSession session = new TraceSessionBuilder()
     .WithConfig(TraceSessionBuilder.KernelSessionEnableFlags)
-    .WithProvider(TraceSessionBuilder.KernelProcessProviderGuid)
-    .WithProvider(TraceSessionBuilder.WmiActivityProviderGuid)
-    .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
-    .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
-    .Builde();
+    .WithProviders(TraceSessionBuilder.UserSessionProviderGuids)
+    .Build();
 
 if (args.Length > 0 && string.Equals(args[0], "listproviders", StringComparison.OrdinalIgnoreCase))
 {
@@ -28,6 +28,14 @@ if (!session.IsElevated())
     Console.Error.WriteLine("此程式需要以系統管理員身分執行才能啟動 ETW Kernel/User Trace。");
     return 1;
 }
+
+Console.CancelKeyPress += (_, e) =>
+{
+    // 攔截 Ctrl+C，避免行程直接終止導致 finally 未執行、Kernel Logger 未停止而變成孤兒 session。
+    e.Cancel = true;
+    session.Stop();
+    Environment.Exit(1);
+};
 
 try
 {

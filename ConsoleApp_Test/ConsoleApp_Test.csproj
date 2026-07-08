@@ -10,4 +10,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\QSoft.ETW\QSoft.ETW.csproj" />
+  </ItemGroup>
+
 </Project>

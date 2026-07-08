@@ -7,9 +7,9 @@ using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace ConsoleApp_Test
+namespace QSoft.ETW
 {
-    public partial class TraceSession
+    public partial class TraceSession : IDisposable
     {
         string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         string baseDir;
@@ -27,6 +27,8 @@ namespace ConsoleApp_Test
         readonly KernelTraceFlags kernelEnableFlags;
         readonly Guid[] userProviderGuids;
         readonly string? mergedFileName;
+        bool isStarted = false;
+        bool isDisposed = false;
 
         internal TraceSession(KernelTraceFlags kernelEnableFlags, Guid[] userProviderGuids, string baseDir, string? mergedFileName = null)
         {
@@ -38,6 +40,13 @@ namespace ConsoleApp_Test
 
         public void Start()
         {
+            ObjectDisposedException.ThrowIf(isDisposed, this);
+
+            if (isStarted)
+            {
+                throw new InvalidOperationException($"{nameof(TraceSession)} 已經啟動過，請先呼叫 {nameof(Stop)} 再重新啟動，避免 Kernel Logger 控制代碼遺失而無法停止。");
+            }
+
             timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             userSessionName = $"QSoft-User-{timestamp}";
             kernelLogFile = Path.Combine(baseDir, $"kernel_{timestamp}.etl");
@@ -47,6 +56,8 @@ namespace ConsoleApp_Test
             kernelProps = StartKernelTrace(kernelLogFile, kernelEnableFlags, out kernelHandle);
 
             userProps = StartUserTrace(userSessionName, userLogFile, userProviderGuids, out userHandle);
+
+            isStarted = true;
 
             if (kernelProps is not null)
             {
@@ -69,6 +80,11 @@ namespace ConsoleApp_Test
 
         public void Stop()
         {
+            if (!isStarted)
+            {
+                return;
+            }
+
             if (userHandle != 0 && userProps is not null)
             {
                 _ = ControlTraceW(userHandle, null, ref userProps.Properties, EVENT_TRACE_CONTROL_STOP);
@@ -106,6 +122,24 @@ namespace ConsoleApp_Test
                 }
                 Console.WriteLine($"  Merged : {mergedLogFile}");
             }
+
+            kernelHandle = 0;
+            userHandle = 0;
+            kernelProps = null;
+            userProps = null;
+            isStarted = false;
+        }
+
+        public void Dispose()
+        {
+            if (isDisposed)
+            {
+                return;
+            }
+
+            Stop();
+            isDisposed = true;
+            GC.SuppressFinalize(this);
         }
 
         public bool IsElevated()
@@ -191,8 +225,8 @@ namespace ConsoleApp_Test
             props.Wnode.ClientContext = 1; // QPC 時間戳記解析度
             props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
             props.BufferSize = DefaultBufferSizeKb;
-            //props.MinimumBuffers = minimumBuffers;
-            //props.MaximumBuffers = maximumBuffers;
+            props.MinimumBuffers = minimumBuffers;
+            props.MaximumBuffers = maximumBuffers;
             props.LogFileMode = logFileMode;
             props.EnableFlags = enableFlags;
             props.LoggerNameOffset = (uint)propsSize;
@@ -322,6 +356,7 @@ namespace ConsoleApp_Test
         private const uint EVENT_TRACE_MERGE_EXTENDED_DATA_NETWORK_INTERFACE = 0x00000040;
 
         const uint DefaultMergeFlags =
+            EVENT_TRACE_MERGE_EXTENDED_DATA_IMAGEID |
             EVENT_TRACE_MERGE_EXTENDED_DATA_BUILDINFO |
             EVENT_TRACE_MERGE_EXTENDED_DATA_VOLUME_MAPPING |
             EVENT_TRACE_MERGE_EXTENDED_DATA_EVENT_METADATA |
@@ -351,13 +386,28 @@ namespace ConsoleApp_Test
 
             ThrowIfError((int)status, nameof(TdhEnumerateProviders));
 
+            if (buffer.Length < ProviderEnumerationHeaderSize)
+            {
+                throw new InvalidOperationException($"{nameof(TdhEnumerateProviders)} 回傳的緩衝區大小異常（{buffer.Length} bytes），小於預期的標頭大小 {ProviderEnumerationHeaderSize} bytes。");
+            }
+
             uint providerCount = MemoryMarshal.Read<uint>(buffer);
 
             var providers = new List<(string Name, Guid ProviderGuid, bool IsMof)>((int)providerCount);
             for (uint i = 0; i < providerCount; i++)
             {
                 int infoOffset = ProviderEnumerationHeaderSize + (int)i * traceProviderInfoSize;
+                if (infoOffset < 0 || infoOffset + traceProviderInfoSize > buffer.Length)
+                {
+                    throw new InvalidOperationException($"{nameof(TdhEnumerateProviders)} 回傳的資料異常：第 {i} 筆 Provider 資訊（offset={infoOffset}）超出緩衝區範圍（長度={buffer.Length}）。");
+                }
+
                 TRACE_PROVIDER_INFO info = MemoryMarshal.Read<TRACE_PROVIDER_INFO>(buffer.AsSpan(infoOffset));
+
+                if (info.ProviderNameOffset >= buffer.Length)
+                {
+                    throw new InvalidOperationException($"{nameof(TdhEnumerateProviders)} 回傳的資料異常：第 {i} 筆 Provider 名稱位移量（{info.ProviderNameOffset}）超出緩衝區範圍（長度={buffer.Length}）。");
+                }
 
                 int nameByteLength = buffer.Length - (int)info.ProviderNameOffset;
                 nameByteLength -= nameByteLength % sizeof(char);
@@ -667,6 +717,12 @@ namespace ConsoleApp_Test
             return this;
         }
 
+        public TraceSessionBuilder WithProviders(IEnumerable<Guid> guids)
+        {
+            m_ProviderGuids.AddRange(guids);
+            return this;
+        }
+
         public TraceSessionBuilder WithOutputPath(string path)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -697,6 +753,6 @@ namespace ConsoleApp_Test
             return this;
         }
 
-        public TraceSession Builde() => new(m_EnableFlags, [.. m_ProviderGuids], m_BaseDir, m_MergedFileName);
+        public TraceSession Build() => new(m_EnableFlags, [.. m_ProviderGuids], m_BaseDir, m_MergedFileName);
     }
 }
