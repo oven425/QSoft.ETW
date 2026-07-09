@@ -6,5 +6,6 @@
   </Configurations>
   <Project Path="ConsoleApplication_ETW/ConsoleApplication_ETW.vcxproj" Id="4ccf1cd2-f67a-47b6-9674-b5f86271e219" />
   <Project Path="ConsoleApp_Test/ConsoleApp_Test.csproj" Id="e15728a0-a17b-4a91-bd9c-81566e23e62a" />
+  <Project Path="ConsoleApp_TestR/ConsoleApp_TestR.csproj" Id="7b1617a4-9941-4387-b2c6-8fe9d996659a" />
   <Project Path="QSoft.ETW/QSoft.ETW.csproj" Id="933a05f2-16bf-4f24-87e7-4401c8ec4dfa" />
 </Solution>
