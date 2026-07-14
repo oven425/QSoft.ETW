@@ -19,6 +19,9 @@ if(!File.Exists(etlfilename))
     .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_INTERRUPT)
     .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROFILE)
     .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DPC)
+    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO)
+    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_FILE_IO)
+    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO_INIT)
     .WithProvider(TraceSessionBuilder.WmiActivityProviderGuid)
     .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
     .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
@@ -65,7 +68,21 @@ if(!File.Exists(etlfilename))
 
 Console.WriteLine();
 Console.WriteLine($"開始解析 ETL 檔案: {etlfilename}");
-EtlFileReader.ProcessFile(etlfilename);
+int processExitCode = EtlFileReader.ProcessFile(etlfilename);
+if (processExitCode != 0)
+{
+    Console.Error.WriteLine($"ETL 解析失敗，結束碼: {processExitCode}");
+    return processExitCode;
+}
+
+if (EtlFileReader.LastReadResult is not EtlReadResult readResult)
+{
+    Console.Error.WriteLine("ETL 解析完成後未取得可匯出的結果。");
+    return 1;
+}
+
+
+
 Console.ReadKey();
 return 0;
 
@@ -283,6 +300,7 @@ internal readonly record struct SchemaKey(Guid ProviderId, ushort Id, byte Versi
 internal sealed class EtlReadResult
 {
     public List<ProcessInfo> Processes { get; } = [];
+    public List<ThreadInfo> Threads { get; } = [];
     public List<ModuleInfo> UnmatchedModules { get; } = [];
     public List<WmiActivityEventInfo> WmiActivityEvents { get; } = [];
     public List<EnergyEstimationEventInfo> EnergyEstimationEvents { get; } = [];
@@ -293,6 +311,9 @@ internal sealed class EtlReadResult
     public List<InterruptEventInfo> InterruptEvents { get; } = [];
     public List<ProfileEventInfo> ProfileEvents { get; } = [];
     public List<DpcEventInfo> DpcEvents { get; } = [];
+    public List<DiskIoEventInfo> DiskIoEvents { get; } = [];
+    public List<DiskIoEventInfo> DiskIoInitEvents { get; } = [];
+    public List<FileIoEventInfo> DiskFileIoEvents { get; } = [];
 }
 
 internal sealed class ProcessInfo
@@ -314,6 +335,37 @@ internal sealed class ModuleInfo
     public string FileName { get; init; } = string.Empty;
     public string ImageBase { get; init; } = string.Empty;
     public string ImageSize { get; init; } = string.Empty;
+    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+}
+
+internal sealed class DiskIoEventInfo
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+}
+
+internal sealed class FileIoEventInfo
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+}
+
+internal sealed class ThreadInfo
+{
+    public required uint ThreadId { get; init; }
+    public required uint ProcessId { get; init; }
+    public required DateTime StartTime { get; init; }
+    public DateTime? EndTime { get; set; }
     public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
@@ -378,6 +430,8 @@ internal sealed class CSwitchEventInfo
     public required byte ProcessorNumber { get; init; }
     public uint? NewThreadId { get; init; }
     public uint? OldThreadId { get; init; }
+    public uint? NewProcessId { get; init; }
+    public uint? OldProcessId { get; init; }
     public int? NewThreadPriority { get; init; }
     public int? OldThreadPriority { get; init; }
     public int? PreviousCState { get; init; }
@@ -473,6 +527,8 @@ internal static class EtlFileReader
     private static readonly Guid s_processProviderId = new("3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c");
     private static readonly Guid s_imageLoadProviderId = new("2cb15d1d-5fc1-11d2-abe1-00a0c911f518");
     private static readonly Guid s_threadProviderId = new("3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c");
+    private static readonly Guid s_diskIoProviderId = new("3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c");
+    private static readonly Guid s_fileIoProviderId = new("90cbdc39-4a3e-11d1-84f4-0000f80464e3");
     private static readonly Guid s_perfInfoProviderId = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
     private const byte CSwitchOpcode = 36;
     private const byte SampledProfileOpcode = 46;
@@ -482,6 +538,7 @@ internal static class EtlFileReader
     private const byte TimerDpcOpcode = 69;
     private static long s_eventCount;
     private static readonly Dictionary<uint, ProcessInfo> s_activeProcesses = [];
+    private static readonly Dictionary<uint, ThreadInfo> s_activeThreads = [];
 
     public static EtlReadResult? LastReadResult { get; private set; }
 
@@ -500,6 +557,7 @@ internal static class EtlFileReader
         s_eventCount = 0;
         s_schemaCache.Clear();
         s_activeProcesses.Clear();
+        s_activeThreads.Clear();
         LastReadResult = new EtlReadResult();
 
         EventRecordCallbackDelegate callback = OnEventRecord;
@@ -543,16 +601,17 @@ internal static class EtlFileReader
             }
 
             Console.WriteLine($"解析完成,共處理 {s_eventCount} 筆事件。");
-            PrintProcessSummary(LastReadResult!);
-            PrintWmiActivitySummary(LastReadResult!);
-            PrintEnergyEstimationSummary(LastReadResult!);
-            PrintKernelAcpiSummary(LastReadResult!);
-            PrintKernelPowerSummary(LastReadResult!);
-            PrintPowerMeterPollingSummary(LastReadResult!);
+            //PrintProcessSummary(LastReadResult!);
+            //PrintWmiActivitySummary(LastReadResult!);
+            //PrintEnergyEstimationSummary(LastReadResult!);
+            //PrintKernelAcpiSummary(LastReadResult!);
+            //PrintKernelPowerSummary(LastReadResult!);
+            //PrintPowerMeterPollingSummary(LastReadResult!);
             PrintCSwitchSummary(LastReadResult!);
-            PrintProfileSummary(LastReadResult!);
-            PrintDpcSummary(LastReadResult!);
-            PrintInterruptSummary(LastReadResult!);
+            PrintDiskIoSummary(LastReadResult!);
+            //PrintProfileSummary(LastReadResult!);
+            //PrintDpcSummary(LastReadResult!);
+            //PrintInterruptSummary(LastReadResult!);
             return 0;
         }
         finally
@@ -619,11 +678,11 @@ internal static class EtlFileReader
         EVENT_RECORD record = Marshal.PtrToStructure<EVENT_RECORD>(eventRecordPtr);
         DateTime timestamp = DateTime.FromFileTime(record.EventHeader.TimeStamp);
 
-        Console.WriteLine(
-            $"[{s_eventCount}] ProviderId={record.EventHeader.ProviderId} " +
-            $"EventId={record.EventHeader.EventDescriptor.Id} Opcode={record.EventHeader.EventDescriptor.Opcode} " +
-            $"時間={timestamp:yyyy-MM-dd HH:mm:ss.fff} " +
-            $"PID={record.EventHeader.ProcessId} TID={record.EventHeader.ThreadId}");
+        //Console.WriteLine(
+        //    $"[{s_eventCount}] ProviderId={record.EventHeader.ProviderId} " +
+        //    $"EventId={record.EventHeader.EventDescriptor.Id} Opcode={record.EventHeader.EventDescriptor.Opcode} " +
+        //    $"時間={timestamp:yyyy-MM-dd HH:mm:ss.fff} " +
+        //    $"PID={record.EventHeader.ProcessId} TID={record.EventHeader.ThreadId}");
 
         // CSwitch (Thread Provider, Opcode=36) 的 classic MOF 版本在新版 Windows 為 5,
         // 本機通常沒有對應的 TDH schema(TdhGetEventInformation 會回傳 ERROR_NOT_FOUND),
@@ -633,10 +692,10 @@ internal static class EtlFileReader
             IReadOnlyDictionary<string, string>? cswitchProperties = ParseCSwitchPayload(record.UserData, record.UserDataLength);
             if (cswitchProperties is not null)
             {
-                foreach ((string propertyName, string value) in cswitchProperties)
-                {
-                    Console.WriteLine($"    {propertyName} = {value}");
-                }
+                //foreach ((string propertyName, string value) in cswitchProperties)
+                //{
+                //    Console.WriteLine($"    {propertyName} = {value}");
+                //}
 
                 ProcessCSwitchEvent(timestamp, record.BufferContext.ProcessorNumber, cswitchProperties);
             }
@@ -672,10 +731,10 @@ internal static class EtlFileReader
             return;
         }
 
-        foreach ((string propertyName, string value) in properties)
-        {
-            Console.WriteLine($"    {propertyName} = {value}");
-        }
+        //foreach ((string propertyName, string value) in properties)
+        //{
+        //    Console.WriteLine($"    {propertyName} = {value}");
+        //}
 
         if (LastReadResult is null)
         {
@@ -687,9 +746,21 @@ internal static class EtlFileReader
         {
             ProcessProcessEvent(opcode, timestamp, record.EventHeader.ProcessId, properties);
         }
+        else if (record.EventHeader.ProviderId == s_threadProviderId)
+        {
+            ProcessThreadEvent(opcode, timestamp, properties);
+        }
         else if (record.EventHeader.ProviderId == s_imageLoadProviderId && (opcode == 3 || opcode == 10))
         {
             ProcessImageLoadEvent(timestamp, record.EventHeader.ProcessId, properties);
+        }
+        else if (record.EventHeader.ProviderId == s_diskIoProviderId)
+        {
+            ProcessDiskIoEvent(timestamp, in record.EventHeader, properties);
+        }
+        else if (record.EventHeader.ProviderId == s_fileIoProviderId)
+        {
+            ProcessFileIoEvent(timestamp, in record.EventHeader, properties);
         }
         else if (record.EventHeader.ProviderId == TraceSessionBuilder.WmiActivityProviderGuid)
         {
@@ -809,12 +880,45 @@ internal static class EtlFileReader
             };
 
             LastReadResult!.Processes.Add(process);
-            System.Diagnostics.Trace.WriteLine($"{process.ImageFileName}->{process.CommandLine}");
+            //System.Diagnostics.Trace.WriteLine($"{process.ImageFileName}->{process.CommandLine}");
             s_activeProcesses[processId] = process;
         }
         else if (opcode is 2 or 4 && s_activeProcesses.Remove(processId, out ProcessInfo? process))
         {
             process.EndTime = timestamp;
+        }
+    }
+
+    private static void ProcessThreadEvent(byte opcode, DateTime timestamp, IReadOnlyDictionary<string, string> properties)
+    {
+        uint? threadId = GetUInt32(properties, "ThreadId", "TThreadId");
+        if (threadId is not uint id)
+        {
+            return;
+        }
+
+        if (opcode is 1 or 3)
+        {
+            uint? processId = GetUInt32(properties, "ProcessId", "TProcessId");
+            if (processId is not uint ownerProcessId)
+            {
+                return;
+            }
+
+            var thread = new ThreadInfo
+            {
+                ThreadId = id,
+                ProcessId = ownerProcessId,
+                StartTime = timestamp,
+                Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+            };
+
+            LastReadResult!.Threads.Add(thread);
+            s_activeThreads[id] = thread;
+        }
+        else if (opcode is 2 or 4 && s_activeThreads.Remove(id, out ThreadInfo? thread))
+        {
+            thread.EndTime = timestamp;
         }
     }
 
@@ -839,6 +943,43 @@ internal static class EtlFileReader
         {
             LastReadResult!.UnmatchedModules.Add(module);
         }
+    }
+
+    private static void ProcessDiskIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    {
+        var diskIoEvent = new DiskIoEventInfo
+        {
+            Timestamp = timestamp,
+            EventId = header.EventDescriptor.Id,
+            Version = header.EventDescriptor.Version,
+            Opcode = header.EventDescriptor.Opcode,
+            ProcessId = header.ProcessId,
+            ThreadId = header.ThreadId,
+            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+        };
+
+        if (header.EventDescriptor.Opcode is 12 or 13 or 15 or 16)
+        {
+            LastReadResult!.DiskIoInitEvents.Add(diskIoEvent);
+        }
+        else
+        {
+            LastReadResult!.DiskIoEvents.Add(diskIoEvent);
+        }
+    }
+
+    private static void ProcessFileIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    {
+        LastReadResult!.DiskFileIoEvents.Add(new FileIoEventInfo
+        {
+            Timestamp = timestamp,
+            EventId = header.EventDescriptor.Id,
+            Version = header.EventDescriptor.Version,
+            Opcode = header.EventDescriptor.Opcode,
+            ProcessId = header.ProcessId,
+            ThreadId = header.ThreadId,
+            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+        });
     }
 
     private static void ProcessEnergyEstimationEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
@@ -914,12 +1055,16 @@ internal static class EtlFileReader
 
     private static void ProcessCSwitchEvent(DateTime timestamp, byte processorNumber, IReadOnlyDictionary<string, string> properties)
     {
+        uint? newThreadId = GetUInt32(properties, "NewThreadId");
+        uint? oldThreadId = GetUInt32(properties, "OldThreadId");
         LastReadResult!.CSwitchEvents.Add(new CSwitchEventInfo
         {
             Timestamp = timestamp,
             ProcessorNumber = processorNumber,
-            NewThreadId = GetUInt32(properties, "NewThreadId"),
-            OldThreadId = GetUInt32(properties, "OldThreadId"),
+            NewThreadId = newThreadId,
+            OldThreadId = oldThreadId,
+            NewProcessId = FindThreadAtTime(LastReadResult.Threads, newThreadId, timestamp)?.ProcessId,
+            OldProcessId = FindThreadAtTime(LastReadResult.Threads, oldThreadId, timestamp)?.ProcessId,
             NewThreadPriority = GetInt32(properties, "NewThreadPriority"),
             OldThreadPriority = GetInt32(properties, "OldThreadPriority"),
             PreviousCState = GetInt32(properties, "PreviousCState"),
@@ -1114,9 +1259,18 @@ internal static class EtlFileReader
         return string.Empty;
     }
 
-    private static uint? GetUInt32(IReadOnlyDictionary<string, string> properties, string name)
+    private static uint? GetUInt32(IReadOnlyDictionary<string, string> properties, params string[] names)
     {
-        if (!properties.TryGetValue(name, out string? value))
+        string? value = null;
+        foreach (string name in names)
+        {
+            if (properties.TryGetValue(name, out value))
+            {
+                break;
+            }
+        }
+
+        if (value is null)
         {
             return null;
         }
@@ -1247,6 +1401,42 @@ internal static class EtlFileReader
             powerEvent => powerEvent.Properties);
     }
 
+    private static void PrintDiskIoSummary(EtlReadResult result)
+    {
+        PrintProviderEventSummary(
+            "Disk I/O",
+            result.DiskIoEvents,
+            diskEvent => diskEvent.Timestamp,
+            diskEvent => diskEvent.EventId,
+            diskEvent => diskEvent.Version,
+            diskEvent => diskEvent.Opcode,
+            diskEvent => diskEvent.ProcessId,
+            diskEvent => diskEvent.ThreadId,
+            diskEvent => diskEvent.Properties);
+
+        PrintProviderEventSummary(
+            "Disk I/O Init",
+            result.DiskIoInitEvents,
+            diskEvent => diskEvent.Timestamp,
+            diskEvent => diskEvent.EventId,
+            diskEvent => diskEvent.Version,
+            diskEvent => diskEvent.Opcode,
+            diskEvent => diskEvent.ProcessId,
+            diskEvent => diskEvent.ThreadId,
+            diskEvent => diskEvent.Properties);
+
+        PrintProviderEventSummary(
+            "Disk File I/O",
+            result.DiskFileIoEvents,
+            fileEvent => fileEvent.Timestamp,
+            fileEvent => fileEvent.EventId,
+            fileEvent => fileEvent.Version,
+            fileEvent => fileEvent.Opcode,
+            fileEvent => fileEvent.ProcessId,
+            fileEvent => fileEvent.ThreadId,
+            fileEvent => fileEvent.Properties);
+    }
+
     private static void PrintProviderEventSummary<T>(
         string providerName,
         IReadOnlyCollection<T> events,
@@ -1318,11 +1508,48 @@ internal static class EtlFileReader
             return;
         }
 
+        var scheduledCounts = result.CSwitchEvents
+            .Where(cswitchEvent => cswitchEvent.NewProcessId is not null)
+            .GroupBy(cswitchEvent => cswitchEvent.NewProcessId!.Value)
+            .ToDictionary(group => group.Key, group => group.Count());
+        var descheduledEvents = result.CSwitchEvents
+            .Where(cswitchEvent => cswitchEvent.OldProcessId is not null)
+            .GroupBy(cswitchEvent => cswitchEvent.OldProcessId!.Value)
+            .ToDictionary(group => group.Key, group => group.ToList());
+
+        Console.WriteLine("每程序排程摘要（依被換出次數排序）:");
+        foreach (uint processId in scheduledCounts.Keys.Union(descheduledEvents.Keys)
+            .OrderByDescending(processId => descheduledEvents.GetValueOrDefault(processId)?.Count ?? 0)
+            .ThenByDescending(processId => scheduledCounts.GetValueOrDefault(processId))
+            .Take(10))
+        {
+            List<CSwitchEventInfo> events = descheduledEvents.GetValueOrDefault(processId) ?? [];
+            string imageFileName = result.Processes.LastOrDefault(process => process.ProcessId == processId)?.ImageFileName ?? "<未關聯程序>";
+            Console.WriteLine($"  PID={processId} {imageFileName}: 排入={scheduledCounts.GetValueOrDefault(processId)}, 換出={events.Count}");
+
+            foreach (var waitReason in events
+                .Where(cswitchEvent => cswitchEvent.OldThreadWaitReason is not null)
+                .GroupBy(cswitchEvent => cswitchEvent.OldThreadWaitReason!.Value)
+                .OrderByDescending(group => group.Count())
+                .Take(3))
+            {
+                Console.WriteLine($"    等待原因={waitReason.Key}: {waitReason.Count()} 次");
+            }
+        }
+
+        int unassociatedCount = result.CSwitchEvents.Count(cswitchEvent =>
+            cswitchEvent.NewProcessId is null && cswitchEvent.OldProcessId is null);
+        if (unassociatedCount > 0)
+        {
+            Console.WriteLine($"  無法關聯程序的切換事件: {unassociatedCount}");
+        }
+
         foreach (CSwitchEventInfo cswitchEvent in result.CSwitchEvents.OrderBy(cswitchEvent => cswitchEvent.Timestamp).Take(20))
         {
             Console.WriteLine(
                 $"時間={cswitchEvent.Timestamp:O} CPU={cswitchEvent.ProcessorNumber} " +
-                $"NewTID={cswitchEvent.NewThreadId} OldTID={cswitchEvent.OldThreadId} " +
+                $"NewTID={cswitchEvent.NewThreadId} NewPID={cswitchEvent.NewProcessId} " +
+                $"OldTID={cswitchEvent.OldThreadId} OldPID={cswitchEvent.OldProcessId} " +
                 $"NewPri={cswitchEvent.NewThreadPriority} OldPri={cswitchEvent.OldThreadPriority} " +
                 $"OldWaitReason={cswitchEvent.OldThreadWaitReason} OldWaitMode={cswitchEvent.OldThreadWaitMode} OldState={cswitchEvent.OldThreadState}");
         }
@@ -1409,6 +1636,16 @@ internal static class EtlFileReader
             process.ProcessId == processId &&
             process.StartTime <= timestamp &&
             (process.EndTime is null || timestamp <= process.EndTime));
+    }
+
+    private static ThreadInfo? FindThreadAtTime(IEnumerable<ThreadInfo> threads, uint? threadId, DateTime timestamp)
+    {
+        return threadId is uint id
+            ? threads.FirstOrDefault(thread =>
+                thread.ThreadId == id &&
+                thread.StartTime <= timestamp &&
+                (thread.EndTime is null || timestamp <= thread.EndTime))
+            : null;
     }
 
     private static void PrintProperties(string prefix, IReadOnlyDictionary<string, string> properties)

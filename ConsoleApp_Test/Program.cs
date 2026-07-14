@@ -8,8 +8,8 @@ using QSoft.ETW;
 using System.Text;
 Console.OutputEncoding = Encoding.UTF8;
 using TraceSession session = new TraceSessionBuilder()
-    .WithConfig(TraceSessionBuilder.KernelSessionEnableFlags)
-    .WithProviders(TraceSessionBuilder.UserSessionProviderGuids)
+    //.WithConfig(TraceSessionBuilder.KernelSessionEnableFlags)
+    //.WithProviders(TraceSessionBuilder.UserSessionProviderGuids)
     .Build();
 
 if (args.Length > 0 && string.Equals(args[0], "listproviders", StringComparison.OrdinalIgnoreCase))
