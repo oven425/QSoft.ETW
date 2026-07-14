@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace QSoft.ETW
@@ -25,18 +26,20 @@ namespace QSoft.ETW
         EventTraceProperties? userProps = null;
 
         readonly KernelTraceFlags kernelEnableFlags;
-        readonly Guid[] userProviderGuids;
+        readonly UserProviderConfiguration[] userProviders;
         readonly string? mergedFileName;
         bool isStarted = false;
         bool isDisposed = false;
 
-        internal TraceSession(KernelTraceFlags kernelEnableFlags, Guid[] userProviderGuids, string baseDir, string? mergedFileName = null)
+        internal TraceSession(KernelTraceFlags kernelEnableFlags, UserProviderConfiguration[] userProviders, string baseDir, string? mergedFileName = null)
         {
             this.kernelEnableFlags = kernelEnableFlags;
-            this.userProviderGuids = userProviderGuids ?? [];
+            this.userProviders = userProviders ?? [];
             this.baseDir = string.IsNullOrEmpty(baseDir) ? AppContext.BaseDirectory : baseDir;
             this.mergedFileName = mergedFileName;
         }
+
+        internal readonly record struct UserProviderConfiguration(Guid ProviderId, ulong MatchAnyKeyword);
 
         public void Start()
         {
@@ -55,7 +58,7 @@ namespace QSoft.ETW
 
             kernelProps = StartKernelTrace(kernelLogFile, kernelEnableFlags, out kernelHandle);
 
-            userProps = StartUserTrace(userSessionName, userLogFile, userProviderGuids, out userHandle);
+            userProps = StartUserTrace(userSessionName, userLogFile, userProviders, out userHandle);
 
             isStarted = true;
 
@@ -109,18 +112,35 @@ namespace QSoft.ETW
             else
             {
                 Console.WriteLine("正在合併追蹤檔案...");
-                MergeTraceFiles(mergedLogFile, traceFilesToMerge);
+                try
+                {
+                    MergeTraceFiles(mergedLogFile, traceFilesToMerge);
 
-                Console.WriteLine("完成，輸出檔案：");
-                if (kernelProps is not null)
-                {
-                    Console.WriteLine($"  Kernel : {kernelLogFile}");
+                    Console.WriteLine("完成，輸出檔案：");
+                    if (kernelProps is not null)
+                    {
+                        Console.WriteLine($"  Kernel : {kernelLogFile}");
+                    }
+                    if (userProps is not null)
+                    {
+                        Console.WriteLine($"  User   : {userLogFile}");
+                    }
+                    Console.WriteLine($"  Merged : {mergedLogFile}");
                 }
-                if (userProps is not null)
+                catch (Exception ex)
                 {
-                    Console.WriteLine($"  User   : {userLogFile}");
+                    // 合併僅是附加功能（方便一次分析），即使失敗，個別的 Kernel/User ETL 仍已完整寫入且可獨立解析，
+                    // 因此不應讓合併失敗中斷 Stop() 的其餘清理流程（重置控制代碼、Session 狀態等）。
+                    Console.Error.WriteLine($"警告：合併追蹤檔案失敗（{ex.Message}），請改用個別的 Kernel/User ETL 檔案：");
+                    if (kernelProps is not null)
+                    {
+                        Console.Error.WriteLine($"  Kernel : {kernelLogFile}");
+                    }
+                    if (userProps is not null)
+                    {
+                        Console.Error.WriteLine($"  User   : {userLogFile}");
+                    }
                 }
-                Console.WriteLine($"  Merged : {mergedLogFile}");
             }
 
             kernelHandle = 0;
@@ -296,11 +316,11 @@ namespace QSoft.ETW
             return eventTraceProperties;
         }
 
-        EventTraceProperties? StartUserTrace(string sessionName, string logFileName, Guid[] providerGuids, out ulong sessionHandle)
+        EventTraceProperties? StartUserTrace(string sessionName, string logFileName, UserProviderConfiguration[] providers, out ulong sessionHandle)
         {
             sessionHandle = 0;
 
-            if (providerGuids is null || providerGuids.Length == 0)
+            if (providers is null || providers.Length == 0)
             {
                 return null;
             }
@@ -317,8 +337,9 @@ namespace QSoft.ETW
                 ThrowIfError(StartTraceW(out sessionHandle, sessionName, ref eventTraceProperties.Properties), "StartTraceW(User)");
 
                 // 逐一啟用呼叫端指定要蒐集的 Provider。
-                foreach (Guid providerId in providerGuids)
+                foreach (UserProviderConfiguration provider in providers)
                 {
+                    Guid providerId = provider.ProviderId;
                     var enableParams = new ENABLE_TRACE_PARAMETERS { Version = ENABLE_TRACE_PARAMETERS_VERSION_2 };
 
                     ThrowIfError(
@@ -327,11 +348,11 @@ namespace QSoft.ETW
                             in providerId,
                             EVENT_CONTROL_CODE_ENABLE_PROVIDER,
                             TRACE_LEVEL_VERBOSE,
-                            matchAnyKeyword: 0,
+                            matchAnyKeyword: provider.MatchAnyKeyword,
                             matchAllKeyword: 0,
                             timeout: 0,
                             in enableParams),
-                        $"{nameof(EnableTraceEx2)}({providerId})");
+                        $"{nameof(EnableTraceEx2)}({provider.ProviderId})");
                 }
 
                 return eventTraceProperties;
@@ -364,10 +385,36 @@ namespace QSoft.ETW
 
         void MergeTraceFiles(string mergedFileName, string[] traceFiles)
         {
-            int result = CreateMergedTraceFile(
-                mergedFileName, traceFiles, (uint)traceFiles.Length, DefaultMergeFlags);
+            // CreateMergedTraceFile 若目標檔案已存在，或來源 ETL 剛結束寫入、控制代碼尚未完全釋放，
+            // 常會回傳無法明確歸類的 ERROR_UNIDENTIFIED_ERROR (1287)。因此先清除舊的合併輸出檔，
+            // 並在失敗時短暫等待重試，以降低此類暫時性錯誤造成合併失敗的機率。
+            if (File.Exists(mergedFileName))
+            {
+                File.Delete(mergedFileName);
+            }
+
+            const int maxAttempts = 3;
+            int result = ERROR_SUCCESS_LOCAL;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                result = CreateMergedTraceFile(
+                    mergedFileName, traceFiles, (uint)traceFiles.Length, DefaultMergeFlags);
+
+                if (result == ERROR_SUCCESS_LOCAL)
+                {
+                    return;
+                }
+
+                if (attempt < maxAttempts)
+                {
+                    Thread.Sleep(500);
+                }
+            }
+
             ThrowIfError(result, nameof(CreateMergedTraceFile));
         }
+
+        const int ERROR_SUCCESS_LOCAL = 0;
 
         public List<(string Name, Guid ProviderGuid, bool IsMof)> GetRegisteredProviders()
         {
@@ -652,50 +699,16 @@ namespace QSoft.ETW
 
     public class TraceSessionBuilder
     {
-        public const KernelTraceFlags KernelSessionEnableFlags =
-            KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS |
-            KernelTraceFlags.EVENT_TRACE_FLAG_THREAD |
-            KernelTraceFlags.EVENT_TRACE_FLAG_IMAGE_LOAD |
-            KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS_COUNTERS |
-            KernelTraceFlags.EVENT_TRACE_FLAG_CSWITCH |
-            KernelTraceFlags.EVENT_TRACE_FLAG_DPC |
-            KernelTraceFlags.EVENT_TRACE_FLAG_INTERRUPT |
-            KernelTraceFlags.EVENT_TRACE_FLAG_SYSTEMCALL |
-            KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO |
-            KernelTraceFlags.EVENT_TRACE_FLAG_DISK_FILE_IO |
-            KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO_INIT |
-            KernelTraceFlags.EVENT_TRACE_FLAG_DISPATCHER |
-            KernelTraceFlags.EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS |
-            KernelTraceFlags.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS |
-            KernelTraceFlags.EVENT_TRACE_FLAG_VIRTUAL_ALLOC |
-            KernelTraceFlags.EVENT_TRACE_FLAG_VAMAP |
-            KernelTraceFlags.EVENT_TRACE_FLAG_NETWORK_TCPIP |
-            KernelTraceFlags.EVENT_TRACE_FLAG_REGISTRY |
-            KernelTraceFlags.EVENT_TRACE_FLAG_DBGPRINT |
-            KernelTraceFlags.EVENT_TRACE_FLAG_JOB |
-            KernelTraceFlags.EVENT_TRACE_FLAG_ALPC |
-            KernelTraceFlags.EVENT_TRACE_FLAG_SPLIT_IO |
-            KernelTraceFlags.EVENT_TRACE_FLAG_DEBUG_EVENTS |
-            KernelTraceFlags.EVENT_TRACE_FLAG_DRIVER |
-            KernelTraceFlags.EVENT_TRACE_FLAG_PROFILE |
-            KernelTraceFlags.EVENT_TRACE_FLAG_FILE_IO |
-            KernelTraceFlags.EVENT_TRACE_FLAG_FILE_IO_INIT;
-
         public static readonly Guid KernelProcessProviderGuid = new("22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716");
         public static readonly Guid WmiActivityProviderGuid = new("1418ef04-b0b4-4623-bf7e-d74ab47bbdaa");
         public static readonly Guid EnergyEstimationEngineProviderGuid = new("ddcc3826-a68a-4e0d-bcfd-9c06c27c6948");
         public static readonly Guid KernelAcpiProviderGuid = new("c514638f-7723-485b-bcfc-96565d735d4a");
-
-        public static readonly Guid[] UserSessionProviderGuids =
-        [
-            KernelProcessProviderGuid,
-            WmiActivityProviderGuid,
-            EnergyEstimationEngineProviderGuid,
-            KernelAcpiProviderGuid,
-        ];
+        public static readonly Guid KernelPowerProviderGuid = new("331c3b3a-2005-44c2-ac5e-77220c37d6b4");
+        public static readonly Guid PowerMeterPollingProviderGuid = new("306c4e0b-e148-543d-315b-c618eb93157c");
+        public const ulong PowerMeterPollingFiveSecondKeyword = 0x0000000000000004;
 
         internal KernelTraceFlags m_EnableFlags = KernelTraceFlags.None;
-        internal readonly List<Guid> m_ProviderGuids = [];
+        internal readonly List<TraceSession.UserProviderConfiguration> m_UserProviders = [];
         internal string m_BaseDir = AppContext.BaseDirectory;
         internal string? m_MergedFileName;
 
@@ -713,13 +726,23 @@ namespace QSoft.ETW
 
         public TraceSessionBuilder WithProvider(Guid guid)
         {
-            m_ProviderGuids.Add(guid);
+            m_UserProviders.Add(new TraceSession.UserProviderConfiguration(guid, 0));
+            return this;
+        }
+
+        public TraceSessionBuilder WithProvider(Guid guid, ulong matchAnyKeyword)
+        {
+            m_UserProviders.Add(new TraceSession.UserProviderConfiguration(guid, matchAnyKeyword));
             return this;
         }
 
         public TraceSessionBuilder WithProviders(IEnumerable<Guid> guids)
         {
-            m_ProviderGuids.AddRange(guids);
+            foreach (Guid guid in guids)
+            {
+                m_UserProviders.Add(new TraceSession.UserProviderConfiguration(guid, 0));
+            }
+
             return this;
         }
 
@@ -753,6 +776,6 @@ namespace QSoft.ETW
             return this;
         }
 
-        public TraceSession Build() => new(m_EnableFlags, [.. m_ProviderGuids], m_BaseDir, m_MergedFileName);
+        public TraceSession Build() => new(m_EnableFlags, [.. m_UserProviders], m_BaseDir, m_MergedFileName);
     }
 }
