@@ -299,6 +299,12 @@ internal readonly record struct SchemaKey(Guid ProviderId, ushort Id, byte Versi
 
 internal sealed class EtlReadResult
 {
+    public DateTime? TraceStartTime { get; set; }
+    public DateTime? TraceEndTime { get; set; }
+    public uint ProcessorCount { get; set; }
+    public uint BuffersLost { get; set; }
+    public uint EventsLost { get; set; }
+    public EtlAnalysisResult? Analysis { get; set; }
     public List<ProcessInfo> Processes { get; } = [];
     public List<ThreadInfo> Threads { get; } = [];
     public List<ModuleInfo> UnmatchedModules { get; } = [];
@@ -314,6 +320,59 @@ internal sealed class EtlReadResult
     public List<DiskIoEventInfo> DiskIoEvents { get; } = [];
     public List<DiskIoEventInfo> DiskIoInitEvents { get; } = [];
     public List<FileIoEventInfo> DiskFileIoEvents { get; } = [];
+}
+
+internal sealed class EtlAnalysisResult
+{
+    public List<string> DataQualityWarnings { get; } = [];
+    public List<ProcessCpuSummary> ProcessCpuSummaries { get; } = [];
+    public List<ProcessIoSummary> ProcessIoSummaries { get; } = [];
+    public List<AddressSampleSummary> ProfileHotspots { get; } = [];
+    public List<RoutineEventSummary> DpcHotspots { get; } = [];
+    public List<RoutineEventSummary> InterruptHotspots { get; } = [];
+    public int UnmatchedCpuIntervals { get; set; }
+    public int UnmatchedDiskIoEvents { get; set; }
+}
+
+internal sealed class ProcessCpuSummary
+{
+    public required uint ProcessId { get; init; }
+    public string ImageFileName { get; init; } = "<未關聯程序>";
+    public TimeSpan EstimatedExecutionTime { get; set; }
+    public int ScheduledCount { get; set; }
+    public int DescheduledCount { get; set; }
+    public Dictionary<byte, TimeSpan> ExecutionTimeByProcessor { get; } = [];
+    public Dictionary<int, int> WaitReasonCounts { get; } = [];
+}
+
+internal sealed class ProcessIoSummary
+{
+    public required uint ProcessId { get; init; }
+    public string ImageFileName { get; init; } = "<未關聯程序>";
+    public int OperationCount { get; set; }
+    public long? TotalBytes { get; set; }
+    public List<TimeSpan> Latencies { get; } = [];
+    public Dictionary<string, int> OperationCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public int SlowOperationCount { get; set; }
+    public int UnmatchedOperationCount { get; set; }
+}
+
+internal sealed class AddressSampleSummary
+{
+    public required ulong Address { get; init; }
+    public int SampleCount { get; set; }
+    public Dictionary<byte, int> SamplesByProcessor { get; } = [];
+    public string ModuleName { get; set; } = "<未映射>";
+    public ulong? ModuleRelativeAddress { get; set; }
+}
+
+internal sealed class RoutineEventSummary
+{
+    public required ulong? Routine { get; init; }
+    public int EventCount { get; set; }
+    public Dictionary<byte, int> EventsByProcessor { get; } = [];
+    public string ModuleName { get; set; } = "<未映射>";
+    public ulong? ModuleRelativeAddress { get; set; }
 }
 
 internal sealed class ProcessInfo
@@ -583,10 +642,20 @@ internal static class EtlFileReader
                 return 1;
             }
 
+            LastReadResult!.ProcessorCount = logfile.LogfileHeader.NumberOfProcessors;
+            LastReadResult.BuffersLost = logfile.LogfileHeader.BuffersLost;
+            LastReadResult.TraceStartTime = logfile.LogfileHeader.StartTime == 0
+                ? null
+                : DateTime.FromFileTime(logfile.LogfileHeader.StartTime);
+            LastReadResult.TraceEndTime = logfile.LogfileHeader.EndTime == 0
+                ? null
+                : DateTime.FromFileTime(logfile.LogfileHeader.EndTime);
+
             Console.WriteLine("=== ETL 檔頭資訊 ===");
             Console.WriteLine($"處理器數量: {logfile.LogfileHeader.NumberOfProcessors}");
             Console.WriteLine($"緩衝區大小: {logfile.LogfileHeader.BufferSize} KB");
             Console.WriteLine($"已寫入緩衝區數: {logfile.LogfileHeader.BuffersWritten}");
+            Console.WriteLine($"遺失緩衝區數: {logfile.LogfileHeader.BuffersLost}");
             Console.WriteLine("====================");
 
             uint processResult = NativeMethods.ProcessTrace(ref traceHandle, 1, 0, 0);
@@ -600,18 +669,11 @@ internal static class EtlFileReader
                 return 1;
             }
 
+            LastReadResult.EventsLost = logfile.EventsLost;
+
             Console.WriteLine($"解析完成,共處理 {s_eventCount} 筆事件。");
-            //PrintProcessSummary(LastReadResult!);
-            //PrintWmiActivitySummary(LastReadResult!);
-            //PrintEnergyEstimationSummary(LastReadResult!);
-            //PrintKernelAcpiSummary(LastReadResult!);
-            //PrintKernelPowerSummary(LastReadResult!);
-            //PrintPowerMeterPollingSummary(LastReadResult!);
-            PrintCSwitchSummary(LastReadResult!);
-            PrintDiskIoSummary(LastReadResult!);
-            //PrintProfileSummary(LastReadResult!);
-            //PrintDpcSummary(LastReadResult!);
-            //PrintInterruptSummary(LastReadResult!);
+            LastReadResult.Analysis = Analyze(LastReadResult);
+            PrintAdvancedAnalysisSummary(LastReadResult);
             return 0;
         }
         finally
@@ -1300,6 +1362,455 @@ internal static class EtlFileReader
         }
 
         return int.TryParse(value, styles, CultureInfo.InvariantCulture, out int result) ? result : null;
+    }
+
+    private readonly record struct RunningThread(uint ThreadId, uint ProcessId, DateTime StartTime);
+
+    private static void AnalyzeCSwitchEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    {
+        Dictionary<uint, ProcessCpuSummary> summaries = [];
+        Dictionary<byte, RunningThread> runningThreads = [];
+
+        ProcessCpuSummary GetSummary(uint processId, DateTime timestamp)
+        {
+            if (!summaries.TryGetValue(processId, out ProcessCpuSummary? summary))
+            {
+                summary = new ProcessCpuSummary
+                {
+                    ProcessId = processId,
+                    ImageFileName = FindProcessAtTime(result.Processes, processId, timestamp)?.ImageFileName ?? "<未關聯程序>",
+                };
+                summaries.Add(processId, summary);
+            }
+
+            return summary;
+        }
+
+        foreach (CSwitchEventInfo switchEvent in result.CSwitchEvents.OrderBy(switchEvent => switchEvent.Timestamp))
+        {
+            if (runningThreads.Remove(switchEvent.ProcessorNumber, out RunningThread runningThread))
+            {
+                if (switchEvent.OldThreadId == runningThread.ThreadId && switchEvent.OldProcessId == runningThread.ProcessId)
+                {
+                    TimeSpan duration = switchEvent.Timestamp - runningThread.StartTime;
+                    if (duration >= TimeSpan.Zero)
+                    {
+                        ProcessCpuSummary summary = GetSummary(runningThread.ProcessId, switchEvent.Timestamp);
+                        summary.EstimatedExecutionTime += duration;
+                        summary.DescheduledCount++;
+                        summary.ExecutionTimeByProcessor[switchEvent.ProcessorNumber] =
+                            summary.ExecutionTimeByProcessor.GetValueOrDefault(switchEvent.ProcessorNumber) + duration;
+
+                        if (switchEvent.OldThreadWaitReason is int waitReason)
+                        {
+                            summary.WaitReasonCounts[waitReason] = summary.WaitReasonCounts.GetValueOrDefault(waitReason) + 1;
+                        }
+                    }
+                    else
+                    {
+                        analysis.UnmatchedCpuIntervals++;
+                    }
+                }
+                else
+                {
+                    analysis.UnmatchedCpuIntervals++;
+                }
+            }
+
+            if (switchEvent.NewThreadId is uint newThreadId && switchEvent.NewProcessId is uint newProcessId)
+            {
+                ProcessCpuSummary summary = GetSummary(newProcessId, switchEvent.Timestamp);
+                summary.ScheduledCount++;
+                runningThreads[switchEvent.ProcessorNumber] = new RunningThread(newThreadId, newProcessId, switchEvent.Timestamp);
+            }
+        }
+
+        analysis.UnmatchedCpuIntervals += runningThreads.Count;
+        analysis.ProcessCpuSummaries.AddRange(summaries.Values.OrderByDescending(summary => summary.EstimatedExecutionTime));
+    }
+
+    private static void AnalyzeDiskIoEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    {
+        const double SlowIoThresholdMilliseconds = 50;
+        Dictionary<string, Queue<DiskIoEventInfo>> pendingRequests = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<uint, ProcessIoSummary> summaries = [];
+
+        ProcessIoSummary GetSummary(uint processId, DateTime timestamp)
+        {
+            if (!summaries.TryGetValue(processId, out ProcessIoSummary? summary))
+            {
+                summary = new ProcessIoSummary
+                {
+                    ProcessId = processId,
+                    ImageFileName = FindProcessAtTime(result.Processes, processId, timestamp)?.ImageFileName ?? "<未關聯程序>",
+                };
+                summaries.Add(processId, summary);
+            }
+
+            return summary;
+        }
+
+        foreach (DiskIoEventInfo initEvent in result.DiskIoInitEvents.OrderBy(ioEvent => ioEvent.Timestamp))
+        {
+            string? correlationId = GetIoCorrelationId(initEvent.Properties);
+            if (correlationId is null)
+            {
+                analysis.UnmatchedDiskIoEvents++;
+                GetSummary(initEvent.ProcessId, initEvent.Timestamp).UnmatchedOperationCount++;
+                continue;
+            }
+
+            if (!pendingRequests.TryGetValue(correlationId, out Queue<DiskIoEventInfo>? queue))
+            {
+                queue = [];
+                pendingRequests.Add(correlationId, queue);
+            }
+
+            queue.Enqueue(initEvent);
+        }
+
+        foreach (DiskIoEventInfo completedEvent in result.DiskIoEvents.OrderBy(ioEvent => ioEvent.Timestamp))
+        {
+            ProcessIoSummary summary = GetSummary(completedEvent.ProcessId, completedEvent.Timestamp);
+            summary.OperationCount++;
+
+            string operation = GetString(completedEvent.Properties, "Operation", "IoOperation", "IrpFlags");
+            if (string.IsNullOrWhiteSpace(operation))
+            {
+                operation = $"Opcode {completedEvent.Opcode}";
+            }
+            summary.OperationCounts[operation] = summary.OperationCounts.GetValueOrDefault(operation) + 1;
+
+            if (GetUInt64(completedEvent.Properties, "TransferSize", "IoSize", "Size", "ByteCount", "DataSize") is ulong byteCount)
+            {
+                summary.TotalBytes = (summary.TotalBytes ?? 0) + checked((long)Math.Min(byteCount, long.MaxValue));
+            }
+
+            string? correlationId = GetIoCorrelationId(completedEvent.Properties);
+            if (correlationId is null || !pendingRequests.Remove(correlationId, out Queue<DiskIoEventInfo>? starts) || starts.Count == 0)
+            {
+                analysis.UnmatchedDiskIoEvents++;
+                summary.UnmatchedOperationCount++;
+                continue;
+            }
+
+            DiskIoEventInfo startEvent = starts.Dequeue();
+            if (starts.Count > 0)
+            {
+                pendingRequests[correlationId] = starts;
+            }
+
+            TimeSpan latency = completedEvent.Timestamp - startEvent.Timestamp;
+            if (latency < TimeSpan.Zero)
+            {
+                analysis.UnmatchedDiskIoEvents++;
+                summary.UnmatchedOperationCount++;
+                continue;
+            }
+
+            summary.Latencies.Add(latency);
+            if (latency.TotalMilliseconds >= SlowIoThresholdMilliseconds)
+            {
+                summary.SlowOperationCount++;
+            }
+        }
+
+        foreach (Queue<DiskIoEventInfo> starts in pendingRequests.Values)
+        {
+            foreach (DiskIoEventInfo startEvent in starts)
+            {
+                analysis.UnmatchedDiskIoEvents++;
+                GetSummary(startEvent.ProcessId, startEvent.Timestamp).UnmatchedOperationCount++;
+            }
+        }
+
+        analysis.ProcessIoSummaries.AddRange(summaries.Values.OrderByDescending(summary => summary.TotalBytes ?? 0).ThenByDescending(summary => summary.OperationCount));
+    }
+
+    private static string? GetIoCorrelationId(IReadOnlyDictionary<string, string> properties)
+    {
+        foreach (string name in new[] { "IrpPtr", "Irp", "RequestId", "RequestID", "IoRequestId" })
+        {
+            if (properties.TryGetValue(name, out string? value) && !string.IsNullOrWhiteSpace(value))
+            {
+                return $"{name}:{value.Trim()}";
+            }
+        }
+
+        return null;
+    }
+
+    private static ulong? GetUInt64(IReadOnlyDictionary<string, string> properties, params string[] names)
+    {
+        string? value = GetString(properties, names);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        NumberStyles styles = NumberStyles.Integer;
+        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value[2..];
+            styles = NumberStyles.AllowHexSpecifier;
+        }
+
+        return ulong.TryParse(value, styles, CultureInfo.InvariantCulture, out ulong result) ? result : null;
+    }
+
+    private static void AnalyzeProfileEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    {
+        Dictionary<ulong, AddressSampleSummary> summaries = [];
+        foreach (ProfileEventInfo profileEvent in result.ProfileEvents)
+        {
+            if (profileEvent.InstructionPointer is not ulong address)
+            {
+                continue;
+            }
+
+            if (!summaries.TryGetValue(address, out AddressSampleSummary? summary))
+            {
+                summary = new AddressSampleSummary { Address = address };
+                uint? processId = FindScheduledProcessAtTime(result.CSwitchEvents, profileEvent.ProcessorNumber, profileEvent.Timestamp);
+                if (processId is uint id && TryMapAddressToModule(result, id, profileEvent.Timestamp, address, out ModuleInfo? module, out ulong relativeAddress))
+                {
+                    summary.ModuleName = module.FileName;
+                    summary.ModuleRelativeAddress = relativeAddress;
+                }
+
+                summaries.Add(address, summary);
+            }
+
+            summary.SampleCount++;
+            summary.SamplesByProcessor[profileEvent.ProcessorNumber] = summary.SamplesByProcessor.GetValueOrDefault(profileEvent.ProcessorNumber) + 1;
+        }
+
+        analysis.ProfileHotspots.AddRange(summaries.Values.OrderByDescending(summary => summary.SampleCount));
+    }
+
+    private static uint? FindScheduledProcessAtTime(IEnumerable<CSwitchEventInfo> events, byte processorNumber, DateTime timestamp)
+    {
+        return events
+            .Where(switchEvent => switchEvent.ProcessorNumber == processorNumber && switchEvent.Timestamp <= timestamp)
+            .OrderByDescending(switchEvent => switchEvent.Timestamp)
+            .Select(switchEvent => switchEvent.NewProcessId)
+            .FirstOrDefault(processId => processId is not null);
+    }
+
+    private static bool TryMapAddressToModule(EtlReadResult result, uint processId, DateTime timestamp, ulong address, out ModuleInfo? matchedModule, out ulong relativeAddress)
+    {
+        matchedModule = result.Processes
+            .Where(process => process.ProcessId == processId)
+            .SelectMany(process => process.Modules)
+            .Where(module => module.LoadTime <= timestamp)
+            .FirstOrDefault(module =>
+                TryParseAddress(module.ImageBase, out ulong imageBase) &&
+                TryParseAddress(module.ImageSize, out ulong imageSize) &&
+                address >= imageBase && address - imageBase < imageSize);
+
+        if (matchedModule is null || !TryParseAddress(matchedModule.ImageBase, out ulong baseAddress))
+        {
+            relativeAddress = 0;
+            return false;
+        }
+
+        relativeAddress = address - baseAddress;
+        return true;
+    }
+
+    private static bool TryParseAddress(string value, out ulong address)
+    {
+        value = value.Trim();
+        NumberStyles styles = NumberStyles.Integer;
+        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value[2..];
+            styles = NumberStyles.AllowHexSpecifier;
+        }
+
+        return ulong.TryParse(value, styles, CultureInfo.InvariantCulture, out address);
+    }
+
+    private static void AnalyzeRoutineEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    {
+        AnalyzeRoutineEvents(result, result.DpcEvents, dpcEvent => dpcEvent.Routine, dpcEvent => dpcEvent.ProcessorNumber, dpcEvent => dpcEvent.Timestamp, analysis.DpcHotspots);
+        AnalyzeRoutineEvents(result, result.InterruptEvents, interruptEvent => interruptEvent.Routine, interruptEvent => interruptEvent.ProcessorNumber, interruptEvent => interruptEvent.Timestamp, analysis.InterruptHotspots);
+    }
+
+    private static void AnalyzeRoutineEvents<T>(
+        EtlReadResult result,
+        IEnumerable<T> events,
+        Func<T, ulong?> getRoutine,
+        Func<T, byte> getProcessorNumber,
+        Func<T, DateTime> getTimestamp,
+        List<RoutineEventSummary> destination)
+    {
+        Dictionary<ulong?, RoutineEventSummary> summaries = [];
+        foreach (T eventInfo in events)
+        {
+            ulong? routine = getRoutine(eventInfo);
+            if (!summaries.TryGetValue(routine, out RoutineEventSummary? summary))
+            {
+                summary = new RoutineEventSummary { Routine = routine };
+                if (routine is ulong address && TryMapAddressToAnyModule(result, getTimestamp(eventInfo), address, out ModuleInfo? module, out ulong relativeAddress))
+                {
+                    summary.ModuleName = module.FileName;
+                    summary.ModuleRelativeAddress = relativeAddress;
+                }
+
+                summaries.Add(routine, summary);
+            }
+
+            summary.EventCount++;
+            byte processorNumber = getProcessorNumber(eventInfo);
+            summary.EventsByProcessor[processorNumber] = summary.EventsByProcessor.GetValueOrDefault(processorNumber) + 1;
+        }
+
+        destination.AddRange(summaries.Values.OrderByDescending(summary => summary.EventCount));
+    }
+
+    private static bool TryMapAddressToAnyModule(EtlReadResult result, DateTime timestamp, ulong address, out ModuleInfo? matchedModule, out ulong relativeAddress)
+    {
+        matchedModule = result.Processes
+            .SelectMany(process => process.Modules)
+            .Where(module => module.LoadTime <= timestamp)
+            .FirstOrDefault(module =>
+                TryParseAddress(module.ImageBase, out ulong imageBase) &&
+                TryParseAddress(module.ImageSize, out ulong imageSize) &&
+                address >= imageBase && address - imageBase < imageSize);
+
+        if (matchedModule is null || !TryParseAddress(matchedModule.ImageBase, out ulong baseAddress))
+        {
+            relativeAddress = 0;
+            return false;
+        }
+
+        relativeAddress = address - baseAddress;
+        return true;
+    }
+
+    private static EtlAnalysisResult Analyze(EtlReadResult result)
+    {
+        var analysis = new EtlAnalysisResult();
+        if (result.BuffersLost > 0)
+        {
+            analysis.DataQualityWarnings.Add($"ETL 遺失 {result.BuffersLost} 個緩衝區，統計結果可能不完整。");
+        }
+
+        if (result.EventsLost > 0)
+        {
+            analysis.DataQualityWarnings.Add($"讀取 ETL 時回報遺失 {result.EventsLost} 筆事件，統計結果可能不完整。");
+        }
+
+        AnalyzeCSwitchEvents(result, analysis);
+        AnalyzeDiskIoEvents(result, analysis);
+        AnalyzeProfileEvents(result, analysis);
+        AnalyzeRoutineEvents(result, analysis);
+
+        if (analysis.UnmatchedCpuIntervals > 0)
+        {
+            analysis.DataQualityWarnings.Add($"有 {analysis.UnmatchedCpuIntervals} 個 CPU 執行區間未能安全配對，未納入估計 CPU 時間。");
+        }
+
+        if (analysis.UnmatchedDiskIoEvents > 0)
+        {
+            analysis.DataQualityWarnings.Add($"有 {analysis.UnmatchedDiskIoEvents} 筆 Disk I/O 未能以明確識別碼配對，未納入延遲統計。");
+        }
+
+        return analysis;
+    }
+
+    private static void PrintAdvancedAnalysisSummary(EtlReadResult result)
+    {
+        EtlAnalysisResult analysis = result.Analysis ?? Analyze(result);
+        TimeSpan traceDuration = GetTraceDuration(result);
+
+        Console.WriteLine();
+        Console.WriteLine("=== 進階 ETL 效能分析 ===");
+        Console.WriteLine($"追蹤期間: {traceDuration.TotalSeconds:F3} 秒，處理器數: {result.ProcessorCount}");
+        Console.WriteLine("資料品質:");
+        if (analysis.DataQualityWarnings.Count == 0)
+        {
+            Console.WriteLine("  未偵測到 ETL 緩衝區或讀取事件遺失。未配對事件仍會在各項統計中排除。");
+        }
+        else
+        {
+            foreach (string warning in analysis.DataQualityWarnings)
+            {
+                Console.WriteLine($"  警告: {warning}");
+            }
+        }
+
+        Console.WriteLine("程序 CPU 估計執行時間（前 10 名）:");
+        foreach (ProcessCpuSummary summary in analysis.ProcessCpuSummaries.Take(10))
+        {
+            string waitReasons = string.Join(", ", summary.WaitReasonCounts.OrderByDescending(pair => pair.Value).Take(3).Select(pair => $"{pair.Key}:{pair.Value}"));
+            Console.WriteLine($"  PID={summary.ProcessId} {summary.ImageFileName}: {summary.EstimatedExecutionTime.TotalMilliseconds:F3} ms，排入={summary.ScheduledCount}，換出={summary.DescheduledCount}，等待={waitReasons}");
+        }
+
+        Console.WriteLine("程序 Disk I/O（前 10 名）:");
+        foreach (ProcessIoSummary summary in analysis.ProcessIoSummaries.Take(10))
+        {
+            double? averageLatency = summary.Latencies.Count == 0 ? null : summary.Latencies.Average(latency => latency.TotalMilliseconds);
+            double? p95Latency = GetPercentileMilliseconds(summary.Latencies, 0.95);
+            string bytes = summary.TotalBytes is long totalBytes ? totalBytes.ToString("N0", CultureInfo.InvariantCulture) : "未知";
+            Console.WriteLine($"  PID={summary.ProcessId} {summary.ImageFileName}: 操作={summary.OperationCount}，位元組={bytes}，平均延遲={FormatMilliseconds(averageLatency)}，P95={FormatMilliseconds(p95Latency)}，慢 I/O={summary.SlowOperationCount}，未配對={summary.UnmatchedOperationCount}");
+        }
+
+        PrintAddressHotspots("CPU Profile 熱點", analysis.ProfileHotspots.Select(summary => (summary.Address, summary.SampleCount, summary.ModuleName, summary.ModuleRelativeAddress)));
+        PrintRoutineHotspots("DPC routine 熱點", analysis.DpcHotspots);
+        PrintRoutineHotspots("Interrupt routine 熱點", analysis.InterruptHotspots);
+    }
+
+    private static void PrintAddressHotspots(string title, IEnumerable<(ulong Address, int Count, string ModuleName, ulong? RelativeAddress)> hotspots)
+    {
+        Console.WriteLine($"{title}（前 10 名）:");
+        foreach ((ulong address, int count, string moduleName, ulong? relativeAddress) in hotspots.Take(10))
+        {
+            string relative = relativeAddress is ulong value ? $"+0x{value:X}" : string.Empty;
+            Console.WriteLine($"  {FormatAddress(address)} {moduleName}{relative}: {count} 個取樣");
+        }
+    }
+
+    private static void PrintRoutineHotspots(string title, IEnumerable<RoutineEventSummary> hotspots)
+    {
+        Console.WriteLine($"{title}（前 10 名）:");
+        foreach (RoutineEventSummary summary in hotspots.Take(10))
+        {
+            string relative = summary.ModuleRelativeAddress is ulong value ? $"+0x{value:X}" : string.Empty;
+            Console.WriteLine($"  {FormatAddress(summary.Routine)} {summary.ModuleName}{relative}: {summary.EventCount} 筆事件");
+        }
+    }
+
+    private static TimeSpan GetTraceDuration(EtlReadResult result)
+    {
+        if (result.TraceStartTime is DateTime start && result.TraceEndTime is DateTime end && end >= start)
+        {
+            return end - start;
+        }
+
+        IEnumerable<DateTime> timestamps = result.CSwitchEvents.Select(item => item.Timestamp)
+            .Concat(result.DiskIoEvents.Select(item => item.Timestamp))
+            .Concat(result.ProfileEvents.Select(item => item.Timestamp));
+        DateTime[] timestampArray = timestamps.ToArray();
+        return timestampArray.Length < 2 ? TimeSpan.Zero : timestampArray.Max() - timestampArray.Min();
+    }
+
+    private static double? GetPercentileMilliseconds(IReadOnlyCollection<TimeSpan> values, double percentile)
+    {
+        if (values.Count == 0)
+        {
+            return null;
+        }
+
+        double[] sorted = values.Select(value => value.TotalMilliseconds).OrderBy(value => value).ToArray();
+        int index = (int)Math.Ceiling(percentile * sorted.Length) - 1;
+        return sorted[Math.Clamp(index, 0, sorted.Length - 1)];
+    }
+
+    private static string FormatMilliseconds(double? value)
+    {
+        return value is double milliseconds ? $"{milliseconds:F3} ms" : "未知";
     }
 
     private static void PrintProcessSummary(EtlReadResult result)
