@@ -1,90 +1,12 @@
-﻿// See https://aka.ms/new-console-template for more information
-
-using QSoft.ETW;
+﻿using QSoft.ETW;
 using System.Globalization;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
-using static System.Net.Mime.MediaTypeNames;
-Console.OutputEncoding = Encoding.UTF8;
-
-string etlfilename = Path.Combine(AppContext.BaseDirectory, "test.etl");
-if(!File.Exists(etlfilename))
-{
-    using TraceSession session = new TraceSessionBuilder()
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_IMAGE_LOAD)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_CSWITCH)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_THREAD)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_INTERRUPT)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROFILE)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DPC)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_FILE_IO)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO_INIT)
-    .WithProvider(TraceSessionBuilder.WmiActivityProviderGuid)
-    .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
-    .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
-    .WithProvider(TraceSessionBuilder.KernelPowerProviderGuid)
-    .WithProvider(TraceSessionBuilder.PowerMeterPollingProviderGuid, TraceSessionBuilder.PowerMeterPollingFiveSecondKeyword)
-    .WithOutputPath(etlfilename)
-    .Build();
-
-    int DurationSeconds = 60;
-    if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSeconds > 0)
-    {
-        DurationSeconds = parsedSeconds;
-    }
-
-    if (!session.IsElevated())
-    {
-        Console.Error.WriteLine("此程式需要以系統管理員身分執行才能啟動 ETW Kernel/User Trace。");
-        return 1;
-    }
-
-    Console.CancelKeyPress += (_, e) =>
-    {
-        e.Cancel = true;
-        session.Stop();
-        Environment.Exit(1);
-    };
-
-    try
-    {
-        session.Start();
-        Console.WriteLine($"追蹤中，將持續 {DurationSeconds} 秒...");
-        await Task.Delay(TimeSpan.FromSeconds(DurationSeconds));
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"執行失敗: {ex.Message}");
-        return 1;
-    }
-    finally
-    {
-        session.Stop();
-    }
-}
-
-Console.WriteLine();
-Console.WriteLine($"開始解析 ETL 檔案: {etlfilename}");
-int processExitCode = EtlFileReader.ProcessFile(etlfilename);
-if (processExitCode != 0)
-{
-    Console.Error.WriteLine($"ETL 解析失敗，結束碼: {processExitCode}");
-    return processExitCode;
-}
-
-if (EtlFileReader.LastReadResult is not EtlReadResult readResult)
-{
-    Console.Error.WriteLine("ETL 解析完成後未取得可匯出的結果。");
-    return 1;
-}
 
 
-
-Console.ReadKey();
-return 0;
+namespace WpfApp1.Etl;
 
 internal static class EtwNativeConstants
 {
@@ -646,43 +568,44 @@ internal static partial class NativeMethods
 /// ETL 檔案解析的初始架構:負責 OpenTrace → ProcessTrace → CloseTrace 的完整流程,
 /// 並透過 EVENT_RECORD callback 逐筆取出事件標頭資訊。
 /// </summary>
-internal static class EtlFileReader
+internal sealed class EtlFileReader
 {
-    private static readonly Guid s_processProviderId = new("3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c");
-    private static readonly Guid s_imageLoadProviderId = new("2cb15d1d-5fc1-11d2-abe1-00a0c911f518");
-    private static readonly Guid s_threadProviderId = new("3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c");
-    private static readonly Guid s_diskIoProviderId = new("3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c");
-    private static readonly Guid s_fileIoProviderId = new("90cbdc39-4a3e-11d1-84f4-0000f80464e3");
-    private static readonly Guid s_perfInfoProviderId = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
+    private readonly Guid s_processProviderId = new("3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c");
+    private readonly Guid s_imageLoadProviderId = new("2cb15d1d-5fc1-11d2-abe1-00a0c911f518");
+    private readonly Guid s_threadProviderId = new("3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c");
+    private readonly Guid s_diskIoProviderId = new("3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c");
+    private readonly Guid s_fileIoProviderId = new("90cbdc39-4a3e-11d1-84f4-0000f80464e3");
+    private readonly Guid s_perfInfoProviderId = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
     private const byte CSwitchOpcode = 36;
     private const byte SampledProfileOpcode = 46;
     private const byte ThreadDpcOpcode = 66;
     private const byte InterruptOpcode = 67;
     private const byte DpcOpcode = 68;
     private const byte TimerDpcOpcode = 69;
-    private static long s_eventCount;
-    private static readonly Dictionary<uint, ProcessInfo> s_activeProcesses = [];
-    private static readonly Dictionary<uint, ThreadInfo> s_activeThreads = [];
+    private long s_eventCount;
+    private readonly Dictionary<uint, ProcessInfo> s_activeProcesses = [];
+    private readonly Dictionary<uint, ThreadInfo> s_activeThreads = [];
 
-    public static EtlReadResult? LastReadResult { get; private set; }
+    private EtlReadResult? _readResult;
+    private IProgress<string>? _progress;
 
     /// <summary>TDH schema 快取,鍵為 (ProviderId, EventId, Version, Opcode),值為 TdhGetEventInformation 配置的原生緩衝區指標。查詢失敗時快取 0。</summary>
-    private static readonly Dictionary<SchemaKey, nint> s_schemaCache = new();
+    private readonly Dictionary<SchemaKey, nint> s_schemaCache = new();
 
     /// <summary>開啟並解析指定的 ETL 檔案,回傳流程結束碼(0 表示成功)。</summary>
-    public static int ProcessFile(string etlFilePath)
+    public EtlReadResult ProcessFile(string etlFilePath, IProgress<string>? progress = null)
     {
         if (!File.Exists(etlFilePath))
         {
             Console.Error.WriteLine($"找不到 ETL 檔案: {etlFilePath}");
-            return 1;
+            throw new InvalidOperationException("ETL 解析失敗。");
         }
 
         s_eventCount = 0;
         s_schemaCache.Clear();
         s_activeProcesses.Clear();
         s_activeThreads.Clear();
-        LastReadResult = new EtlReadResult();
+        _readResult = new EtlReadResult();
 
         EventRecordCallbackDelegate callback = OnEventRecord;
         nint logFileNamePtr = 0;
@@ -704,15 +627,15 @@ internal static class EtlFileReader
             {
                 int openError = Marshal.GetLastPInvokeError();
                 Console.Error.WriteLine($"OpenTrace 失敗,Win32 錯誤碼: {openError}");
-                return 1;
+                throw new InvalidOperationException("ETL 解析失敗。");
             }
 
-            LastReadResult!.ProcessorCount = logfile.LogfileHeader.NumberOfProcessors;
-            LastReadResult.BuffersLost = logfile.LogfileHeader.BuffersLost;
-            LastReadResult.TraceStartTime = logfile.LogfileHeader.StartTime == 0
+            _readResult!.ProcessorCount = logfile.LogfileHeader.NumberOfProcessors;
+            _readResult.BuffersLost = logfile.LogfileHeader.BuffersLost;
+            _readResult.TraceStartTime = logfile.LogfileHeader.StartTime == 0
                 ? null
                 : DateTime.FromFileTime(logfile.LogfileHeader.StartTime);
-            LastReadResult.TraceEndTime = logfile.LogfileHeader.EndTime == 0
+            _readResult.TraceEndTime = logfile.LogfileHeader.EndTime == 0
                 ? null
                 : DateTime.FromFileTime(logfile.LogfileHeader.EndTime);
 
@@ -731,15 +654,15 @@ internal static class EtlFileReader
             if (processResult != 0)
             {
                 Console.Error.WriteLine($"ProcessTrace 失敗,Win32 錯誤碼: {processResult}");
-                return 1;
+                throw new InvalidOperationException("ETL 解析失敗。");
             }
 
-            LastReadResult.EventsLost = logfile.EventsLost;
+            _readResult.EventsLost = logfile.EventsLost;
 
-            Console.WriteLine($"解析完成,共處理 {s_eventCount} 筆事件。");
-            LastReadResult.Analysis = Analyze(LastReadResult);
-            PrintAdvancedAnalysisSummary(LastReadResult);
-            return 0;
+            _progress?.Report($"解析完成，共處理 {s_eventCount:N0} 筆事件，正在建立分析結果...");
+            _readResult.Analysis = Analyze(_readResult);
+            _progress?.Report("分析完成。");
+            return _readResult!;
         }
         finally
         {
@@ -766,7 +689,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static nint GetOrAddSchema(nint eventRecordPtr, in EVENT_HEADER header)
+    private nint GetOrAddSchema(nint eventRecordPtr, in EVENT_HEADER header)
     {
         var key = new SchemaKey(header.ProviderId, header.EventDescriptor.Id, header.EventDescriptor.Version, header.EventDescriptor.Opcode);
         if (s_schemaCache.TryGetValue(key, out nint cachedInfoPtr))
@@ -798,7 +721,7 @@ internal static class EtlFileReader
         return infoPtr;
     }
 
-    private static void OnEventRecord(nint eventRecordPtr)
+    private void OnEventRecord(nint eventRecordPtr)
     {
         s_eventCount++;
 
@@ -863,7 +786,7 @@ internal static class EtlFileReader
         //    Console.WriteLine($"    {propertyName} = {value}");
         //}
 
-        if (LastReadResult is null)
+        if (_readResult is null)
         {
             return;
         }
@@ -911,7 +834,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static Dictionary<string, string>? ReadProperties(nint eventRecordPtr, in EVENT_HEADER header, in EVENT_RECORD record)
+    private Dictionary<string, string>? ReadProperties(nint eventRecordPtr, in EVENT_HEADER header, in EVENT_RECORD record)
     {
         nint infoPtr = GetOrAddSchema(eventRecordPtr, in header);
         if (infoPtr == 0)
@@ -990,7 +913,7 @@ internal static class EtlFileReader
         return properties;
     }
 
-    private static void ProcessProcessEvent(byte opcode, DateTime timestamp, uint headerProcessId, IReadOnlyDictionary<string, string> properties)
+    private void ProcessProcessEvent(byte opcode, DateTime timestamp, uint headerProcessId, IReadOnlyDictionary<string, string> properties)
     {
         uint processId = GetUInt32(properties, "ProcessId") ?? headerProcessId;
 
@@ -1006,7 +929,7 @@ internal static class EtlFileReader
                 Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
             };
 
-            LastReadResult!.Processes.Add(process);
+            _readResult!.Processes.Add(process);
             //System.Diagnostics.Trace.WriteLine($"{process.ImageFileName}->{process.CommandLine}");
             s_activeProcesses[processId] = process;
         }
@@ -1016,7 +939,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static void ProcessThreadEvent(byte opcode, DateTime timestamp, IReadOnlyDictionary<string, string> properties)
+    private void ProcessThreadEvent(byte opcode, DateTime timestamp, IReadOnlyDictionary<string, string> properties)
     {
         uint? threadId = GetUInt32(properties, "ThreadId", "TThreadId");
         if (threadId is not uint id)
@@ -1040,7 +963,7 @@ internal static class EtlFileReader
                 Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
             };
 
-            LastReadResult!.Threads.Add(thread);
+            _readResult!.Threads.Add(thread);
             s_activeThreads[id] = thread;
         }
         else if (opcode is 2 or 4 && s_activeThreads.Remove(id, out ThreadInfo? thread))
@@ -1049,7 +972,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static void ProcessImageLoadEvent(DateTime timestamp, uint headerProcessId, IReadOnlyDictionary<string, string> properties)
+    private void ProcessImageLoadEvent(DateTime timestamp, uint headerProcessId, IReadOnlyDictionary<string, string> properties)
     {
         uint processId = GetUInt32(properties, "ProcessId") ?? headerProcessId;
         var module = new ModuleInfo
@@ -1068,11 +991,11 @@ internal static class EtlFileReader
         }
         else
         {
-            LastReadResult!.UnmatchedModules.Add(module);
+            _readResult!.UnmatchedModules.Add(module);
         }
     }
 
-    private static void ProcessDiskIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private void ProcessDiskIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
         var diskIoEvent = new DiskIoEventInfo
         {
@@ -1087,17 +1010,17 @@ internal static class EtlFileReader
 
         if (header.EventDescriptor.Opcode is 12 or 13 or 15 or 16)
         {
-            LastReadResult!.DiskIoInitEvents.Add(diskIoEvent);
+            _readResult!.DiskIoInitEvents.Add(diskIoEvent);
         }
         else
         {
-            LastReadResult!.DiskIoEvents.Add(diskIoEvent);
+            _readResult!.DiskIoEvents.Add(diskIoEvent);
         }
     }
 
-    private static void ProcessFileIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private void ProcessFileIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
-        LastReadResult!.DiskFileIoEvents.Add(new FileIoEventInfo
+        _readResult!.DiskFileIoEvents.Add(new FileIoEventInfo
         {
             Timestamp = timestamp,
             EventId = header.EventDescriptor.Id,
@@ -1109,11 +1032,11 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessEnergyEstimationEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private void ProcessEnergyEstimationEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
         uint? processId = GetUInt32(properties, "ProcessId") ?? (header.ProcessId != 0 ? header.ProcessId : null);
 
-        LastReadResult!.EnergyEstimationEvents.Add(new EnergyEstimationEventInfo
+        _readResult!.EnergyEstimationEvents.Add(new EnergyEstimationEventInfo
         {
             Timestamp = timestamp,
             EventId = header.EventDescriptor.Id,
@@ -1126,9 +1049,9 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessWmiActivityEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private void ProcessWmiActivityEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
-        LastReadResult!.WmiActivityEvents.Add(new WmiActivityEventInfo
+        _readResult!.WmiActivityEvents.Add(new WmiActivityEventInfo
         {
             Timestamp = timestamp,
             EventId = header.EventDescriptor.Id,
@@ -1140,9 +1063,9 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessKernelAcpiEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private void ProcessKernelAcpiEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
-        LastReadResult!.KernelAcpiEvents.Add(new KernelAcpiEventInfo
+        _readResult!.KernelAcpiEvents.Add(new KernelAcpiEventInfo
         {
             Timestamp = timestamp,
             EventId = header.EventDescriptor.Id,
@@ -1154,9 +1077,9 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessKernelPowerEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private void ProcessKernelPowerEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
-        LastReadResult!.KernelPowerEvents.Add(new KernelPowerEventInfo
+        _readResult!.KernelPowerEvents.Add(new KernelPowerEventInfo
         {
             Timestamp = timestamp,
             EventId = header.EventDescriptor.Id,
@@ -1168,9 +1091,9 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessPowerMeterPollingEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private void ProcessPowerMeterPollingEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
-        LastReadResult!.PowerMeterPollingEvents.Add(new PowerMeterPollingEventInfo
+        _readResult!.PowerMeterPollingEvents.Add(new PowerMeterPollingEventInfo
         {
             Timestamp = timestamp,
             EventId = header.EventDescriptor.Id,
@@ -1180,18 +1103,18 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessCSwitchEvent(DateTime timestamp, byte processorNumber, IReadOnlyDictionary<string, string> properties)
+    private void ProcessCSwitchEvent(DateTime timestamp, byte processorNumber, IReadOnlyDictionary<string, string> properties)
     {
         uint? newThreadId = GetUInt32(properties, "NewThreadId");
         uint? oldThreadId = GetUInt32(properties, "OldThreadId");
-        LastReadResult!.CSwitchEvents.Add(new CSwitchEventInfo
+        _readResult!.CSwitchEvents.Add(new CSwitchEventInfo
         {
             Timestamp = timestamp,
             ProcessorNumber = processorNumber,
             NewThreadId = newThreadId,
             OldThreadId = oldThreadId,
-            NewProcessId = FindThreadAtTime(LastReadResult.Threads, newThreadId, timestamp)?.ProcessId,
-            OldProcessId = FindThreadAtTime(LastReadResult.Threads, oldThreadId, timestamp)?.ProcessId,
+            NewProcessId = FindThreadAtTime(_readResult.Threads, newThreadId, timestamp)?.ProcessId,
+            OldProcessId = FindThreadAtTime(_readResult.Threads, oldThreadId, timestamp)?.ProcessId,
             NewThreadPriority = GetInt32(properties, "NewThreadPriority"),
             OldThreadPriority = GetInt32(properties, "OldThreadPriority"),
             PreviousCState = GetInt32(properties, "PreviousCState"),
@@ -1204,10 +1127,10 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessProfileEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
+    private void ProcessProfileEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
     {
         ProfilePayloadInfo? payload = ParseProfilePayload(userData, userDataLength, GetPointerSize(in header));
-        LastReadResult!.ProfileEvents.Add(new ProfileEventInfo
+        _readResult!.ProfileEvents.Add(new ProfileEventInfo
         {
             Timestamp = timestamp,
             ProcessorNumber = processorNumber,
@@ -1219,10 +1142,10 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessDpcEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
+    private void ProcessDpcEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
     {
         DpcPayloadInfo? payload = ParseDpcPayload(userData, userDataLength, GetPointerSize(in header));
-        LastReadResult!.DpcEvents.Add(new DpcEventInfo
+        _readResult!.DpcEvents.Add(new DpcEventInfo
         {
             Timestamp = timestamp,
             ProcessorNumber = processorNumber,
@@ -1235,10 +1158,10 @@ internal static class EtlFileReader
         });
     }
 
-    private static void ProcessInterruptEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
+    private void ProcessInterruptEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
     {
         InterruptPayloadInfo? payload = ParseInterruptPayload(userData, userDataLength, GetPointerSize(in header));
-        LastReadResult!.InterruptEvents.Add(new InterruptEventInfo
+        _readResult!.InterruptEvents.Add(new InterruptEventInfo
         {
             Timestamp = timestamp,
             ProcessorNumber = processorNumber,
@@ -1252,7 +1175,7 @@ internal static class EtlFileReader
         });
     }
 
-    private static uint GetPointerSize(in EVENT_HEADER header)
+    private uint GetPointerSize(in EVENT_HEADER header)
     {
         return (header.Flags & EtwNativeConstants.EVENT_HEADER_FLAG_32_BIT_HEADER) != 0 ? 4u : 8u;
     }
@@ -1264,7 +1187,7 @@ internal static class EtlFileReader
     /// PreviousCState(u8) SpareByte(i8) OldThreadWaitReason(i8) OldThreadWaitMode(i8) OldThreadState(i8)
     /// OldThreadWaitIdealProcessor(i8) NewThreadWaitTime(u32) Reserved(u32)
     /// </summary>
-    private static IReadOnlyDictionary<string, string>? ParseCSwitchPayload(nint userData, int userDataLength)
+    private IReadOnlyDictionary<string, string>? ParseCSwitchPayload(nint userData, int userDataLength)
     {
         const int CSwitchPayloadSize = 24;
         if (userData == 0 || userDataLength < CSwitchPayloadSize)
@@ -1302,7 +1225,7 @@ internal static class EtlFileReader
     private readonly record struct DpcPayloadInfo(ulong InitialTime, ulong Routine, IReadOnlyDictionary<string, string> Properties);
     private readonly record struct InterruptPayloadInfo(ulong InitialTime, ulong Routine, uint ReturnValue, IReadOnlyDictionary<string, string> Properties);
 
-    private static ProfilePayloadInfo? ParseProfilePayload(nint userData, int userDataLength, uint pointerSize)
+    private ProfilePayloadInfo? ParseProfilePayload(nint userData, int userDataLength, uint pointerSize)
     {
         if (userData == 0 || userDataLength < pointerSize)
         {
@@ -1318,7 +1241,7 @@ internal static class EtlFileReader
             });
     }
 
-    private static DpcPayloadInfo? ParseDpcPayload(nint userData, int userDataLength, uint pointerSize)
+    private DpcPayloadInfo? ParseDpcPayload(nint userData, int userDataLength, uint pointerSize)
     {
         const int InitialTimeSize = sizeof(ulong);
         int requiredLength = InitialTimeSize + (int)pointerSize;
@@ -1339,7 +1262,7 @@ internal static class EtlFileReader
             });
     }
 
-    private static InterruptPayloadInfo? ParseInterruptPayload(nint userData, int userDataLength, uint pointerSize)
+    private InterruptPayloadInfo? ParseInterruptPayload(nint userData, int userDataLength, uint pointerSize)
     {
         const int InitialTimeSize = sizeof(ulong);
         const int ReturnValueSize = sizeof(uint);
@@ -1366,14 +1289,14 @@ internal static class EtlFileReader
             });
     }
 
-    private static ulong ReadPointer(nint address, int offset, uint pointerSize)
+    private ulong ReadPointer(nint address, int offset, uint pointerSize)
     {
         return pointerSize == 4
             ? unchecked((uint)Marshal.ReadInt32(address, offset))
             : unchecked((ulong)Marshal.ReadInt64(address, offset));
     }
 
-    private static string GetString(IReadOnlyDictionary<string, string> properties, params string[] names)
+    private string GetString(IReadOnlyDictionary<string, string> properties, params string[] names)
     {
         foreach (string name in names)
         {
@@ -1386,7 +1309,7 @@ internal static class EtlFileReader
         return string.Empty;
     }
 
-    private static uint? GetUInt32(IReadOnlyDictionary<string, string> properties, params string[] names)
+    private uint? GetUInt32(IReadOnlyDictionary<string, string> properties, params string[] names)
     {
         string? value = null;
         foreach (string name in names)
@@ -1412,7 +1335,7 @@ internal static class EtlFileReader
         return uint.TryParse(value, styles, CultureInfo.InvariantCulture, out uint result) ? result : null;
     }
 
-    private static int? GetInt32(IReadOnlyDictionary<string, string> properties, string name)
+    private int? GetInt32(IReadOnlyDictionary<string, string> properties, string name)
     {
         if (!properties.TryGetValue(name, out string? value))
         {
@@ -1431,7 +1354,7 @@ internal static class EtlFileReader
 
     private readonly record struct RunningThread(uint ThreadId, uint ProcessId, DateTime StartTime);
 
-    private static void AnalyzeCSwitchEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    private void AnalyzeCSwitchEvents(EtlReadResult result, EtlAnalysisResult analysis)
     {
         Dictionary<uint, ProcessCpuSummary> summaries = [];
         Dictionary<byte, RunningThread> runningThreads = [];
@@ -1494,7 +1417,7 @@ internal static class EtlFileReader
         analysis.ProcessCpuSummaries.AddRange(summaries.Values.OrderByDescending(summary => summary.EstimatedExecutionTime));
     }
 
-    private static void AnalyzeDiskIoEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    private void AnalyzeDiskIoEvents(EtlReadResult result, EtlAnalysisResult analysis)
     {
         const double SlowIoThresholdMilliseconds = 50;
         Dictionary<string, Queue<DiskIoEventInfo>> pendingRequests = new(StringComparer.OrdinalIgnoreCase);
@@ -1592,7 +1515,7 @@ internal static class EtlFileReader
         analysis.ProcessIoSummaries.AddRange(summaries.Values.OrderByDescending(summary => summary.TotalBytes ?? 0).ThenByDescending(summary => summary.OperationCount));
     }
 
-    private static string? GetIoCorrelationId(IReadOnlyDictionary<string, string> properties)
+    private string? GetIoCorrelationId(IReadOnlyDictionary<string, string> properties)
     {
         foreach (string name in new[] { "IrpPtr", "Irp", "RequestId", "RequestID", "IoRequestId" })
         {
@@ -1605,7 +1528,7 @@ internal static class EtlFileReader
         return null;
     }
 
-    private static ulong? GetUInt64(IReadOnlyDictionary<string, string> properties, params string[] names)
+    private ulong? GetUInt64(IReadOnlyDictionary<string, string> properties, params string[] names)
     {
         string? value = GetString(properties, names);
         if (string.IsNullOrWhiteSpace(value))
@@ -1623,7 +1546,7 @@ internal static class EtlFileReader
         return ulong.TryParse(value, styles, CultureInfo.InvariantCulture, out ulong result) ? result : null;
     }
 
-    private static bool TryGetPowerMetric(IReadOnlyDictionary<string, string> properties, string fieldName, out PowerMetricKind kind, out double value)
+    private bool TryGetPowerMetric(IReadOnlyDictionary<string, string> properties, string fieldName, out PowerMetricKind kind, out double value)
     {
         kind = ClassifyPowerMetric(fieldName);
         value = 0;
@@ -1635,7 +1558,7 @@ internal static class EtlFileReader
         return properties.TryGetValue(fieldName, out string? rawValue) && TryParseEtwNumericValue(rawValue, out value);
     }
 
-    private static PowerMetricKind ClassifyPowerMetric(string fieldName)
+    private PowerMetricKind ClassifyPowerMetric(string fieldName)
     {
         if (fieldName.Contains("energy", StringComparison.OrdinalIgnoreCase))
         {
@@ -1675,7 +1598,7 @@ internal static class EtlFileReader
         return PowerMetricKind.Other;
     }
 
-    private static bool TryParseEtwNumericValue(string value, out double result)
+    private bool TryParseEtwNumericValue(string value, out double result)
     {
         result = 0;
         value = value.Trim();
@@ -1696,13 +1619,13 @@ internal static class EtlFileReader
             && double.IsFinite(result);
     }
 
-    private static bool TryConvertToFiniteDouble(ulong value, out double result)
+    private bool TryConvertToFiniteDouble(ulong value, out double result)
     {
         result = value;
         return double.IsFinite(result);
     }
 
-    private static NumericMetricSummary GetOrAddMetric(Dictionary<string, NumericMetricSummary> metrics, string fieldName, PowerMetricKind kind)
+    private NumericMetricSummary GetOrAddMetric(Dictionary<string, NumericMetricSummary> metrics, string fieldName, PowerMetricKind kind)
     {
         if (!metrics.TryGetValue(fieldName, out NumericMetricSummary? metric))
         {
@@ -1717,7 +1640,7 @@ internal static class EtlFileReader
         return metric;
     }
 
-    private static void AnalyzeEnergyEstimationEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    private void AnalyzeEnergyEstimationEvents(EtlReadResult result, EtlAnalysisResult analysis)
     {
         Dictionary<(uint? ProcessId, string ImageFileName), ProcessEnergySummary> summaries = [];
         foreach (EnergyEstimationEventInfo energyEvent in result.EnergyEstimationEvents)
@@ -1764,7 +1687,7 @@ internal static class EtlFileReader
             .ThenByDescending(summary => summary.EventCount));
     }
 
-    private static void AnalyzePowerMeterPollingEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    private void AnalyzePowerMeterPollingEvents(EtlReadResult result, EtlAnalysisResult analysis)
     {
         Dictionary<(ushort EventId, byte Version, byte Opcode, string FieldName), NumericMetricSummary> metrics = [];
         foreach (PowerMeterPollingEventInfo powerMeterEvent in result.PowerMeterPollingEvents)
@@ -1812,7 +1735,7 @@ internal static class EtlFileReader
             }));
     }
 
-    private static void AnalyzeProfileEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    private void AnalyzeProfileEvents(EtlReadResult result, EtlAnalysisResult analysis)
     {
         Dictionary<ulong, AddressSampleSummary> summaries = [];
         foreach (ProfileEventInfo profileEvent in result.ProfileEvents)
@@ -1842,7 +1765,7 @@ internal static class EtlFileReader
         analysis.ProfileHotspots.AddRange(summaries.Values.OrderByDescending(summary => summary.SampleCount));
     }
 
-    private static uint? FindScheduledProcessAtTime(IEnumerable<CSwitchEventInfo> events, byte processorNumber, DateTime timestamp)
+    private uint? FindScheduledProcessAtTime(IEnumerable<CSwitchEventInfo> events, byte processorNumber, DateTime timestamp)
     {
         return events
             .Where(switchEvent => switchEvent.ProcessorNumber == processorNumber && switchEvent.Timestamp <= timestamp)
@@ -1851,7 +1774,7 @@ internal static class EtlFileReader
             .FirstOrDefault(processId => processId is not null);
     }
 
-    private static bool TryMapAddressToModule(EtlReadResult result, uint processId, DateTime timestamp, ulong address, out ModuleInfo? matchedModule, out ulong relativeAddress)
+    private bool TryMapAddressToModule(EtlReadResult result, uint processId, DateTime timestamp, ulong address, out ModuleInfo? matchedModule, out ulong relativeAddress)
     {
         matchedModule = result.Processes
             .Where(process => process.ProcessId == processId)
@@ -1872,7 +1795,7 @@ internal static class EtlFileReader
         return true;
     }
 
-    private static bool TryParseAddress(string value, out ulong address)
+    private bool TryParseAddress(string value, out ulong address)
     {
         value = value.Trim();
         NumberStyles styles = NumberStyles.Integer;
@@ -1885,13 +1808,13 @@ internal static class EtlFileReader
         return ulong.TryParse(value, styles, CultureInfo.InvariantCulture, out address);
     }
 
-    private static void AnalyzeRoutineEvents(EtlReadResult result, EtlAnalysisResult analysis)
+    private void AnalyzeRoutineEvents(EtlReadResult result, EtlAnalysisResult analysis)
     {
         AnalyzeRoutineEvents(result, result.DpcEvents, dpcEvent => dpcEvent.Routine, dpcEvent => dpcEvent.ProcessorNumber, dpcEvent => dpcEvent.Timestamp, analysis.DpcHotspots);
         AnalyzeRoutineEvents(result, result.InterruptEvents, interruptEvent => interruptEvent.Routine, interruptEvent => interruptEvent.ProcessorNumber, interruptEvent => interruptEvent.Timestamp, analysis.InterruptHotspots);
     }
 
-    private static void AnalyzeRoutineEvents<T>(
+    private void AnalyzeRoutineEvents<T>(
         EtlReadResult result,
         IEnumerable<T> events,
         Func<T, ulong?> getRoutine,
@@ -1923,7 +1846,7 @@ internal static class EtlFileReader
         destination.AddRange(summaries.Values.OrderByDescending(summary => summary.EventCount));
     }
 
-    private static bool TryMapAddressToAnyModule(EtlReadResult result, DateTime timestamp, ulong address, out ModuleInfo? matchedModule, out ulong relativeAddress)
+    private bool TryMapAddressToAnyModule(EtlReadResult result, DateTime timestamp, ulong address, out ModuleInfo? matchedModule, out ulong relativeAddress)
     {
         matchedModule = result.Processes
             .SelectMany(process => process.Modules)
@@ -1943,7 +1866,7 @@ internal static class EtlFileReader
         return true;
     }
 
-    private static EtlAnalysisResult Analyze(EtlReadResult result)
+    private EtlAnalysisResult Analyze(EtlReadResult result)
     {
         var analysis = new EtlAnalysisResult();
         if (result.BuffersLost > 0)
@@ -1991,7 +1914,7 @@ internal static class EtlFileReader
         return analysis;
     }
 
-    private static void PrintAdvancedAnalysisSummary(EtlReadResult result)
+    private void PrintAdvancedAnalysisSummary(EtlReadResult result)
     {
         EtlAnalysisResult analysis = result.Analysis ?? Analyze(result);
         TimeSpan traceDuration = GetTraceDuration(result);
@@ -2035,7 +1958,7 @@ internal static class EtlFileReader
         PrintRoutineHotspots("Interrupt routine 熱點", analysis.InterruptHotspots);
     }
 
-    private static void PrintEnergyEstimationAnalysis(EtlReadResult result, EtlAnalysisResult analysis)
+    private void PrintEnergyEstimationAnalysis(EtlReadResult result, EtlAnalysisResult analysis)
     {
         Console.WriteLine("能源估算程序摘要（Provider 原始數值，單位未經 schema 驗證）：");
         if (result.EnergyEstimationEvents.Count == 0)
@@ -2058,7 +1981,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static void PrintPowerMeterAnalysis(EtlReadResult result, EtlAnalysisResult analysis)
+    private void PrintPowerMeterAnalysis(EtlReadResult result, EtlAnalysisResult analysis)
     {
         Console.WriteLine("硬體電錶摘要（Provider 原始數值，單位未經 schema 驗證）：");
         if (result.PowerMeterPollingEvents.Count == 0)
@@ -2080,7 +2003,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static string FormatMetricSummaries(IEnumerable<NumericMetricSummary> metrics)
+    private string FormatMetricSummaries(IEnumerable<NumericMetricSummary> metrics)
     {
         NumericMetricSummary[] metricArray = metrics.Take(5).ToArray();
         return metricArray.Length == 0
@@ -2088,12 +2011,12 @@ internal static class EtlFileReader
             : string.Join("；", metricArray.Select(metric => $"[{metric.Kind}] {FormatMetricSummary(metric)}"));
     }
 
-    private static string FormatMetricSummary(NumericMetricSummary metric)
+    private string FormatMetricSummary(NumericMetricSummary metric)
     {
         return $"{metric.FieldName}: 樣本={metric.SampleCount}，最小={metric.Minimum:G6}，最大={metric.Maximum:G6}，平均={metric.Average:G6}，首末={metric.FirstValue:G6}→{metric.LastValue:G6}，期間={metric.FirstTimestamp:O}→{metric.LastTimestamp:O}";
     }
 
-    private static void PrintAddressHotspots(string title, IEnumerable<(ulong Address, int Count, string ModuleName, ulong? RelativeAddress)> hotspots)
+    private void PrintAddressHotspots(string title, IEnumerable<(ulong Address, int Count, string ModuleName, ulong? RelativeAddress)> hotspots)
     {
         Console.WriteLine($"{title}（前 10 名）:");
         foreach ((ulong address, int count, string moduleName, ulong? relativeAddress) in hotspots.Take(10))
@@ -2103,7 +2026,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static void PrintRoutineHotspots(string title, IEnumerable<RoutineEventSummary> hotspots)
+    private void PrintRoutineHotspots(string title, IEnumerable<RoutineEventSummary> hotspots)
     {
         Console.WriteLine($"{title}（前 10 名）:");
         foreach (RoutineEventSummary summary in hotspots.Take(10))
@@ -2113,7 +2036,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static TimeSpan GetTraceDuration(EtlReadResult result)
+    private TimeSpan GetTraceDuration(EtlReadResult result)
     {
         if (result.TraceStartTime is DateTime start && result.TraceEndTime is DateTime end && end >= start)
         {
@@ -2127,7 +2050,7 @@ internal static class EtlFileReader
         return timestampArray.Length < 2 ? TimeSpan.Zero : timestampArray.Max() - timestampArray.Min();
     }
 
-    private static double? GetPercentileMilliseconds(IReadOnlyCollection<TimeSpan> values, double percentile)
+    private double? GetPercentileMilliseconds(IReadOnlyCollection<TimeSpan> values, double percentile)
     {
         if (values.Count == 0)
         {
@@ -2139,12 +2062,12 @@ internal static class EtlFileReader
         return sorted[Math.Clamp(index, 0, sorted.Length - 1)];
     }
 
-    private static string FormatMilliseconds(double? value)
+    private string FormatMilliseconds(double? value)
     {
         return value is double milliseconds ? $"{milliseconds:F3} ms" : "未知";
     }
 
-    private static void PrintProviderEventSummary<T>(
+    private void PrintProviderEventSummary<T>(
         string providerName,
         IReadOnlyCollection<T> events,
         Func<T, DateTime> getTimestamp,
@@ -2175,7 +2098,7 @@ internal static class EtlFileReader
         PrintTruncationNotice(events.Count);
     }
 
-    private static void PrintEventTypeDistribution(IEnumerable<(ushort EventId, byte Version, byte Opcode)> eventTypes)
+    private void PrintEventTypeDistribution(IEnumerable<(ushort EventId, byte Version, byte Opcode)> eventTypes)
     {
         Console.WriteLine("事件類型分布:");
         foreach (var group in eventTypes.GroupBy(eventType => eventType).OrderBy(group => group.Key.EventId).ThenBy(group => group.Key.Version).ThenBy(group => group.Key.Opcode))
@@ -2184,7 +2107,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static void PrintPowerMeterPollingSummary(EtlReadResult result)
+    private void PrintPowerMeterPollingSummary(EtlReadResult result)
     {
         Console.WriteLine();
         Console.WriteLine($"=== Power Meter Polling ({result.PowerMeterPollingEvents.Count}) ===");
@@ -2204,7 +2127,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static void PrintCSwitchSummary(EtlReadResult result)
+    private void PrintCSwitchSummary(EtlReadResult result)
     {
         Console.WriteLine();
         Console.WriteLine($"=== CSwitch ({result.CSwitchEvents.Count}) ===");
@@ -2267,7 +2190,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static void PrintProfileSummary(EtlReadResult result)
+    private void PrintProfileSummary(EtlReadResult result)
     {
         Console.WriteLine();
         Console.WriteLine($"=== Profile ({result.ProfileEvents.Count}) ===");
@@ -2286,7 +2209,7 @@ internal static class EtlFileReader
         PrintTruncationNotice(result.ProfileEvents.Count);
     }
 
-    private static void PrintDpcSummary(EtlReadResult result)
+    private void PrintDpcSummary(EtlReadResult result)
     {
         Console.WriteLine();
         Console.WriteLine($"=== DPC ({result.DpcEvents.Count}) ===");
@@ -2305,7 +2228,7 @@ internal static class EtlFileReader
         PrintTruncationNotice(result.DpcEvents.Count);
     }
 
-    private static void PrintInterruptSummary(EtlReadResult result)
+    private void PrintInterruptSummary(EtlReadResult result)
     {
         Console.WriteLine();
         Console.WriteLine($"=== Interrupt ({result.InterruptEvents.Count}) ===");
@@ -2324,12 +2247,12 @@ internal static class EtlFileReader
         PrintTruncationNotice(result.InterruptEvents.Count);
     }
 
-    private static string FormatAddress(ulong? address)
+    private string FormatAddress(ulong? address)
     {
         return address is ulong value ? $"0x{value:X}" : "<無法解析>";
     }
 
-    private static void PrintTruncationNotice(int count)
+    private void PrintTruncationNotice(int count)
     {
         if (count > 20)
         {
@@ -2337,7 +2260,7 @@ internal static class EtlFileReader
         }
     }
 
-    private static ProcessInfo? FindProcessAtTime(IEnumerable<ProcessInfo> processes, uint processId, DateTime timestamp)
+    private ProcessInfo? FindProcessAtTime(IEnumerable<ProcessInfo> processes, uint processId, DateTime timestamp)
     {
         return processes.FirstOrDefault(process =>
             process.ProcessId == processId &&
@@ -2345,7 +2268,7 @@ internal static class EtlFileReader
             (process.EndTime is null || timestamp <= process.EndTime));
     }
 
-    private static ThreadInfo? FindThreadAtTime(IEnumerable<ThreadInfo> threads, uint? threadId, DateTime timestamp)
+    private ThreadInfo? FindThreadAtTime(IEnumerable<ThreadInfo> threads, uint? threadId, DateTime timestamp)
     {
         return threadId is uint id
             ? threads.FirstOrDefault(thread =>
@@ -2355,7 +2278,7 @@ internal static class EtlFileReader
             : null;
     }
 
-    private static void PrintProperties(string prefix, IReadOnlyDictionary<string, string> properties)
+    private void PrintProperties(string prefix, IReadOnlyDictionary<string, string> properties)
     {
         foreach ((string name, string value) in properties)
         {
@@ -2363,3 +2286,4 @@ internal static class EtlFileReader
         }
     }
 }
+

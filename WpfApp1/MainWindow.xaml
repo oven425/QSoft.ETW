@@ -1,0 +1,96 @@
+<Window x:Class="WpfApp1.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:qpanel="clr-namespace:QSoft.WPF.Panel;assembly=QSoft.WPF.Panel"
+        xmlns:scottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
+        Title="ETW 分析儀表板" Height="720" Width="1280" MinHeight="600" MinWidth="800">
+    <DockPanel>
+        <!--<StackPanel DockPanel.Dock="Top">
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="90"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock VerticalAlignment="Center" Text="ETL 檔案："/>
+                <TextBox Grid.Column="1" Margin="6,0" Text="{Binding EtlPath, UpdateSourceTrigger=PropertyChanged}"/>
+                <Button Grid.Column="2" Content="選擇檔案" Click="SelectFile_Click" Margin="4,0"/>
+                <TextBlock Grid.Column="3" VerticalAlignment="Center" Text="追蹤秒數："/>
+                <TextBox Grid.Column="4" Margin="6,0" Text="{Binding DurationSeconds, UpdateSourceTrigger=PropertyChanged}"/>
+                <Button Grid.Column="5" Content="開始擷取並分析" Click="Capture_Click" Margin="4,0"/>
+                <Button Grid.Column="6" Content="分析既有檔案" Click="Analyze_Click" Margin="4,0"/>
+            </Grid>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <Button Content="取消" Click="Cancel_Click" IsEnabled="{Binding IsBusy}"/>
+                <TextBlock Margin="12,0,0,0" VerticalAlignment="Center" Text="{Binding Status}"/>
+                <TextBlock Margin="12,0,0,0" Foreground="Firebrick" VerticalAlignment="Center" Text="{Binding ErrorMessage}" TextWrapping="Wrap"/>
+            </StackPanel>
+        </StackPanel>-->
+        <qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
+            <TextBlock Grid.Column="3" VerticalAlignment="Center" Text="追蹤秒數："/>
+            <TextBox Width="100"  Text="{Binding DurationSeconds, UpdateSourceTrigger=PropertyChanged}"/>
+            <Button Content="開始擷取並分析" Click="Capture_Click"/>
+            <Button Content="分析既有檔案" Click="Analyze_Click"/>
+        </qpanel:FlexPanel>
+        <qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
+            <TextBlock Text="ETL 檔案："/>
+            <TextBox IsReadOnly="True" qpanel:FlexPanel.Grow="1" Text="{Binding EtlPath, UpdateSourceTrigger=PropertyChanged}"/>
+        </qpanel:FlexPanel>
+        <qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
+            <TextBlock Margin="12,0,0,0" VerticalAlignment="Center" Text="{Binding Status}"/>
+            <TextBlock Margin="12,0,0,0" Foreground="Firebrick" VerticalAlignment="Center" Text="{Binding ErrorMessage}" TextWrapping="Wrap"/>
+        </qpanel:FlexPanel>
+        <TabControl>
+            <TabItem Header="CPU">
+				<Grid>
+					<Grid.RowDefinitions>
+						<RowDefinition Height="*"/>
+					    <RowDefinition Height="*"/>
+					</Grid.RowDefinitions>
+					<scottPlot:WpfPlot x:Name="CpuPlot"/>
+					<DataGrid Grid.Row="1" ItemsSource="{Binding Result.Analysis.ProcessCpuSummaries}" AutoGenerateColumns="True" IsReadOnly="True"/>
+				</Grid>
+			</TabItem>
+			<TabItem Header="Disk I/O">
+				<Grid>
+					<Grid.RowDefinitions>
+						<RowDefinition Height="*"/>
+						<RowDefinition Height="Auto"/>
+						<RowDefinition Height="*"/>
+					</Grid.RowDefinitions>
+					<scottPlot:WpfPlot x:Name="IoPlot"/>
+					<CheckBox x:Name="IoSelectAllCheckBox" Grid.Row="1" Content="全選" Margin="0,4" IsChecked="True" Click="IoSelectAllCheckBox_Click"/>
+					<DataGrid x:Name="IoDataGrid" Grid.Row="2" ItemsSource="{Binding IoSummaries}" AutoGenerateColumns="True" IsReadOnly="False" AutoGeneratingColumn="IoDataGrid_AutoGeneratingColumn">
+						<DataGrid.Columns>
+							<DataGridCheckBoxColumn Header="顯示" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"/>
+						</DataGrid.Columns>
+					</DataGrid>
+				</Grid>
+			</TabItem>
+            <TabItem Header="能源與電錶">
+                <DataGrid ItemsSource="{Binding Result.Analysis.ProcessEnergySummaries}" AutoGenerateColumns="True" IsReadOnly="True"/>
+            </TabItem>
+            <TabItem Header="Profile 熱點">
+                <DataGrid ItemsSource="{Binding Result.Analysis.ProfileHotspots}" AutoGenerateColumns="True" IsReadOnly="True"/>
+            </TabItem>
+            <TabItem Header="DPC 熱點">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <scottPlot:WpfPlot x:Name="DpcPlot"/>
+                    <CheckBox x:Name="DpcSelectAllCheckBox" Grid.Row="1" Content="全選" Margin="0,4" IsChecked="True" Click="DpcSelectAllCheckBox_Click"/>
+                    <DataGrid x:Name="DpcDataGrid" Grid.Row="2" ItemsSource="{Binding DpcHotspots}" AutoGenerateColumns="True" IsReadOnly="False" AutoGeneratingColumn="DpcDataGrid_AutoGeneratingColumn">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Header="顯示" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+            <TabItem Header="Interrupt 熱點">
+                <DataGrid ItemsSource="{Binding Result.Analysis.InterruptHotspots}" AutoGenerateColumns="True" IsReadOnly="True"/>
+            </TabItem>
+            <TabItem Header="資料品質">
+                <ListBox ItemsSource="{Binding Result.Analysis.DataQualityWarnings}"/>
+            </TabItem>
+        </TabControl>
+    </DockPanel>
+</Window>
