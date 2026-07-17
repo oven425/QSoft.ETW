@@ -27,23 +27,15 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private CaptureResult? result;
 
-    public ObservableCollection<SelectableProcessIoSummary> IoSummaries { get; } = [];
-
     public ObservableCollection<SelectableDpcHotspot> DpcHotspots { get; } = [];
 
     private CancellationTokenSource? cts;
 
     partial void OnResultChanged(CaptureResult? value)
     {
-        IoSummaries.Clear();
         DpcHotspots.Clear();
         if (value?.Analysis is not null)
         {
-            foreach (ProcessIoSummary io in value.Analysis.ProcessIoSummaries)
-            {
-                IoSummaries.Add(new SelectableProcessIoSummary(io));
-            }
-
             foreach (DpcHotspot dpc in value.Analysis.DpcHotspots)
             {
                 DpcHotspots.Add(new SelectableDpcHotspot(dpc));

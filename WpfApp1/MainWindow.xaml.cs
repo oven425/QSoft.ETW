@@ -28,7 +28,6 @@ namespace WpfApp1
             InitializeComponent();
             DataContext = ViewModel;
             ViewModel.PropertyChanged += ViewModel_PropertyChanged;
-            ViewModel.IoSummaries.CollectionChanged += IoSummaries_CollectionChanged;
             ViewModel.DpcHotspots.CollectionChanged += DpcHotspots_CollectionChanged;
         }
 
@@ -37,52 +36,7 @@ namespace WpfApp1
             if (e.PropertyName == nameof(MainViewModel.Result))
             {
                 RedrawCpuPlot(ViewModel.Result?.Analysis);
-                RedrawIoPlot();
                 RedrawDpcPlot();
-            }
-        }
-
-        private void IoSummaries_CollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
-        {
-            if (e.OldItems is not null)
-            {
-                foreach (SelectableProcessIoSummary item in e.OldItems)
-                {
-                    item.PropertyChanged -= IoSummary_PropertyChanged;
-                }
-            }
-
-            if (e.NewItems is not null)
-            {
-                foreach (SelectableProcessIoSummary item in e.NewItems)
-                {
-                    item.PropertyChanged += IoSummary_PropertyChanged;
-                }
-            }
-        }
-
-        private void IoSummary_PropertyChanged(object? sender, PropertyChangedEventArgs e)
-        {
-            if (e.PropertyName == nameof(SelectableProcessIoSummary.IsSelected))
-            {
-                RedrawIoPlot();
-            }
-        }
-
-        private void IoSelectAllCheckBox_Click(object sender, RoutedEventArgs e)
-        {
-            bool isChecked = IoSelectAllCheckBox.IsChecked == true;
-            foreach (SelectableProcessIoSummary io in ViewModel.IoSummaries)
-            {
-                io.IsSelected = isChecked;
-            }
-        }
-
-        private void IoDataGrid_AutoGeneratingColumn(object sender, DataGridAutoGeneratingColumnEventArgs e)
-        {
-            if (e.PropertyName is nameof(SelectableProcessIoSummary.IsSelected) or nameof(SelectableProcessIoSummary.Summary))
-            {
-                e.Cancel = true;
             }
         }
 
@@ -157,43 +111,6 @@ namespace WpfApp1
             CpuPlot.Refresh();
         }
 
-        private void RedrawIoPlot()
-        {
-            IoPlot.Plot.Clear();
-
-            foreach (SelectableProcessIoSummary io in ViewModel.IoSummaries.Where(s => s.IsSelected))
-            {
-                if (io.Summary.Samples.Count == 0)
-                {
-                    continue;
-                }
-
-                var readSamples = io.Summary.Samples.Where(s => !s.IsWrite).ToList();
-                var writeSamples = io.Summary.Samples.Where(s => s.IsWrite).ToList();
-
-                if (readSamples.Count > 0)
-                {
-                    double[] xs = readSamples.Select(s => s.Timestamp.ToOADate()).ToArray();
-                    double[] ys = readSamples.Select(s => s.Value).ToArray();
-                    var scatter = IoPlot.Plot.Add.Scatter(xs, ys);
-                    scatter.LegendText = $"{io.ImageFileName} (PID {io.ProcessId}) - Read";
-                }
-
-                if (writeSamples.Count > 0)
-                {
-                    double[] xs = [.. writeSamples.Select(s => s.Timestamp.ToOADate())];
-                    double[] ys = [.. writeSamples.Select(s => s.Value)];
-                    var scatter = IoPlot.Plot.Add.Scatter(xs, ys);
-                    scatter.LinePattern = LinePattern.Dashed;
-                    scatter.LegendText = $"{io.ImageFileName} (PID {io.ProcessId}) - Write";
-                }
-            }
-            IoPlot.Plot.Axes.DateTimeTicksBottom();
-            IoPlot.Plot.Legend.IsVisible = true;
-
-            IoPlot.Refresh();
-        }
-
         private void RedrawDpcPlot()
         {
             DpcPlot.Plot.Clear();
@@ -215,20 +132,6 @@ namespace WpfApp1
 
             DpcPlot.Refresh();
         }
-
-        //private void SelectFile_Click(object sender, RoutedEventArgs e)
-        //{
-        //    var dialog = new OpenFileDialog
-        //    {
-        //        Filter = "ETL ?? (*.etl)|*.etl|???? (*.*)|*.*",
-        //        CheckFileExists = true,
-        //    };
-
-        //    if (dialog.ShowDialog(this) == true)
-        //    {
-        //        ViewModel.EtlPath = dialog.FileName;
-        //    }
-        //}
 
         private async void Capture_Click(object sender, RoutedEventArgs e)
         {

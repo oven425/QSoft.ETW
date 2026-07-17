@@ -261,6 +261,9 @@ internal sealed class EtlAnalysisResult
     public int PowerMeterEventsWithoutRecognizedMetrics { get; set; }
 }
 
+/// <summary>單一數值樣本（時間點 + 數值），供圖表繪製使用。</summary>
+internal readonly record struct TimedSample(DateTime Timestamp, double Value);
+
 internal sealed class ProcessCpuSummary
 {
     public required uint ProcessId { get; init; }
@@ -270,6 +273,8 @@ internal sealed class ProcessCpuSummary
     public int DescheduledCount { get; set; }
     public Dictionary<byte, TimeSpan> ExecutionTimeByProcessor { get; } = [];
     public Dictionary<int, int> WaitReasonCounts { get; } = [];
+    /// <summary>每個 CPU 執行區間的時間戳與耗時（毫秒），供時間序列圖表使用。</summary>
+    public List<TimedSample> Samples { get; } = [];
 }
 
 internal sealed class ProcessIoSummary
@@ -278,6 +283,10 @@ internal sealed class ProcessIoSummary
     public string ImageFileName { get; init; } = "<未關聯程序>";
     public int OperationCount { get; set; }
     public long? TotalBytes { get; set; }
+    /// <summary>依 Opcode 判定為讀取的位元組數（Opcode 10）。</summary>
+    public long? TotalReadBytes { get; set; }
+    /// <summary>依 Opcode 判定為寫入的位元組數（Opcode 11）。</summary>
+    public long? TotalWriteBytes { get; set; }
     public List<TimeSpan> Latencies { get; } = [];
     public Dictionary<string, int> OperationCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
     public int SlowOperationCount { get; set; }
@@ -360,6 +369,8 @@ internal sealed class RoutineEventSummary
     public Dictionary<byte, int> EventsByProcessor { get; } = [];
     public string ModuleName { get; set; } = "<未映射>";
     public ulong? ModuleRelativeAddress { get; set; }
+    /// <summary>每筆事件的時間戳，Value 為累計發生次數，供時間序列圖表使用。</summary>
+    public List<TimedSample> Samples { get; } = [];
 }
 
 internal sealed class ProcessInfo
@@ -721,11 +732,13 @@ internal sealed class EtlFileReader
         return infoPtr;
     }
 
-    private void OnEventRecord(nint eventRecordPtr)
+    private unsafe void OnEventRecord(nint eventRecordPtr)
     {
         s_eventCount++;
 
-        EVENT_RECORD record = Marshal.PtrToStructure<EVENT_RECORD>(eventRecordPtr);
+        //EVENT_RECORD record = Marshal.PtrToStructure<EVENT_RECORD>(eventRecordPtr);
+        //DateTime timestamp = DateTime.FromFileTime(record.EventHeader.TimeStamp);
+        ref readonly EVENT_RECORD record = ref Unsafe.AsRef<EVENT_RECORD>((void*)eventRecordPtr);
         DateTime timestamp = DateTime.FromFileTime(record.EventHeader.TimeStamp);
 
         //Console.WriteLine(
@@ -1388,6 +1401,7 @@ internal sealed class EtlFileReader
                         summary.DescheduledCount++;
                         summary.ExecutionTimeByProcessor[switchEvent.ProcessorNumber] =
                             summary.ExecutionTimeByProcessor.GetValueOrDefault(switchEvent.ProcessorNumber) + duration;
+                        summary.Samples.Add(new TimedSample(runningThread.StartTime, duration.TotalMilliseconds));
 
                         if (switchEvent.OldThreadWaitReason is int waitReason)
                         {
@@ -1471,7 +1485,18 @@ internal sealed class EtlFileReader
 
             if (GetUInt64(completedEvent.Properties, "TransferSize", "IoSize", "Size", "ByteCount", "DataSize") is ulong byteCount)
             {
-                summary.TotalBytes = (summary.TotalBytes ?? 0) + checked((long)Math.Min(byteCount, long.MaxValue));
+                long bytes = checked((long)Math.Min(byteCount, long.MaxValue));
+                summary.TotalBytes = (summary.TotalBytes ?? 0) + bytes;
+
+                // DiskIo Provider Opcode：10=Read，11=Write，其餘（如 14=Flush）不計入讀寫分項。
+                if (completedEvent.Opcode == 10)
+                {
+                    summary.TotalReadBytes = (summary.TotalReadBytes ?? 0) + bytes;
+                }
+                else if (completedEvent.Opcode == 11)
+                {
+                    summary.TotalWriteBytes = (summary.TotalWriteBytes ?? 0) + bytes;
+                }
             }
 
             string? correlationId = GetIoCorrelationId(completedEvent.Properties);
@@ -1841,6 +1866,7 @@ internal sealed class EtlFileReader
             summary.EventCount++;
             byte processorNumber = getProcessorNumber(eventInfo);
             summary.EventsByProcessor[processorNumber] = summary.EventsByProcessor.GetValueOrDefault(processorNumber) + 1;
+            summary.Samples.Add(new TimedSample(getTimestamp(eventInfo), summary.EventCount));
         }
 
         destination.AddRange(summaries.Values.OrderByDescending(summary => summary.EventCount));
