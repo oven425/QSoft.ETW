@@ -89,8 +89,10 @@ public partial class MainViewModel : ObservableObject
             session.Stop();
 
             Status = "擷取完成，正在分析 ETL 檔案...";
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             await AnalyzeAsync(EtlPath, cts.Token);
-            Status = "分析完成。";
+            sw.Stop();
+            Status = $"分析完成。 耗時:{sw.Elapsed.TotalMicroseconds}";
         }
         catch (OperationCanceledException)
         {
@@ -141,8 +143,10 @@ public partial class MainViewModel : ObservableObject
         try
         {
             Status = "正在分析 ETL 檔案...";
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             await AnalyzeAsync(EtlPath, cts.Token);
-            Status = "分析完成。";
+            sw.Stop();
+            Status = $"分析完成。 耗時:{sw.Elapsed}";
         }
         catch (OperationCanceledException)
         {
