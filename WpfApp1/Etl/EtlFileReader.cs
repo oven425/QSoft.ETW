@@ -1,5 +1,7 @@
-﻿using QSoft.ETW;
+﻿using OpenTK.Graphics.ES11;
+using QSoft.ETW;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -122,7 +124,7 @@ internal unsafe struct EVENT_TRACE_LOGFILEW
     public uint BufferSize;
     public uint Filled;
     public uint EventsLost;
-    public delegate* unmanaged[Stdcall]<nint, void> EventRecordCallback;
+    public delegate* unmanaged[Stdcall]<EVENT_RECORD*, void> EventRecordCallback;
     public uint IsKernelTrace;
     public nint Context;
 }
@@ -165,6 +167,14 @@ internal struct EVENT_RECORD
     public nint ExtendedData;
     public nint UserData;
     public nint UserContext;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct PROPERTY_DATA_DESCRIPTOR
+{
+    public ulong PropertyName;
+    public uint ArrayIndex;
+    public uint Reserved;
 }
 
 [Flags]
@@ -230,7 +240,9 @@ internal readonly record struct CachedProperty(
 internal sealed class CachedSchema
 {
     public required nint NativeInfoPtr { get; init; }
-    public required CachedProperty[] Properties { get; init; }
+    public required Dictionary<string, CachedProperty> Properties { get; init; }
+
+    
 }
 
 internal sealed class EtlReadResult
@@ -562,6 +574,10 @@ internal static partial class NativeMethods
     /// 取得指定事件的 schema(TRACE_EVENT_INFO + EVENT_PROPERTY_INFO[])。
     /// 第一次呼叫時 pBuffer 傳 0 以探測所需的 pBufferSize,ERROR_INSUFFICIENT_BUFFER 時再配置緩衝區重試。
     /// </summary>
+    /// 
+    [LibraryImport("tdh.dll", EntryPoint = "TdhGetEventInformation")]
+    internal static unsafe partial uint TdhGetEventInformation(EVENT_RECORD* pEvent, uint tdhContextCount, nint pTdhContext, nint pBuffer, ref uint pBufferSize);
+
     [LibraryImport("tdh.dll", EntryPoint = "TdhGetEventInformation")]
     internal static partial uint TdhGetEventInformation(nint pEvent, uint tdhContextCount, nint pTdhContext, nint pBuffer, ref uint pBufferSize);
 
@@ -579,6 +595,27 @@ internal static partial class NativeMethods
         ref uint bufferSize,
         nint buffer,
         out ushort userDataConsumed);
+
+
+    [LibraryImport("tdh.dll", EntryPoint = "TdhGetPropertySize")]
+    internal static unsafe partial uint TdhGetPropertySize(
+    EVENT_RECORD* pEvent,
+    uint tdhContextCount,
+    nint pTdhContext,
+    uint propertyDataCount,
+    PROPERTY_DATA_DESCRIPTOR* pPropertyData,
+    out uint propertySize);
+
+    [LibraryImport("tdh.dll", EntryPoint = "TdhGetProperty")]
+    internal static unsafe partial uint TdhGetProperty(
+        EVENT_RECORD* pEvent,
+        uint tdhContextCount,
+        nint pTdhContext,
+        uint propertyDataCount,
+        PROPERTY_DATA_DESCRIPTOR* pPropertyData,
+        uint bufferSize,
+        byte* buffer);
+
 }
 
 /// <summary>
@@ -743,6 +780,91 @@ internal sealed class EtlFileReader
         return infoPtr;
     }
 
+    private unsafe nint GetOrAddSchema_1(EVENT_RECORD* eventRecordPtr)
+    {
+        var key = new SchemaKey(eventRecordPtr->EventHeader.ProviderId, eventRecordPtr->EventHeader.EventDescriptor.Id, eventRecordPtr->EventHeader.EventDescriptor.Version, eventRecordPtr->EventHeader.EventDescriptor.Opcode);
+        if (s_schemaCache.TryGetValue(key, out nint cachedInfoPtr))
+        {
+            return cachedInfoPtr;
+        }
+
+        uint bufferSize = 0;
+        uint status = NativeMethods.TdhGetEventInformation(eventRecordPtr, 0, 0, 0, ref bufferSize);
+
+        nint infoPtr = 0;
+        if (status == EtwNativeConstants.ERROR_INSUFFICIENT_BUFFER && bufferSize > 0)
+        {
+            infoPtr = Marshal.AllocHGlobal((int)bufferSize);
+            status = NativeMethods.TdhGetEventInformation(eventRecordPtr, 0, 0, infoPtr, ref bufferSize);
+
+            if (status != EtwNativeConstants.ERROR_SUCCESS)
+            {
+                Marshal.FreeHGlobal(infoPtr);
+                infoPtr = 0;
+            }
+        }
+        else if (status != EtwNativeConstants.ERROR_SUCCESS)
+        {
+            //Console.Error.WriteLine($"[Schema] TdhGetEventInformation 探測失敗: Provider={key.ProviderId} Id={key.Id} Version={key.Version} Opcode={key.Opcode} 錯誤碼={status}");
+        }
+
+        s_schemaCache[key] = infoPtr;
+        return infoPtr;
+    }
+
+    private unsafe CachedSchema? GetOrAddCachedSchema(EVENT_RECORD* eventRecordPtr)
+    {
+        var key = new SchemaKey(eventRecordPtr->EventHeader.ProviderId, eventRecordPtr->EventHeader.EventDescriptor.Id, eventRecordPtr->EventHeader.EventDescriptor.Version, eventRecordPtr->EventHeader.EventDescriptor.Opcode);
+        if (s_cachedSchemaCache.TryGetValue(key, out CachedSchema? cachedSchema))
+        {
+            return cachedSchema;
+        }
+
+        nint infoPtr = GetOrAddSchema_1(eventRecordPtr);
+        if (infoPtr == 0)
+        {
+            s_cachedSchemaCache[key] = null;
+            return null;
+        }
+
+        ref readonly TRACE_EVENT_INFO info = ref Unsafe.AsRef<TRACE_EVENT_INFO>((void*)infoPtr);
+        int propertyInfoBase = Marshal.SizeOf<TRACE_EVENT_INFO>();
+        int propertyInfoSize = Marshal.SizeOf<EVENT_PROPERTY_INFO>();
+        var properties = new List<CachedProperty>(info.TopLevelPropertyCount);
+
+        for (int i = 0; i < info.TopLevelPropertyCount; i++)
+        {
+            nint propertyInfoPtr = infoPtr + propertyInfoBase + (i * propertyInfoSize);
+            ref readonly EVENT_PROPERTY_INFO property = ref Unsafe.AsRef<EVENT_PROPERTY_INFO>((void*)propertyInfoPtr);
+
+            const PROPERTY_FLAGS UnsupportedFlags =
+                PROPERTY_FLAGS.PropertyStruct |
+                PROPERTY_FLAGS.PropertyParamCount |
+                PROPERTY_FLAGS.PropertyParamLength;
+
+            if ((property.Flags & UnsupportedFlags) != 0)
+            {
+                break;
+            }
+
+            string propertyName = Marshal.PtrToStringUni(infoPtr + property.NameOffset) ?? string.Empty;
+            properties.Add(new CachedProperty(
+                propertyName,
+                property.Flags,
+                property.InType,
+                property.OutType,
+                property.Length));
+        }
+
+        cachedSchema = new CachedSchema
+        {
+            NativeInfoPtr = infoPtr,
+            Properties = properties.ToDictionary(x=>x.Name)
+        };
+        s_cachedSchemaCache[key] = cachedSchema;
+        return cachedSchema;
+    }
+
     private unsafe CachedSchema? GetOrAddCachedSchema(nint eventRecordPtr, in EVENT_HEADER header)
     {
         var key = new SchemaKey(header.ProviderId, header.EventDescriptor.Id, header.EventDescriptor.Version, header.EventDescriptor.Opcode);
@@ -790,27 +912,23 @@ internal sealed class EtlFileReader
         cachedSchema = new CachedSchema
         {
             NativeInfoPtr = infoPtr,
-            Properties = properties.ToArray(),
+            Properties = properties.ToDictionary(x=>x.Name)
         };
         s_cachedSchemaCache[key] = cachedSchema;
         return cachedSchema;
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
-    private static unsafe void OnEventRecordCallback(nint eventRecordPtr)
+    private static unsafe void OnEventRecordCallback(EVENT_RECORD* eventRecordPtr)
     {
-        ref readonly EVENT_RECORD record = ref Unsafe.AsRef<EVENT_RECORD>((void*)eventRecordPtr);
-        ((EtlFileReader)GCHandle.FromIntPtr(record.UserContext).Target!).OnEventRecord(eventRecordPtr);
+        ((EtlFileReader)GCHandle.FromIntPtr(eventRecordPtr->UserContext).Target!).OnEventRecord(eventRecordPtr);
     }
 
-    private unsafe void OnEventRecord(nint eventRecordPtr)
+    private unsafe void OnEventRecord(EVENT_RECORD* eventRecordPtr)
     {
         s_eventCount++;
 
-        //EVENT_RECORD record = Marshal.PtrToStructure<EVENT_RECORD>(eventRecordPtr);
-        //DateTime timestamp = DateTime.FromFileTime(record.EventHeader.TimeStamp);
-        ref readonly EVENT_RECORD record = ref Unsafe.AsRef<EVENT_RECORD>((void*)eventRecordPtr);
-        DateTime timestamp = DateTime.FromFileTime(record.EventHeader.TimeStamp);
+        DateTime timestamp = DateTime.FromFileTime(eventRecordPtr->EventHeader.TimeStamp);
 
         //Console.WriteLine(
         //    $"[{s_eventCount}] ProviderId={record.EventHeader.ProviderId} " +
@@ -821,13 +939,13 @@ internal sealed class EtlFileReader
         // CSwitch (Thread Provider, Opcode=36) 的 classic MOF 版本在新版 Windows 為 5,
         // 本機通常沒有對應的 TDH schema(TdhGetEventInformation 會回傳 ERROR_NOT_FOUND),
         // 因此改用固定版面(Thread_V2_TypeGroup1 CSWITCH 結構)手動解析,不透過 TDH。
-        if (record.EventHeader.ProviderId == s_threadProviderId && record.EventHeader.EventDescriptor.Opcode == CSwitchOpcode)
+        if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId && eventRecordPtr->EventHeader.EventDescriptor.Opcode == CSwitchOpcode)
         {
             CSwitchEventInfo? cswitchEvent = ParseCSwitchPayload(
                 timestamp,
-                record.BufferContext.ProcessorNumber,
-                record.UserData,
-                record.UserDataLength);
+                eventRecordPtr->BufferContext.ProcessorNumber,
+                eventRecordPtr->UserData,
+                eventRecordPtr->UserDataLength);
             if (cswitchEvent is not null)
             {
                 //_readResult!.CSwitchEvents.Add(cswitchEvent);
@@ -836,13 +954,13 @@ internal sealed class EtlFileReader
             return;
         }
 
-        if (record.EventHeader.ProviderId == s_perfInfoProviderId)
+        if (eventRecordPtr->EventHeader.ProviderId == s_perfInfoProviderId)
         {
-            byte perfInfoOpcode = record.EventHeader.EventDescriptor.Opcode;
+            byte perfInfoOpcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
             if (perfInfoOpcode == SampledProfileOpcode)
             {
-                var profilehr = ProcessProfileEvent(timestamp, record.BufferContext.ProcessorNumber, in record.EventHeader, record.UserData, record.UserDataLength);
-                if(profilehr != null)
+                var profilehr = ProcessProfileEvent(timestamp, eventRecordPtr->BufferContext.ProcessorNumber, in eventRecordPtr->EventHeader, eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
+                if (profilehr != null)
                 {
                     //_readResult?.ProfileEvents.Add(profilehr);
                 }
@@ -851,8 +969,8 @@ internal sealed class EtlFileReader
 
             if (perfInfoOpcode is ThreadDpcOpcode or DpcOpcode or TimerDpcOpcode)
             {
-                var dpchr = ProcessDpcEvent(timestamp, record.BufferContext.ProcessorNumber, in record.EventHeader, record.UserData, record.UserDataLength);
-                if(dpchr != null)
+                var dpchr = ProcessDpcEvent(timestamp, eventRecordPtr->BufferContext.ProcessorNumber, in eventRecordPtr->EventHeader, eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
+                if (dpchr != null)
                 {
                     //_readResult?.DpcEvents.Add(dpchr);
                 }
@@ -861,8 +979,8 @@ internal sealed class EtlFileReader
 
             if (perfInfoOpcode == InterruptOpcode)
             {
-                var interrupt = ProcessInterruptEvent(timestamp, record.BufferContext.ProcessorNumber, in record.EventHeader, record.UserData, record.UserDataLength);
-                if(interrupt != null)
+                var interrupt = ProcessInterruptEvent(timestamp, eventRecordPtr->BufferContext.ProcessorNumber, in eventRecordPtr->EventHeader, eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
+                if (interrupt != null)
                 {
                     //_readResult!.InterruptEvents.Add(interrupt);
                 }
@@ -870,30 +988,27 @@ internal sealed class EtlFileReader
             }
         }
 
-        // 比較新舊版本時，保留其中一行並註解另一行。
+        //比較新舊版本時，保留其中一行並註解另一行。
         //Dictionary<string, string>? properties = ReadProperties(eventRecordPtr, in record.EventHeader, in record);
-        Dictionary<string, string>? properties = ReadProperties_CC(eventRecordPtr, in record.EventHeader, in record);
-        if (properties is null)
-        {
-            return;
-        }
-
-        //foreach ((string propertyName, string value) in properties)
+        //Dictionary<string, string>? properties = ReadProperties_CC(eventRecordPtr);
+        //if (properties is null)
         //{
-        //    Console.WriteLine($"    {propertyName} = {value}");
+        //    return;
         //}
 
-        if (_readResult is null)
+        var cache = GetOrAddCachedSchema(eventRecordPtr);
+        if (cache is null)
         {
             return;
         }
 
-        byte opcode = record.EventHeader.EventDescriptor.Opcode;
-        if (record.EventHeader.ProviderId == s_processProviderId)
+
+        byte opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
+        if (eventRecordPtr->EventHeader.ProviderId == s_processProviderId)
         {
-            ProcessProcessEvent(opcode, timestamp, record.EventHeader.ProcessId, properties);
+            ProcessProcessEvent(opcode, timestamp, eventRecordPtr->EventHeader.ProcessId, eventRecordPtr);
         }
-        //else if (record.EventHeader.ProviderId == s_threadProviderId)
+        //else if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
         //{
         //    ProcessThreadEvent(opcode, timestamp, properties);
         //}
@@ -913,10 +1028,19 @@ internal sealed class EtlFileReader
         //{
         //    ProcessWmiActivityEvent(timestamp, in record.EventHeader, properties);
         //}
-        //else if (record.EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
-        //{
-        //    ProcessEnergyEstimationEvent(timestamp, in record.EventHeader, properties);
-        //}
+        else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
+        {
+            foreach(var oo in cache.Properties)
+            {
+
+            }
+            //uint? processId = GetUInt32(properties, "ProcessId") ?? (header.ProcessId != 0 ? header.ProcessId : null);
+            if(cache.Properties.ContainsKey("Energy"))
+            {
+                GetRawProperty(eventRecordPtr, "Energy");
+            }
+            ProcessEnergyEstimationEvent(timestamp, eventRecordPtr);
+        }
         //else if (record.EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
         //{
         //    ProcessKernelAcpiEvent(timestamp, in record.EventHeader, properties);
@@ -1008,88 +1132,169 @@ internal sealed class EtlFileReader
         return m_Properties;
     }
 
-    private Dictionary<string, string>? ReadProperties_CC(nint eventRecordPtr, in EVENT_HEADER header, in EVENT_RECORD record)
+    private static unsafe uint GetRawPropertyUInt32(EVENT_RECORD* eventRecordPtr, string propertyName, uint defaultvalue = 0)
     {
-        CachedSchema? schema = GetOrAddCachedSchema(eventRecordPtr, in header);
-        if (schema is null)
+        fixed (char* propertyNamePtr = propertyName)
         {
-            return null;
+            PROPERTY_DATA_DESCRIPTOR descriptor = new()
+            {
+                PropertyName = (ulong)propertyNamePtr,
+                ArrayIndex = uint.MaxValue,
+            };
+
+            uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
+
+            if (status != EtwNativeConstants.ERROR_SUCCESS)
+            {
+                return defaultvalue;
+            }
+
+            var rawValue = stackalloc byte[4];
+            status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, rawValue);
+            var value = *(uint*)rawValue;
+            return status == EtwNativeConstants.ERROR_SUCCESS ? value : defaultvalue;
         }
-
-        m_Properties.Clear();
-        uint pointerSize = (header.Flags & EtwNativeConstants.EVENT_HEADER_FLAG_32_BIT_HEADER) != 0 ? 4u : 8u;
-        nint cursor = record.UserData;
-        int remaining = record.UserDataLength;
-
-        foreach (CachedProperty property in schema.Properties)
-        {
-            if (remaining <= 0)
-            {
-                break;
-            }
-
-            uint formatBufferSize = 0;
-            uint formatStatus = NativeMethods.TdhFormatProperty(
-                schema.NativeInfoPtr, 0, pointerSize, property.InType, property.OutType,
-                property.Length, (ushort)remaining, cursor, ref formatBufferSize, 0, out ushort userDataConsumed);
-
-            nint formatBufferPtr = 0;
-            try
-            {
-                if (formatStatus == EtwNativeConstants.ERROR_INSUFFICIENT_BUFFER && formatBufferSize > 0)
-                {
-                    formatBufferPtr = Marshal.AllocHGlobal((int)formatBufferSize);
-                    formatStatus = NativeMethods.TdhFormatProperty(
-                        schema.NativeInfoPtr, 0, pointerSize, property.InType, property.OutType,
-                        property.Length, (ushort)remaining, cursor, ref formatBufferSize, formatBufferPtr, out userDataConsumed);
-                }
-
-                if (formatStatus != EtwNativeConstants.ERROR_SUCCESS)
-                {
-                    break;
-                }
-
-                string value = Marshal.PtrToStringUni(formatBufferPtr) ?? string.Empty;
-                m_Properties[property.Name] = value;
-            }
-            finally
-            {
-                if (formatBufferPtr != 0)
-                {
-                    Marshal.FreeHGlobal(formatBufferPtr);
-                }
-            }
-
-            if (userDataConsumed == 0)
-            {
-                break;
-            }
-
-            cursor += userDataConsumed;
-            remaining -= userDataConsumed;
-        }
-
-        return m_Properties;
     }
 
-    private void ProcessProcessEvent(byte opcode, DateTime timestamp, uint headerProcessId, IReadOnlyDictionary<string, string> properties)
+    private static unsafe string GetRawPropertyString(EVENT_RECORD* eventRecordPtr, string propertyName, string defaultvalue = "")
     {
-        uint processId = GetUInt32(properties, "ProcessId") ?? headerProcessId;
+        fixed (char* propertyNamePtr = propertyName)
+        {
+            PROPERTY_DATA_DESCRIPTOR descriptor = new()
+            {
+                PropertyName = (ulong)propertyNamePtr,
+                ArrayIndex = uint.MaxValue,
+            };
 
+            uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
+
+            if (status != EtwNativeConstants.ERROR_SUCCESS)
+            {
+                return defaultvalue;
+            }
+
+            var rawValue = stackalloc byte[(int)propertySize];
+            status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, rawValue);
+
+            ReadOnlySpan<byte> span = new ReadOnlySpan<byte>(rawValue, (int)propertySize);
+            return System.Text.Encoding.Unicode.GetString(span);
+        }
+    }
+
+    private static unsafe byte[]? GetRawProperty(EVENT_RECORD* eventRecordPtr, string propertyName)
+    {
+        nint propertyNamePtr = Marshal.StringToCoTaskMemUni(propertyName);
+        try
+        {
+            PROPERTY_DATA_DESCRIPTOR descriptor = new()
+            {
+                PropertyName = (ulong)propertyNamePtr,
+                ArrayIndex = uint.MaxValue, // 取得非陣列屬性，或整個陣列
+            };
+
+            uint status = NativeMethods.TdhGetPropertySize(
+                eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
+
+            if (status != EtwNativeConstants.ERROR_SUCCESS)
+            {
+                return null;
+            }
+
+            byte[] rawValue = GC.AllocateUninitializedArray<byte>(checked((int)propertySize));
+
+            fixed (byte* rawValuePtr = rawValue)
+            {
+                status = NativeMethods.TdhGetProperty(
+                    eventRecordPtr, 0, 0, 1, &descriptor, propertySize, rawValuePtr);
+            }
+
+            return status == EtwNativeConstants.ERROR_SUCCESS ? rawValue : null;
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(propertyNamePtr);
+        }
+    }
+
+    private unsafe CachedSchema? ReadProperties_CC(EVENT_RECORD* eventRecordPtr)
+    {
+        CachedSchema? schema = GetOrAddCachedSchema(eventRecordPtr);
+        return schema;
+        //if (schema is null)
+        //{
+        //    return null;
+        //}
+
+        //m_Properties.Clear();
+        //uint pointerSize = (eventRecordPtr->EventHeader.Flags & EtwNativeConstants.EVENT_HEADER_FLAG_32_BIT_HEADER) != 0 ? 4u : 8u;
+        //nint cursor = eventRecordPtr->UserData;
+        //int remaining = eventRecordPtr->UserDataLength;
+
+        //foreach (CachedProperty property in schema.Properties)
+        //{
+        //    if (remaining <= 0)
+        //    {
+        //        break;
+        //    }
+
+        //    uint formatBufferSize = 0;
+        //    uint formatStatus = NativeMethods.TdhFormatProperty(
+        //        schema.NativeInfoPtr, 0, pointerSize, property.InType, property.OutType,
+        //        property.Length, (ushort)remaining, cursor, ref formatBufferSize, 0, out ushort userDataConsumed);
+        //    nint formatBufferPtr = 0;
+        //    try
+        //    {
+        //        if (formatStatus == EtwNativeConstants.ERROR_INSUFFICIENT_BUFFER && formatBufferSize > 0)
+        //        {
+        //            formatBufferPtr = Marshal.AllocHGlobal((int)formatBufferSize);
+        //            formatStatus = NativeMethods.TdhFormatProperty(
+        //                schema.NativeInfoPtr, 0, pointerSize, property.InType, property.OutType,
+        //                property.Length, (ushort)remaining, cursor, ref formatBufferSize, formatBufferPtr, out userDataConsumed);
+        //        }
+
+        //        if (formatStatus != EtwNativeConstants.ERROR_SUCCESS)
+        //        {
+        //            break;
+        //        }
+
+        //        string value = Marshal.PtrToStringUni(formatBufferPtr) ?? string.Empty;
+        //        m_Properties[property.Name] = value;
+        //    }
+        //    finally
+        //    {
+        //        if (formatBufferPtr != 0)
+        //        {
+        //            Marshal.FreeHGlobal(formatBufferPtr);
+        //        }
+        //    }
+
+        //    if (userDataConsumed == 0)
+        //    {
+        //        break;
+        //    }
+
+        //    cursor += userDataConsumed;
+        //    remaining -= userDataConsumed;
+        //}
+
+        //return m_Properties;
+    }
+
+    private unsafe void ProcessProcessEvent(byte opcode, DateTime timestamp, uint headerProcessId, EVENT_RECORD* eventRecordPtr)
+    {
+        var processId = GetRawPropertyUInt32(eventRecordPtr, "ProcessId", headerProcessId);
         if (opcode is 1 or 3)
         {
             var process = new ProcessInfo
             {
                 ProcessId = processId,
-                ParentProcessId = GetUInt32(properties, "ParentId") ?? 0,
+                ParentProcessId = GetRawPropertyUInt32(eventRecordPtr, "ParentId", 0),
                 StartTime = timestamp,
-                ImageFileName = GetString(properties, "ImageFileName"),
-                CommandLine = GetString(properties, "CommandLine"),
-                Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+                ImageFileName = GetRawPropertyString(eventRecordPtr, "ImageFileName"),
+                CommandLine = GetRawPropertyString(eventRecordPtr, "CommandLine"),
             };
 
-            _readResult!.Processes.Add(process);
-            //System.Diagnostics.Trace.WriteLine($"{process.ImageFileName}->{process.CommandLine}");
+            //_readResult!.Processes.Add(process);
             s_activeProcesses[processId] = process;
         }
         else if (opcode is 2 or 4 && s_activeProcesses.Remove(processId, out ProcessInfo? process))
@@ -1191,21 +1396,21 @@ internal sealed class EtlFileReader
         });
     }
 
-    private void ProcessEnergyEstimationEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private unsafe void ProcessEnergyEstimationEvent(DateTime timestamp, EVENT_RECORD* record)
     {
-        uint? processId = GetUInt32(properties, "ProcessId") ?? (header.ProcessId != 0 ? header.ProcessId : null);
+        //uint? processId = GetUInt32(properties, "ProcessId") ?? (header.ProcessId != 0 ? header.ProcessId : null);
 
-        _readResult!.EnergyEstimationEvents.Add(new EnergyEstimationEventInfo
-        {
-            Timestamp = timestamp,
-            EventId = header.EventDescriptor.Id,
-            Version = header.EventDescriptor.Version,
-            Opcode = header.EventDescriptor.Opcode,
-            HeaderProcessId = header.ProcessId,
-            ThreadId = header.ThreadId,
-            ProcessId = processId,
-            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
-        });
+        //_readResult!.EnergyEstimationEvents.Add(new EnergyEstimationEventInfo
+        //{
+        //    Timestamp = timestamp,
+        //    EventId = header.EventDescriptor.Id,
+        //    Version = header.EventDescriptor.Version,
+        //    Opcode = header.EventDescriptor.Opcode,
+        //    HeaderProcessId = header.ProcessId,
+        //    ThreadId = header.ThreadId,
+        //    ProcessId = processId,
+        //    Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+        //});
     }
 
     private void ProcessWmiActivityEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
