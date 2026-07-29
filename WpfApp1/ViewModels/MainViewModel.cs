@@ -1,14 +1,23 @@
 using System.Collections.ObjectModel;
+using System.Data;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using QSoft.ETW;
-using WpfApp1.Models;
 using WpfApp1.Services;
 
 namespace WpfApp1.ViewModels;
 
 public partial class MainViewModel : ObservableObject
 {
+    private const int PageSize = 100;
+    private readonly IEtlAnalyzer _analyzer;
+
+    public MainViewModel(IEtlAnalyzer analyzer)
+    {
+        _analyzer = analyzer;
+    }
+
     [ObservableProperty]
     private string etlPath = string.Empty;
 
@@ -24,24 +33,79 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool isBusy;
 
-    [ObservableProperty]
-    private CaptureResult? result;
+    private string? databasePath;
+    private EtlTableDefinition? selectedTable;
+    private DataView? tableRows;
+    private long totalRowCount;
+    private int currentPage = 1;
+    private int totalPages = 1;
 
-    public ObservableCollection<SelectableDpcHotspot> DpcHotspots { get; } = [];
-
-    private CancellationTokenSource? cts;
-
-    partial void OnResultChanged(CaptureResult? value)
+    public string? DatabasePath
     {
-        DpcHotspots.Clear();
-        if (value?.Analysis is not null)
+        get => databasePath;
+        private set => SetProperty(ref databasePath, value);
+    }
+
+    public EtlTableDefinition? SelectedTable
+    {
+        get => selectedTable;
+        set
         {
-            foreach (DpcHotspot dpc in value.Analysis.DpcHotspots)
+            if (SetProperty(ref selectedTable, value) && !suppressTableLoad && value is not null && !string.IsNullOrWhiteSpace(DatabasePath))
             {
-                DpcHotspots.Add(new SelectableDpcHotspot(dpc));
+                _ = LoadPageAsync(1);
             }
         }
     }
+
+    public DataView? TableRows
+    {
+        get => tableRows;
+        private set => SetProperty(ref tableRows, value);
+    }
+
+    public long TotalRowCount
+    {
+        get => totalRowCount;
+        private set => SetProperty(ref totalRowCount, value);
+    }
+
+    public int CurrentPage
+    {
+        get => currentPage;
+        private set
+        {
+            if (SetProperty(ref currentPage, value))
+            {
+                NotifyPagingStateChanged();
+            }
+        }
+    }
+
+    public int TotalPages
+    {
+        get => totalPages;
+        private set
+        {
+            if (SetProperty(ref totalPages, value))
+            {
+                NotifyPagingStateChanged();
+            }
+        }
+    }
+
+    public ObservableCollection<EtlTableDefinition> Tables { get; } = [];
+
+    public bool CanGoToFirstPage => CurrentPage > 1;
+
+    public bool CanGoToPreviousPage => CurrentPage > 1;
+
+    public bool CanGoToNextPage => CurrentPage < TotalPages;
+
+    public bool CanGoToLastPage => CurrentPage < TotalPages;
+
+    private CancellationTokenSource? cts;
+    private bool suppressTableLoad;
 
     public async Task CaptureAndAnalyzeAsync()
     {
@@ -171,13 +235,110 @@ public partial class MainViewModel : ObservableObject
 
     private async Task AnalyzeAsync(string etlPath, CancellationToken cancellationToken)
     {
-        AnalysisResult analysis = await EtlAnalyzer.AnalyzeAsync(etlPath, cancellationToken);
-        Result = new CaptureResult
+        await _analyzer.AnalyzeAsync(etlPath, cancellationToken);
+        await LoadDatabaseAsync(etlPath, cancellationToken);
+    }
+
+    [RelayCommand]
+    private Task GoToFirstPageAsync() => LoadPageAsync(1);
+
+    [RelayCommand]
+    private Task GoToPreviousPageAsync() => LoadPageAsync(CurrentPage - 1);
+
+    [RelayCommand]
+    private Task GoToNextPageAsync() => LoadPageAsync(CurrentPage + 1);
+
+    [RelayCommand]
+    private Task GoToLastPageAsync() => LoadPageAsync(TotalPages);
+
+    private async Task LoadDatabaseAsync(string etlPath, CancellationToken cancellationToken)
+    {
+        //string path = _analyzer.GetOutputPath(etlPath);
+        //if (!File.Exists(path))
+        //{
+        //    ClearDatabaseView();
+        //    throw new FileNotFoundException("分析完成，但找不到 ETL 對應的 SQLite 資料庫檔案。", path);
+        //}
+
+        //cancellationToken.ThrowIfCancellationRequested();
+        //DatabasePath = path;
+        //Tables.Clear();
+        //foreach (EtlTableDefinition table in _analyzer.GetBrowsableTables())
+        //{
+        //    Tables.Add(table);
+        //}
+
+        //suppressTableLoad = true;
+        //SelectedTable = Tables.FirstOrDefault();
+        //suppressTableLoad = false;
+        //if (SelectedTable is null)
+        //{
+        //    ClearDatabaseView();
+        //    return;
+        //}
+
+        //await LoadPageAsync(1);
+    }
+
+    private async Task LoadPageAsync(int pageNumber)
+    {
+        EtlTableDefinition? table = SelectedTable;
+        string? path = DatabasePath;
+        if (table is null || string.IsNullOrWhiteSpace(path))
         {
-            EtlPath = etlPath,
-            AnalyzedAt = DateTime.Now,
-            Analysis = analysis,
-        };
+            return;
+        }
+
+        ErrorMessage = null;
+        bool ownsBusyState = !IsBusy;
+        if (ownsBusyState)
+        {
+            IsBusy = true;
+        }
+        try
+        {
+            EtlTablePage page = await Task.Run(() => _analyzer.ReadTablePage(path, table.Name, pageNumber, PageSize));
+            if (SelectedTable != table || DatabasePath != path)
+            {
+                return;
+            }
+
+            TableRows = page.Rows;
+            TotalRowCount = page.TotalRowCount;
+            CurrentPage = page.PageNumber;
+            TotalPages = page.TotalPages;
+            Status = $"已載入 {table.DisplayName}：第 {CurrentPage} / {TotalPages} 頁，共 {TotalRowCount:N0} 筆。";
+        }
+        catch (Exception ex)
+        {
+            ClearDatabaseView();
+            ErrorMessage = $"讀取 SQLite 資料表失敗：{ex.Message}";
+        }
+        finally
+        {
+            if (ownsBusyState)
+            {
+                IsBusy = false;
+            }
+        }
+    }
+
+    private void ClearDatabaseView()
+    {
+        DatabasePath = null;
+        Tables.Clear();
+        TableRows = null;
+        TotalRowCount = 0;
+        CurrentPage = 1;
+        TotalPages = 1;
+    }
+
+    private void NotifyPagingStateChanged()
+    {
+        OnPropertyChanged(nameof(CanGoToFirstPage));
+        OnPropertyChanged(nameof(CanGoToPreviousPage));
+        OnPropertyChanged(nameof(CanGoToNextPage));
+        OnPropertyChanged(nameof(CanGoToLastPage));
     }
 
     private string ResolveCapturePath()

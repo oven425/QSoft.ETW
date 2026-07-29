@@ -1,80 +1,53 @@
-﻿<Window x:Class="WpfApp1.MainWindow"
+<Window x:Class="WpfApp1.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:qpanel="clr-namespace:QSoft.WPF.Panel;assembly=QSoft.WPF.Panel"
-        xmlns:scottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
-        Title="ETW 分析儀表板" Height="720" Width="1280" MinHeight="600" MinWidth="800">
-    <DockPanel>
-        <!--<StackPanel DockPanel.Dock="Top">
-            <Grid Margin="0,0,0,8">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="90"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <TextBlock VerticalAlignment="Center" Text="ETL 檔案："/>
-                <TextBox Grid.Column="1" Margin="6,0" Text="{Binding EtlPath, UpdateSourceTrigger=PropertyChanged}"/>
-                <Button Grid.Column="2" Content="選擇檔案" Click="SelectFile_Click" Margin="4,0"/>
-                <TextBlock Grid.Column="3" VerticalAlignment="Center" Text="追蹤秒數："/>
-                <TextBox Grid.Column="4" Margin="6,0" Text="{Binding DurationSeconds, UpdateSourceTrigger=PropertyChanged}"/>
-                <Button Grid.Column="5" Content="開始擷取並分析" Click="Capture_Click" Margin="4,0"/>
-                <Button Grid.Column="6" Content="分析既有檔案" Click="Analyze_Click" Margin="4,0"/>
-            </Grid>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                <Button Content="取消" Click="Cancel_Click" IsEnabled="{Binding IsBusy}"/>
-                <TextBlock Margin="12,0,0,0" VerticalAlignment="Center" Text="{Binding Status}"/>
-                <TextBlock Margin="12,0,0,0" Foreground="Firebrick" VerticalAlignment="Center" Text="{Binding ErrorMessage}" TextWrapping="Wrap"/>
-            </StackPanel>
-        </StackPanel>-->
-        <qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
-            <TextBlock Grid.Column="3" VerticalAlignment="Center" Text="追蹤秒數："/>
-            <TextBox Width="100"  Text="{Binding DurationSeconds, UpdateSourceTrigger=PropertyChanged}"/>
-            <Button Content="開始擷取並分析" Click="Capture_Click"/>
-            <Button Content="分析既有檔案" Click="Analyze_Click"/>
-        </qpanel:FlexPanel>
-        <qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
-            <TextBlock Text="ETL 檔案："/>
-            <TextBox IsReadOnly="True" qpanel:FlexPanel.Grow="1" Text="{Binding EtlPath, UpdateSourceTrigger=PropertyChanged}"/>
-        </qpanel:FlexPanel>
-        <qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
-            <TextBlock Text="{Binding Status}"/>
-            <TextBlock Foreground="Firebrick" Text="{Binding ErrorMessage}" TextWrapping="Wrap"/>
-        </qpanel:FlexPanel>
-        <TabControl>
-            <TabItem Header="CPU">
-				<Grid>
-					<Grid.RowDefinitions>
-						<RowDefinition Height="*"/>
-					    <RowDefinition Height="*"/>
-					</Grid.RowDefinitions>
-					<scottPlot:WpfPlot x:Name="CpuPlot"/>
-					<DataGrid Grid.Row="1" ItemsSource="{Binding Result.Analysis.ProcessCpuSummaries}" AutoGenerateColumns="True" IsReadOnly="True"/>
-				</Grid>
-			</TabItem>
-            <TabItem Header="能源與電錶">
-                <DataGrid ItemsSource="{Binding Result.Analysis.ProcessEnergySummaries}" AutoGenerateColumns="True" IsReadOnly="True"/>
-            </TabItem>
-            <TabItem Header="Profile 熱點">
-                <DataGrid ItemsSource="{Binding Result.Analysis.ProfileHotspots}" AutoGenerateColumns="True" IsReadOnly="True"/>
-            </TabItem>
-            <TabItem Header="DPC 熱點">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
-                    <scottPlot:WpfPlot x:Name="DpcPlot"/>
-                    <CheckBox x:Name="DpcSelectAllCheckBox" Grid.Row="1" Content="全選" Margin="0,4" IsChecked="True" Click="DpcSelectAllCheckBox_Click"/>
-                    <DataGrid x:Name="DpcDataGrid" Grid.Row="2" ItemsSource="{Binding DpcHotspots}" AutoGenerateColumns="True" IsReadOnly="False" AutoGeneratingColumn="DpcDataGrid_AutoGeneratingColumn">
-                        <DataGrid.Columns>
-                            <DataGridCheckBoxColumn Header="顯示" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"/>
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </Grid>
-            </TabItem>
-            <TabItem Header="Interrupt 熱點">
-                <DataGrid ItemsSource="{Binding Result.Analysis.InterruptHotspots}" AutoGenerateColumns="True" IsReadOnly="True"/>
-            </TabItem>
-            <TabItem Header="資料品質">
-                <ListBox ItemsSource="{Binding Result.Analysis.DataQualityWarnings}"/>
-            </TabItem>
+		Title="ETW 資料表瀏覽器" Height="720" Width="1280" MinHeight="600" MinWidth="800">
+    <DockPanel Margin="8">
+		<qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
+			<TextBlock Grid.Column="3" VerticalAlignment="Center" Text="追蹤秒數："/>
+			<TextBox Width="100"  Text="{Binding DurationSeconds, UpdateSourceTrigger=PropertyChanged}"/>
+			<Button Content="開始擷取並分析" Click="Capture_Click"/>
+			<Button Content="分析既有檔案" Click="Analyze_Click"/>
+		</qpanel:FlexPanel>
+		<qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
+			<TextBlock Text="ETL 檔案："/>
+			<TextBox IsReadOnly="True" qpanel:FlexPanel.Grow="1" Text="{Binding EtlPath, UpdateSourceTrigger=PropertyChanged}"/>
+		</qpanel:FlexPanel>
+		<qpanel:FlexPanel AlignItems="Center" FlexDirection="Row" DockPanel.Dock="Top" Gap="6">
+			<TextBlock Text="{Binding Status}"/>
+			<TextBlock Foreground="Firebrick" Text="{Binding ErrorMessage}" TextWrapping="Wrap"/>
+		</qpanel:FlexPanel>
+
+        <TabControl ItemsSource="{Binding Tables}" SelectedItem="{Binding SelectedTable}">
+            <TabControl.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding DisplayName}"/>
+                </DataTemplate>
+            </TabControl.ItemTemplate>
+            <TabControl.ContentTemplate>
+                <DataTemplate>
+                    <Grid Margin="4">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <DataGrid ItemsSource="{Binding DataContext.TableRows, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  AutoGenerateColumns="True"
+                                  IsReadOnly="True"
+                                  CanUserAddRows="False"/>
+                        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,8,0,0">
+                            <Button Content="首頁" Command="{Binding DataContext.GoToFirstPageCommand, RelativeSource={RelativeSource AncestorType=Window}}" IsEnabled="{Binding DataContext.CanGoToFirstPage, RelativeSource={RelativeSource AncestorType=Window}}"/>
+                            <Button Content="上一頁" Margin="6,0,0,0" Command="{Binding DataContext.GoToPreviousPageCommand, RelativeSource={RelativeSource AncestorType=Window}}" IsEnabled="{Binding DataContext.CanGoToPreviousPage, RelativeSource={RelativeSource AncestorType=Window}}"/>
+                            <TextBlock Margin="12,0" VerticalAlignment="Center" Text="{Binding DataContext.CurrentPage, RelativeSource={RelativeSource AncestorType=Window}, StringFormat=第 {0} 頁}"/>
+                            <TextBlock Margin="0,0,12,0" VerticalAlignment="Center" Text="{Binding DataContext.TotalPages, RelativeSource={RelativeSource AncestorType=Window}, StringFormat=/ {0} 頁}"/>
+                            <Button Content="下一頁" Command="{Binding DataContext.GoToNextPageCommand, RelativeSource={RelativeSource AncestorType=Window}}" IsEnabled="{Binding DataContext.CanGoToNextPage, RelativeSource={RelativeSource AncestorType=Window}}"/>
+                            <Button Content="末頁" Margin="6,0,0,0" Command="{Binding DataContext.GoToLastPageCommand, RelativeSource={RelativeSource AncestorType=Window}}" IsEnabled="{Binding DataContext.CanGoToLastPage, RelativeSource={RelativeSource AncestorType=Window}}"/>
+                            <TextBlock Margin="12,0,0,0" VerticalAlignment="Center" Text="{Binding DataContext.TotalRowCount, RelativeSource={RelativeSource AncestorType=Window}, StringFormat=共 {0:N0} 筆}"/>
+                        </StackPanel>
+                    </Grid>
+                </DataTemplate>
+            </TabControl.ContentTemplate>
         </TabControl>
     </DockPanel>
 </Window>

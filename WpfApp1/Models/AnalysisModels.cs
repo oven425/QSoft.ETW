@@ -66,22 +66,22 @@ public sealed class InterruptHotspot
     public int EventCount { get; init; }
 }
 
-/// <summary>單一 ETL 檔案分析後的完整結果。</summary>
-public sealed class AnalysisResult
-{
-    public List<ProcessCpuSummary> ProcessCpuSummaries { get; init; } = [];
-    public List<ProcessIoSummary> ProcessIoSummaries { get; init; } = [];
-    public List<ProcessEnergySummary> ProcessEnergySummaries { get; init; } = [];
-    public List<ProfileHotspot> ProfileHotspots { get; init; } = [];
-    public List<DpcHotspot> DpcHotspots { get; init; } = [];
-    public List<InterruptHotspot> InterruptHotspots { get; init; } = [];
-    public ObservableCollection<string> DataQualityWarnings { get; init; } = [];
-}
+///// <summary>單一 ETL 檔案分析後的完整結果。</summary>
+//public sealed class AnalysisResult
+//{
+//    public List<ProcessCpuSummary> ProcessCpuSummaries { get; init; } = [];
+//    public List<ProcessIoSummary> ProcessIoSummaries { get; init; } = [];
+//    public List<ProcessEnergySummary> ProcessEnergySummaries { get; init; } = [];
+//    public List<ProfileHotspot> ProfileHotspots { get; init; } = [];
+//    public List<DpcHotspot> DpcHotspots { get; init; } = [];
+//    public List<InterruptHotspot> InterruptHotspots { get; init; } = [];
+//    public ObservableCollection<string> DataQualityWarnings { get; init; } = [];
+//}
 
 /// <summary>提供給 UI 綁定的擷取/分析結果包裝。</summary>
 public sealed class CaptureResult
 {
     public string EtlPath { get; init; } = string.Empty;
     public DateTime AnalyzedAt { get; init; } = DateTime.Now;
-    public AnalysisResult Analysis { get; init; } = new();
+    //public AnalysisResult Analysis { get; init; } = new();
 }

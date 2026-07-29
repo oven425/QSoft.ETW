@@ -472,7 +472,7 @@ internal sealed class EnergyEstimationEventInfo
     public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
-internal sealed class WmiActivityEventInfo
+public readonly record struct WmiActivityEventInfo
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
@@ -480,7 +480,7 @@ internal sealed class WmiActivityEventInfo
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
-    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+    public required IReadOnlyDictionary<string, string> Properties { get; init; }
 }
 
 internal sealed class KernelAcpiEventInfo
@@ -556,7 +556,7 @@ public sealed class InterruptEventInfo
     public uint? ReturnValue { get; init; }
 }
 
-internal sealed class ProfileEventInfo
+public sealed class ProfileEventInfo
 {
     public required DateTime Timestamp { get; init; }
     public required byte ProcessorNumber { get; init; }
@@ -588,6 +588,17 @@ public readonly record struct ImageLoadEventInfo
     public uint? TimeDateStamp { get; init; }
     public ulong? DefaultBase { get; init; }
     public string FileName { get; init; }
+}
+
+public readonly record struct EnergyEstimationEngineEventInfo
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public ulong? Energy { get; init; }
 }
 
 internal static partial class NativeMethods
@@ -978,11 +989,20 @@ public sealed class EtlFileReader
     public delegate void PerfInfoIsrEventHandler(in InterruptEventInfo data);
     public event PerfInfoIsrEventHandler? PerfInfoISR;
 
+    public delegate void PerfInfoProfileEventHandler(ProfileEventInfo data);
+    public event PerfInfoProfileEventHandler? PerfInfoProfile;
+
     public delegate void ImageLoadEventHandler(in ImageLoadEventInfo data);
     public event ImageLoadEventHandler? ImageLoad;
     public event ImageLoadEventHandler? ImageUnload;
     public event ImageLoadEventHandler? ImageDCStart;
     public event ImageLoadEventHandler? ImageDCStop;
+
+    public delegate void EnergyEstimationEngineEventHandler(in EnergyEstimationEngineEventInfo data);
+    public event EnergyEstimationEngineEventHandler? EnergyEstimationEngine;
+
+    public delegate void WmiActivityEventHandler(in WmiActivityEventInfo data);
+    public event WmiActivityEventHandler? WmiActivity;
 
 
     private unsafe void OnEventRecord(EVENT_RECORD* eventRecordPtr)
@@ -1050,7 +1070,7 @@ public sealed class EtlFileReader
                 var profilehr = ProcessProfileEvent(timestamp, eventRecordPtr->BufferContext.ProcessorNumber, in eventRecordPtr->EventHeader, eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
                 if (profilehr != null)
                 {
-                    //_readResult?.ProfileEvents.Add(profilehr);
+                    PerfInfoProfile?.Invoke(profilehr);
                 }
                 return;
             }
@@ -1134,7 +1154,7 @@ public sealed class EtlFileReader
         byte opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
         if (eventRecordPtr->EventHeader.ProviderId == s_processProviderId)
         {
-            ProcessProcessEvent(opcode, timestamp, eventRecordPtr, cache);
+            //ProcessProcessEvent(opcode, timestamp, eventRecordPtr, cache);
         }
         //else if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
         //{
@@ -1152,23 +1172,25 @@ public sealed class EtlFileReader
         //{
         //    ProcessFileIoEvent(timestamp, in record.EventHeader, properties);
         //}
-        //else if (record.EventHeader.ProviderId == TraceSessionBuilder.WmiActivityProviderGuid)
-        //{
-        //    ProcessWmiActivityEvent(timestamp, in record.EventHeader, properties);
-        //}
-        //else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
-        //{
-        //    foreach(var oo in cache.Properties)
-        //    {
-
-        //    }
-        //    //uint? processId = GetUInt32(properties, "ProcessId") ?? (header.ProcessId != 0 ? header.ProcessId : null);
-        //    if(cache.Properties.ContainsKey("Energy"))
-        //    {
-        //        GetRawProperty(eventRecordPtr, "Energy");
-        //    }
-        //    ProcessEnergyEstimationEvent(timestamp, eventRecordPtr);
-        //}
+        else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.WmiActivityProviderGuid)
+        {
+            WmiActivityEventInfo? wmiActivityEvent = ParseWmiActivityPayload(timestamp, eventRecordPtr);
+            if (wmiActivityEvent is { } wmiActivityEventValue)
+            {
+                WmiActivity?.Invoke(in wmiActivityEventValue);
+            }
+        }
+        else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
+        {
+            if(EnergyEstimationEngine is not null)
+            {
+                EnergyEstimationEngineEventInfo? energyEvent = ParseEnergyEstimationEnginePayload(timestamp, eventRecordPtr);
+                if (energyEvent is { } energyEventValue)
+                {
+                    EnergyEstimationEngine(in energyEventValue);
+                }
+            }
+        }
         //else if (record.EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
         //{
         //    ProcessKernelAcpiEvent(timestamp, in record.EventHeader, properties);
@@ -1258,6 +1280,32 @@ public sealed class EtlFileReader
             remaining -= userDataConsumed;
         }
         return m_Properties;
+    }
+
+    private unsafe WmiActivityEventInfo? ParseWmiActivityPayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+
+        ref EVENT_RECORD eventRecord = ref *eventRecordPtr;
+        Dictionary<string, string>? properties = ReadProperties((nint)eventRecordPtr, in eventRecord.EventHeader, in eventRecord);
+        if (properties is null)
+        {
+            return null;
+        }
+
+        return new WmiActivityEventInfo
+        {
+            Timestamp = timestamp,
+            EventId = eventRecord.EventHeader.EventDescriptor.Id,
+            Version = eventRecord.EventHeader.EventDescriptor.Version,
+            Opcode = eventRecord.EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecord.EventHeader.ProcessId,
+            ThreadId = eventRecord.EventHeader.ThreadId,
+            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+        };
     }
 
     private static unsafe uint GetRawPropertyUInt32(EVENT_RECORD* eventRecordPtr, string propertyName, uint defaultvalue = 0)
@@ -1380,6 +1428,41 @@ public sealed class EtlFileReader
         }
     }
 
+    private static unsafe EnergyEstimationEngineEventInfo? ParseEnergyEstimationEnginePayload(
+        DateTime timestamp,
+        EVENT_RECORD* eventRecordPtr)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+
+        byte[]? energyBytes = GetRawProperty(eventRecordPtr, "Energy");
+        if (energyBytes is null || energyBytes.Length != sizeof(ulong))
+        {
+            return null;
+        }
+
+        uint processId = eventRecordPtr->EventHeader.ProcessId;
+        byte[]? processIdBytes = GetRawProperty(eventRecordPtr, "ProcessId");
+        if (processIdBytes is { Length: sizeof(uint) })
+        {
+            processId = BinaryPrimitives.ReadUInt32LittleEndian(processIdBytes);
+        }
+
+        ulong energy = BinaryPrimitives.ReadUInt64LittleEndian(energyBytes);
+        return new EnergyEstimationEngineEventInfo
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = processId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            Energy = energy,
+        };
+    }
+
     private unsafe CachedSchema? ReadProperties_CC(EVENT_RECORD* eventRecordPtr)
     {
         CachedSchema? schema = GetOrAddCachedSchema(eventRecordPtr);
@@ -1458,7 +1541,6 @@ public sealed class EtlFileReader
                 CommandLine = GetRawPropertyString(eventRecordPtr, "CommandLine", cache),
             };
 
-            //_readResult!.Processes.Add(process);
             s_activeProcesses[processId] = process;
         }
         else if (opcode is 2 or 4 && s_activeProcesses.Remove(processId, out ProcessInfo? process))
@@ -1525,23 +1607,6 @@ public sealed class EtlFileReader
             ThreadId = header.ThreadId,
             Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
         });
-    }
-
-    private unsafe void ProcessEnergyEstimationEvent(DateTime timestamp, EVENT_RECORD* record)
-    {
-        //uint? processId = GetUInt32(properties, "ProcessId") ?? (header.ProcessId != 0 ? header.ProcessId : null);
-
-        //_readResult!.EnergyEstimationEvents.Add(new EnergyEstimationEventInfo
-        //{
-        //    Timestamp = timestamp,
-        //    EventId = header.EventDescriptor.Id,
-        //    Version = header.EventDescriptor.Version,
-        //    Opcode = header.EventDescriptor.Opcode,
-        //    HeaderProcessId = header.ProcessId,
-        //    ThreadId = header.ThreadId,
-        //    ProcessId = processId,
-        //    Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
-        //});
     }
 
     private void ProcessWmiActivityEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
