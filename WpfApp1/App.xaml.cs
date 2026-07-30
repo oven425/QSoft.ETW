@@ -17,10 +17,10 @@ namespace WpfApp1
             base.OnStartup(e);
 
             var services = new ServiceCollection();
-            services.AddSingleton<IEtlSqliteDatabase, EtlSqliteDatabase>();
-            services.AddTransient<IEtlExporter, SqliteEtlExporter>();
-            services.AddSingleton<IEtlExporterFactory>(provider => new EtlExporterFactory(
-                () => provider.GetRequiredService<IEtlExporter>()));
+            //services.AddSingleton<IEtlSqliteDatabase, EtlSqliteDatabase>();
+            //services.AddTransient<IEtlExporter, SqliteEtlExporter>();
+            //services.AddSingleton<IEtlExporterFactory>(provider => new EtlExporterFactory(
+            //    () => provider.GetRequiredService<IEtlExporter>()));
             services.AddSingleton<IEtlAnalyzer, EtlAnalyzer>();
             services.AddSingleton<MainViewModel>();
             services.AddTransient<MainWindow>();

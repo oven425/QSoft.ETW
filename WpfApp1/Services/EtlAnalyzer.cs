@@ -7,9 +7,9 @@ namespace WpfApp1.Services;
 public interface IEtlAnalyzer
 {
     Task AnalyzeAsync(string etlPath, CancellationToken cancellationToken);
-    string GetOutputPath(string etlPath);
-    //IReadOnlyList<EtlTableDefinition> GetBrowsableTables();
-    EtlTablePage ReadTablePage(string outputPath, string tableName, int pageNumber, int pageSize);
+    //string GetOutputPath(string etlPath);
+    ////IReadOnlyList<EtlTableDefinition> GetBrowsableTables();
+    //EtlTablePage ReadTablePage(string outputPath, string tableName, int pageNumber, int pageSize);
 }
 
 /// <summary>
@@ -17,21 +17,21 @@ public interface IEtlAnalyzer
 /// 並將其內部彙總結果 (<see cref="EtlAnalysisResult"/>) 轉換為 UI 端使用的 <see cref="AnalysisResult"/>。
 /// 資料不足或無法精確解析的部分會記錄於 <see cref="AnalysisResult.DataQualityWarnings"/>，而非中斷整個分析流程。
 /// </summary>
-internal sealed class EtlAnalyzer(IEtlExporterFactory exporterFactory, IEtlSqliteDatabase database) : IEtlAnalyzer
+internal sealed class EtlAnalyzer : IEtlAnalyzer
 {
     public Task AnalyzeAsync(string etlPath, CancellationToken cancellationToken)
     {
         return Task.Run(() => Analyze(etlPath, cancellationToken), cancellationToken);
     }
 
-    public string GetOutputPath(string etlPath) => database.GetDatabasePath(etlPath);
+    //public string GetOutputPath(string etlPath) => database.GetDatabasePath(etlPath);
 
     //public IReadOnlyList<EtlTableDefinition> GetBrowsableTables() => database.GetBrowsableTables();
 
-    public EtlTablePage ReadTablePage(string outputPath, string tableName, int pageNumber, int pageSize)
-    {
-        return database.ReadTablePage(outputPath, tableName, pageNumber, pageSize);
-    }
+    //public EtlTablePage ReadTablePage(string outputPath, string tableName, int pageNumber, int pageSize)
+    //{
+    //    return database.ReadTablePage(outputPath, tableName, pageNumber, pageSize);
+    //}
 
     private void Analyze(string etlPath, CancellationToken cancellationToken)
     {
@@ -44,10 +44,11 @@ internal sealed class EtlAnalyzer(IEtlExporterFactory exporterFactory, IEtlSqlit
 
         try
         {
-            var reader = new EtlFileReader();
-            IEtlExporter exporter = exporterFactory.Create();
-            exporter.Export(reader, etlPath);
-            cancellationToken.ThrowIfCancellationRequested();
+            using DataBase_SQLite db = new();
+            db.Open(Path.ChangeExtension(etlPath, ".db"));
+            SQLiteExport export = new(db);
+            export.Export(new EtlFileReader(), etlPath);
+            
         }
         catch (OperationCanceledException)
         {

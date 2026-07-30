@@ -398,7 +398,7 @@ internal sealed class RoutineEventSummary
     public List<TimedSample> Samples { get; } = [];
 }
 
-internal sealed class ProcessInfo
+public sealed class ProcessInfo
 {
     public required uint ProcessId { get; init; }
     public uint ParentProcessId { get; init; }
@@ -410,7 +410,7 @@ internal sealed class ProcessInfo
     public List<ModuleInfo> Modules { get; } = [];
 }
 
-internal sealed class ModuleInfo
+public sealed class ModuleInfo
 {
     public required uint ProcessId { get; init; }
     public required DateTime LoadTime { get; init; }
@@ -457,7 +457,7 @@ internal sealed class PowerMeterPollingEventInfo
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
-    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+    //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
 internal sealed class EnergyEstimationEventInfo
@@ -480,10 +480,13 @@ public readonly record struct WmiActivityEventInfo
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
-    public required IReadOnlyDictionary<string, string> Properties { get; init; }
+    public string NamespaceName { get; init; }
+    public string Operation { get; init; }
+
+    //public required IReadOnlyDictionary<string, string> Properties { get; init; }
 }
 
-internal sealed class KernelAcpiEventInfo
+public sealed class KernelAcpiEventInfo
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
@@ -491,7 +494,7 @@ internal sealed class KernelAcpiEventInfo
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
-    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+    //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
 internal sealed class KernelPowerEventInfo
@@ -502,7 +505,7 @@ internal sealed class KernelPowerEventInfo
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
-    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+    //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
 public readonly record struct ThreadStartStopEventInfo
@@ -660,10 +663,6 @@ internal static partial class NativeMethods
 
 }
 
-/// <summary>
-/// ETL 檔案解析的初始架構:負責 OpenTrace → ProcessTrace → CloseTrace 的完整流程,
-/// 並透過 EVENT_RECORD callback 逐筆取出事件標頭資訊。
-/// </summary>
 public sealed class EtlFileReader
 {
     private readonly Guid s_processProviderId = new("3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c");
@@ -691,11 +690,9 @@ public sealed class EtlFileReader
 
     private EtlReadResult? _readResult;
 
-    /// <summary>TDH schema 快取,鍵為 (ProviderId, EventId, Version, Opcode),值為 TdhGetEventInformation 配置的原生緩衝區指標。查詢失敗時快取 0。</summary>
     private readonly Dictionary<SchemaKey, nint> s_schemaCache = [];
     private readonly Dictionary<SchemaKey, CachedSchema?> s_cachedSchemaCache = [];
 
-    /// <summary>開啟並解析指定的 ETL 檔案,回傳流程結束碼(0 表示成功)。</summary>
     public unsafe void ProcessFile(string etlFilePath)
     {
         if (!File.Exists(etlFilePath))
@@ -981,6 +978,10 @@ public sealed class EtlFileReader
     public event ThreadStartStopEventHandler? ThreadDCStart;
     public event ThreadStartStopEventHandler? ThreadDCStop;
 
+    public delegate void ProcessEventHandler(ProcessInfo process);
+    public event ProcessEventHandler? ProcessStart;
+    public event ProcessEventHandler? ProcessStop;
+
     public delegate void PerfInfoDpcEventHandler(in DpcEventInfo data);
     public event PerfInfoDpcEventHandler? PerfInfoThreadedDPC;
     public event PerfInfoDpcEventHandler? PerfInfoDPC;
@@ -1000,6 +1001,9 @@ public sealed class EtlFileReader
 
     public delegate void EnergyEstimationEngineEventHandler(in EnergyEstimationEngineEventInfo data);
     public event EnergyEstimationEngineEventHandler? EnergyEstimationEngine;
+
+    public delegate void KernelAcpiEventHandler(KernelAcpiEventInfo data);
+    public event KernelAcpiEventHandler? KernelAcpi;
 
     public delegate void WmiActivityEventHandler(in WmiActivityEventInfo data);
     public event WmiActivityEventHandler? WmiActivity;
@@ -1154,15 +1158,15 @@ public sealed class EtlFileReader
         byte opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
         if (eventRecordPtr->EventHeader.ProviderId == s_processProviderId)
         {
-            //ProcessProcessEvent(opcode, timestamp, eventRecordPtr, cache);
+            ProcessProcessEvent(opcode, timestamp, eventRecordPtr, cache);
         }
         //else if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
         //{
         //    ProcessThreadEvent(opcode, timestamp, properties);
         //}
-        //else if (record.EventHeader.ProviderId == s_imageLoadProviderId && (opcode == 3 || opcode == 10))
+        //else if (eventRecordPtr->EventHeader.ProviderId == s_imageLoadProviderId && (opcode == 3 || opcode == 10))
         //{
-        //    ProcessImageLoadEvent(timestamp, record.EventHeader.ProcessId, properties);
+        //    ProcessImageLoadEvent(timestamp, eventRecordPtr->EventHeader.ProcessId, null);
         //}
         //else if (record.EventHeader.ProviderId == s_diskIoProviderId)
         //{
@@ -1184,31 +1188,32 @@ public sealed class EtlFileReader
         {
             if(EnergyEstimationEngine is not null)
             {
-                EnergyEstimationEngineEventInfo? energyEvent = ParseEnergyEstimationEnginePayload(timestamp, eventRecordPtr);
+                var energyEvent = ParseEnergyEstimationEnginePayload(timestamp, eventRecordPtr);
                 if (energyEvent is { } energyEventValue)
                 {
                     EnergyEstimationEngine(in energyEventValue);
                 }
             }
         }
-        //else if (record.EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
+        else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
+        {
+            KernelAcpiEventInfo acpiEvent = ProcessKernelAcpiEvent(timestamp, in eventRecordPtr->EventHeader);
+            KernelAcpi?.Invoke(acpiEvent);
+        }
+        //else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
         //{
-        //    ProcessKernelAcpiEvent(timestamp, in record.EventHeader, properties);
+        //    var kernelpowerevt = ProcessKernelPowerEvent(timestamp, in eventRecordPtr->EventHeader);
         //}
-        //else if (record.EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
-        //{
-        //    ProcessKernelPowerEvent(timestamp, in record.EventHeader, properties);
-        //}
-        //else if (record.EventHeader.ProviderId == TraceSessionBuilder.PowerMeterPollingProviderGuid)
-        //{
-        //    ProcessPowerMeterPollingEvent(timestamp, in record.EventHeader, properties);
-        //}
+        else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.PowerMeterPollingProviderGuid)
+        {
+            var powerneter = ProcessPowerMeterPollingEvent(timestamp, eventRecordPtr, cache);
+        }
     }
 
     Dictionary<string, string> m_Properties = new(StringComparer.OrdinalIgnoreCase);
-    private unsafe Dictionary<string, string>? ReadProperties(nint eventRecordPtr, in EVENT_HEADER header, in EVENT_RECORD record)
+    private unsafe Dictionary<string, string>? ReadProperties(EVENT_RECORD* eventRecordPtr, in EVENT_HEADER header)
     {
-        nint infoPtr = GetOrAddSchema(eventRecordPtr, in header);
+        nint infoPtr = GetOrAddSchema((nint)eventRecordPtr, in eventRecordPtr->EventHeader);
         if (infoPtr == 0)
         {
             return null;
@@ -1220,8 +1225,8 @@ public sealed class EtlFileReader
         var propertyInfoBase = Marshal.SizeOf<TRACE_EVENT_INFO>();
         var propertyInfoSize = Marshal.SizeOf<EVENT_PROPERTY_INFO>();
 
-        nint cursor = record.UserData;
-        int remaining = record.UserDataLength;
+        nint cursor = eventRecordPtr->UserData;
+        int remaining = eventRecordPtr->UserDataLength;
         for (int i = 0; i < info.TopLevelPropertyCount && remaining > 0; i++)
         {
             nint propertyInfoPtr = infoPtr + propertyInfoBase + (i * propertyInfoSize);
@@ -1290,11 +1295,7 @@ public sealed class EtlFileReader
         }
 
         ref EVENT_RECORD eventRecord = ref *eventRecordPtr;
-        Dictionary<string, string>? properties = ReadProperties((nint)eventRecordPtr, in eventRecord.EventHeader, in eventRecord);
-        if (properties is null)
-        {
-            return null;
-        }
+        CachedSchema? schema = GetOrAddCachedSchema(eventRecordPtr);
 
         return new WmiActivityEventInfo
         {
@@ -1304,7 +1305,8 @@ public sealed class EtlFileReader
             Opcode = eventRecord.EventHeader.EventDescriptor.Opcode,
             ProcessId = eventRecord.EventHeader.ProcessId,
             ThreadId = eventRecord.EventHeader.ThreadId,
-            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+            Operation = schema is null ? string.Empty : GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            NamespaceName = schema is null ? string.Empty : GetRawPropertyString(eventRecordPtr, "NamespaceName", schema),
         };
     }
 
@@ -1463,70 +1465,6 @@ public sealed class EtlFileReader
         };
     }
 
-    private unsafe CachedSchema? ReadProperties_CC(EVENT_RECORD* eventRecordPtr)
-    {
-        CachedSchema? schema = GetOrAddCachedSchema(eventRecordPtr);
-        return schema;
-        //if (schema is null)
-        //{
-        //    return null;
-        //}
-
-        //m_Properties.Clear();
-        //uint pointerSize = (eventRecordPtr->EventHeader.Flags & EtwNativeConstants.EVENT_HEADER_FLAG_32_BIT_HEADER) != 0 ? 4u : 8u;
-        //nint cursor = eventRecordPtr->UserData;
-        //int remaining = eventRecordPtr->UserDataLength;
-
-        //foreach (CachedProperty property in schema.Properties)
-        //{
-        //    if (remaining <= 0)
-        //    {
-        //        break;
-        //    }
-
-        //    uint formatBufferSize = 0;
-        //    uint formatStatus = NativeMethods.TdhFormatProperty(
-        //        schema.NativeInfoPtr, 0, pointerSize, property.InType, property.OutType,
-        //        property.Length, (ushort)remaining, cursor, ref formatBufferSize, 0, out ushort userDataConsumed);
-        //    nint formatBufferPtr = 0;
-        //    try
-        //    {
-        //        if (formatStatus == EtwNativeConstants.ERROR_INSUFFICIENT_BUFFER && formatBufferSize > 0)
-        //        {
-        //            formatBufferPtr = Marshal.AllocHGlobal((int)formatBufferSize);
-        //            formatStatus = NativeMethods.TdhFormatProperty(
-        //                schema.NativeInfoPtr, 0, pointerSize, property.InType, property.OutType,
-        //                property.Length, (ushort)remaining, cursor, ref formatBufferSize, formatBufferPtr, out userDataConsumed);
-        //        }
-
-        //        if (formatStatus != EtwNativeConstants.ERROR_SUCCESS)
-        //        {
-        //            break;
-        //        }
-
-        //        string value = Marshal.PtrToStringUni(formatBufferPtr) ?? string.Empty;
-        //        m_Properties[property.Name] = value;
-        //    }
-        //    finally
-        //    {
-        //        if (formatBufferPtr != 0)
-        //        {
-        //            Marshal.FreeHGlobal(formatBufferPtr);
-        //        }
-        //    }
-
-        //    if (userDataConsumed == 0)
-        //    {
-        //        break;
-        //    }
-
-        //    cursor += userDataConsumed;
-        //    remaining -= userDataConsumed;
-        //}
-
-        //return m_Properties;
-    }
-
     private unsafe void ProcessProcessEvent(byte opcode, DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
         var processId = GetRawPropertyUInt32(eventRecordPtr, "ProcessId", eventRecordPtr->EventHeader.ProcessId);
@@ -1542,10 +1480,13 @@ public sealed class EtlFileReader
             };
 
             s_activeProcesses[processId] = process;
+            ProcessStart?.Invoke(process);
         }
-        else if (opcode is 2 or 4 && s_activeProcesses.Remove(processId, out ProcessInfo? process))
+        else if (opcode is 2 or 4 && s_activeProcesses.TryGetValue(processId, out ProcessInfo? process))
         {
             process.EndTime = timestamp;
+            ProcessStop?.Invoke(process);
+            s_activeProcesses.Remove(processId);
         }
     }
 
@@ -1609,9 +1550,10 @@ public sealed class EtlFileReader
         });
     }
 
-    private void ProcessWmiActivityEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+
+    private KernelAcpiEventInfo ProcessKernelAcpiEvent(DateTime timestamp, in EVENT_HEADER header)
     {
-        _readResult!.WmiActivityEvents.Add(new WmiActivityEventInfo
+        return new KernelAcpiEventInfo
         {
             Timestamp = timestamp,
             EventId = header.EventDescriptor.Id,
@@ -1619,13 +1561,12 @@ public sealed class EtlFileReader
             Opcode = header.EventDescriptor.Opcode,
             ProcessId = header.ProcessId,
             ThreadId = header.ThreadId,
-            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
-        });
+        };
     }
 
-    private void ProcessKernelAcpiEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private KernelPowerEventInfo ProcessKernelPowerEvent(DateTime timestamp, in EVENT_HEADER header)
     {
-        _readResult!.KernelAcpiEvents.Add(new KernelAcpiEventInfo
+        return new KernelPowerEventInfo
         {
             Timestamp = timestamp,
             EventId = header.EventDescriptor.Id,
@@ -1633,34 +1574,21 @@ public sealed class EtlFileReader
             Opcode = header.EventDescriptor.Opcode,
             ProcessId = header.ProcessId,
             ThreadId = header.ThreadId,
-            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
-        });
+            //Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+        };
     }
 
-    private void ProcessKernelPowerEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    private unsafe PowerMeterPollingEventInfo ProcessPowerMeterPollingEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
-        _readResult!.KernelPowerEvents.Add(new KernelPowerEventInfo
+        var dic = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+        return new PowerMeterPollingEventInfo
         {
             Timestamp = timestamp,
-            EventId = header.EventDescriptor.Id,
-            Version = header.EventDescriptor.Version,
-            Opcode = header.EventDescriptor.Opcode,
-            ProcessId = header.ProcessId,
-            ThreadId = header.ThreadId,
-            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
-        });
-    }
-
-    private void ProcessPowerMeterPollingEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
-    {
-        _readResult!.PowerMeterPollingEvents.Add(new PowerMeterPollingEventInfo
-        {
-            Timestamp = timestamp,
-            EventId = header.EventDescriptor.Id,
-            Version = header.EventDescriptor.Version,
-            Opcode = header.EventDescriptor.Opcode,
-            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
-        });
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            //Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+        };
     }
 
     private ProfileEventInfo? ProcessProfileEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
@@ -2306,50 +2234,50 @@ public sealed class EtlFileReader
 
     private void AnalyzePowerMeterPollingEvents(EtlReadResult result, EtlAnalysisResult analysis)
     {
-        Dictionary<(ushort EventId, byte Version, byte Opcode, string FieldName), NumericMetricSummary> metrics = [];
-        foreach (PowerMeterPollingEventInfo powerMeterEvent in result.PowerMeterPollingEvents)
-        {
-            int recognizedMetricCount = 0;
-            foreach (string fieldName in powerMeterEvent.Properties.Keys)
-            {
-                if (!TryGetPowerMetric(powerMeterEvent.Properties, fieldName, out PowerMetricKind kind, out double value))
-                {
-                    continue;
-                }
+        //Dictionary<(ushort EventId, byte Version, byte Opcode, string FieldName), NumericMetricSummary> metrics = [];
+        //foreach (PowerMeterPollingEventInfo powerMeterEvent in result.PowerMeterPollingEvents)
+        //{
+        //    int recognizedMetricCount = 0;
+        //    foreach (string fieldName in powerMeterEvent.Properties.Keys)
+        //    {
+        //        if (!TryGetPowerMetric(powerMeterEvent.Properties, fieldName, out PowerMetricKind kind, out double value))
+        //        {
+        //            continue;
+        //        }
 
-                (ushort EventId, byte Version, byte Opcode, string FieldName) key =
-                    (powerMeterEvent.EventId, powerMeterEvent.Version, powerMeterEvent.Opcode, fieldName);
-                if (!metrics.TryGetValue(key, out NumericMetricSummary? metric))
-                {
-                    metric = new NumericMetricSummary
-                    {
-                        FieldName = fieldName,
-                        Kind = kind,
-                    };
-                    metrics.Add(key, metric);
-                }
+        //        (ushort EventId, byte Version, byte Opcode, string FieldName) key =
+        //            (powerMeterEvent.EventId, powerMeterEvent.Version, powerMeterEvent.Opcode, fieldName);
+        //        if (!metrics.TryGetValue(key, out NumericMetricSummary? metric))
+        //        {
+        //            metric = new NumericMetricSummary
+        //            {
+        //                FieldName = fieldName,
+        //                Kind = kind,
+        //            };
+        //            metrics.Add(key, metric);
+        //        }
 
-                metric.Add(value, powerMeterEvent.Timestamp);
-                recognizedMetricCount++;
-            }
+        //        metric.Add(value, powerMeterEvent.Timestamp);
+        //        recognizedMetricCount++;
+        //    }
 
-            if (recognizedMetricCount == 0)
-            {
-                analysis.PowerMeterEventsWithoutRecognizedMetrics++;
-            }
-        }
+        //    if (recognizedMetricCount == 0)
+        //    {
+        //        analysis.PowerMeterEventsWithoutRecognizedMetrics++;
+        //    }
+        //}
 
-        analysis.PowerMeterMetricSummaries.AddRange(metrics
-            .OrderByDescending(pair => pair.Value.SampleCount)
-            .ThenBy(pair => pair.Key.EventId)
-            .ThenBy(pair => pair.Key.FieldName)
-            .Select(pair => new PowerMeterMetricSummary
-            {
-                EventId = pair.Key.EventId,
-                Version = pair.Key.Version,
-                Opcode = pair.Key.Opcode,
-                Metric = pair.Value,
-            }));
+        //analysis.PowerMeterMetricSummaries.AddRange(metrics
+        //    .OrderByDescending(pair => pair.Value.SampleCount)
+        //    .ThenBy(pair => pair.Key.EventId)
+        //    .ThenBy(pair => pair.Key.FieldName)
+        //    .Select(pair => new PowerMeterMetricSummary
+        //    {
+        //        EventId = pair.Key.EventId,
+        //        Version = pair.Key.Version,
+        //        Opcode = pair.Key.Opcode,
+        //        Metric = pair.Value,
+        //    }));
     }
 
     private void AnalyzeProfileEvents(EtlReadResult result, EtlAnalysisResult analysis)

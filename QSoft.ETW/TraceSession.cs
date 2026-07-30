@@ -348,7 +348,7 @@ namespace QSoft.ETW
                             in providerId,
                             EVENT_CONTROL_CODE_ENABLE_PROVIDER,
                             TRACE_LEVEL_VERBOSE,
-                            matchAnyKeyword: provider.MatchAnyKeyword,
+                            matchAnyKeyword: 0xFFFFFFFFFFFFFFFF,
                             matchAllKeyword: 0,
                             timeout: 0,
                             in enableParams),

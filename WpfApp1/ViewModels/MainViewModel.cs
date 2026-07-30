@@ -34,7 +34,7 @@ public partial class MainViewModel : ObservableObject
     private bool isBusy;
 
     private string? databasePath;
-    private EtlTableDefinition? selectedTable;
+    //private EtlTableDefinition? selectedTable;
     private DataView? tableRows;
     private long totalRowCount;
     private int currentPage = 1;
@@ -46,17 +46,17 @@ public partial class MainViewModel : ObservableObject
         private set => SetProperty(ref databasePath, value);
     }
 
-    public EtlTableDefinition? SelectedTable
-    {
-        get => selectedTable;
-        set
-        {
-            if (SetProperty(ref selectedTable, value) && !suppressTableLoad && value is not null && !string.IsNullOrWhiteSpace(DatabasePath))
-            {
-                _ = LoadPageAsync(1);
-            }
-        }
-    }
+    //public EtlTableDefinition? SelectedTable
+    //{
+    //    get => selectedTable;
+    //    set
+    //    {
+    //        if (SetProperty(ref selectedTable, value) && !suppressTableLoad && value is not null && !string.IsNullOrWhiteSpace(DatabasePath))
+    //        {
+    //            _ = LoadPageAsync(1);
+    //        }
+    //    }
+    //}
 
     public DataView? TableRows
     {
@@ -94,7 +94,7 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    public ObservableCollection<EtlTableDefinition> Tables { get; } = [];
+    //public ObservableCollection<EtlTableDefinition> Tables { get; } = [];
 
     public bool CanGoToFirstPage => CurrentPage > 1;
 
@@ -282,51 +282,51 @@ public partial class MainViewModel : ObservableObject
 
     private async Task LoadPageAsync(int pageNumber)
     {
-        EtlTableDefinition? table = SelectedTable;
-        string? path = DatabasePath;
-        if (table is null || string.IsNullOrWhiteSpace(path))
-        {
-            return;
-        }
+        //EtlTableDefinition? table = SelectedTable;
+        //string? path = DatabasePath;
+        //if (table is null || string.IsNullOrWhiteSpace(path))
+        //{
+        //    return;
+        //}
 
-        ErrorMessage = null;
-        bool ownsBusyState = !IsBusy;
-        if (ownsBusyState)
-        {
-            IsBusy = true;
-        }
-        try
-        {
-            EtlTablePage page = await Task.Run(() => _analyzer.ReadTablePage(path, table.Name, pageNumber, PageSize));
-            if (SelectedTable != table || DatabasePath != path)
-            {
-                return;
-            }
+        //ErrorMessage = null;
+        //bool ownsBusyState = !IsBusy;
+        //if (ownsBusyState)
+        //{
+        //    IsBusy = true;
+        //}
+        //try
+        //{
+        //    EtlTablePage page = await Task.Run(() => _analyzer.ReadTablePage(path, table.Name, pageNumber, PageSize));
+        //    if (SelectedTable != table || DatabasePath != path)
+        //    {
+        //        return;
+        //    }
 
-            TableRows = page.Rows;
-            TotalRowCount = page.TotalRowCount;
-            CurrentPage = page.PageNumber;
-            TotalPages = page.TotalPages;
-            Status = $"已載入 {table.DisplayName}：第 {CurrentPage} / {TotalPages} 頁，共 {TotalRowCount:N0} 筆。";
-        }
-        catch (Exception ex)
-        {
-            ClearDatabaseView();
-            ErrorMessage = $"讀取 SQLite 資料表失敗：{ex.Message}";
-        }
-        finally
-        {
-            if (ownsBusyState)
-            {
-                IsBusy = false;
-            }
-        }
+        //    TableRows = page.Rows;
+        //    TotalRowCount = page.TotalRowCount;
+        //    CurrentPage = page.PageNumber;
+        //    TotalPages = page.TotalPages;
+        //    Status = $"已載入 {table.DisplayName}：第 {CurrentPage} / {TotalPages} 頁，共 {TotalRowCount:N0} 筆。";
+        //}
+        //catch (Exception ex)
+        //{
+        //    ClearDatabaseView();
+        //    ErrorMessage = $"讀取 SQLite 資料表失敗：{ex.Message}";
+        //}
+        //finally
+        //{
+        //    if (ownsBusyState)
+        //    {
+        //        IsBusy = false;
+        //    }
+        //}
     }
 
     private void ClearDatabaseView()
     {
         DatabasePath = null;
-        Tables.Clear();
+        //Tables.Clear();
         TableRows = null;
         TotalRowCount = 0;
         CurrentPage = 1;
