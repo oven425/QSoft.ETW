@@ -41,10 +41,17 @@ internal class SQLiteExport(DataBase_SQLite db)
     {
         db.Fail();
     }
+    CSwitchEventInfo? m_Old;
 
     protected virtual void OnThreadCSwitch(in CSwitchEventInfo data)
     {
-            db.WriteContextSwitchEvent(in data);
+        if(this.m_Old.HasValue)
+        {
+            var ts = data.Timestamp - m_Old.Value.Timestamp;
+            
+        }
+        //System.Diagnostics.Trace.WriteLine($"time:{data.Timestamp:HH:mm:ss.fffffff} ProcessorNumber:{data.ProcessorNumber} NewThreadId:{data.NewThreadId} OldThreadId:{data.OldThreadId}");
+        //db.WriteContextSwitchEvent(in data);
     }
 
     protected virtual void OnDpc(in DpcEventInfo data)
@@ -57,12 +64,12 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void OnThreadStart(in ThreadStartStopEventInfo data)
     {
-            db.WriteThreadEvent(in data);
+        //db.WriteThreadEvent(in data);
     }
 
     protected virtual void OnThreadStop(in ThreadStartStopEventInfo data)
     {
-            db.WriteThreadEvent(in data);
+        //db.WriteThreadEvent(in data);
     }
 
     protected virtual void OnProcessStart(ProcessInfo process)
@@ -106,25 +113,25 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     private void Attach(EtlFileReader reader)
     {
-        reader.ThreadCSwitch += OnThreadCSwitch;
-        //reader.PerfInfoThreadedDPC += OnDpc;
-        //reader.PerfInfoDPC += OnDpc;
-        //reader.PerfInfoTimerDPC += OnDpc;
-        //reader.PerfInfoISR += OnIsr;
-        reader.ThreadStart += OnThreadStart;
-        reader.ThreadStop += OnThreadStop;
-        reader.ThreadDCStart += OnThreadStart;
-        reader.ThreadDCStop += OnThreadStop;
-        reader.ProcessStart += OnProcessStart;
-        reader.ProcessStop += OnProcessStop;
-        reader.ImageLoad += OnImageLoad;
-        reader.ImageUnload += OnImageUnload;
-        reader.WmiActivity += OnWmiActivity;
-        reader.EnergyEstimationEngine += OnEnergyEstimationEngine;
-        reader.KernelAcpi += OnKernelAcpi;
-        //reader.ImageDCStart += OnImageLoad;
-        //reader.ImageDCStop += OnImageUnload;
-        //reader.PerfInfoProfile += OnProfile;
+        //reader.ThreadCSwitch += OnThreadCSwitch;
+        ////reader.PerfInfoThreadedDPC += OnDpc;
+        ////reader.PerfInfoDPC += OnDpc;
+        ////reader.PerfInfoTimerDPC += OnDpc;
+        ////reader.PerfInfoISR += OnIsr;
+        //reader.ThreadStart += OnThreadStart;
+        //reader.ThreadStop += OnThreadStop;
+        //reader.ThreadDCStart += OnThreadStart;
+        //reader.ThreadDCStop += OnThreadStop;
+        //reader.ProcessStart += OnProcessStart;
+        //reader.ProcessStop += OnProcessStop;
+        //reader.ImageLoad += OnImageLoad;
+        //reader.ImageUnload += OnImageUnload;
+        //reader.WmiActivity += OnWmiActivity;
+        //reader.EnergyEstimationEngine += OnEnergyEstimationEngine;
+        //reader.KernelAcpi += OnKernelAcpi;
+        ////reader.ImageDCStart += OnImageLoad;
+        ////reader.ImageDCStop += OnImageUnload;
+        ////reader.PerfInfoProfile += OnProfile;
     }
 
     private void Detach(EtlFileReader reader)

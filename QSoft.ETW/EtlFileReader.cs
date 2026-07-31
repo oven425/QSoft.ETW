@@ -1160,10 +1160,10 @@ public sealed class EtlFileReader
         {
             ProcessProcessEvent(opcode, timestamp, eventRecordPtr, cache);
         }
-        //else if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
-        //{
-        //    ProcessThreadEvent(opcode, timestamp, properties);
-        //}
+        else if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
+        {
+            //ProcessThreadEvent(opcode, timestamp, properties);
+        }
         //else if (eventRecordPtr->EventHeader.ProviderId == s_imageLoadProviderId && (opcode == 3 || opcode == 10))
         //{
         //    ProcessImageLoadEvent(timestamp, eventRecordPtr->EventHeader.ProcessId, null);
@@ -1186,12 +1186,12 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         {
-            if(EnergyEstimationEngine is not null)
+            //if(EnergyEstimationEngine is not null)
             {
                 var energyEvent = ParseEnergyEstimationEnginePayload(timestamp, eventRecordPtr);
                 if (energyEvent is { } energyEventValue)
                 {
-                    EnergyEstimationEngine(in energyEventValue);
+                    //EnergyEstimationEngine(in energyEventValue);
                 }
             }
         }
@@ -1430,14 +1430,16 @@ public sealed class EtlFileReader
         }
     }
 
-    private static unsafe EnergyEstimationEngineEventInfo? ParseEnergyEstimationEnginePayload(
-        DateTime timestamp,
-        EVENT_RECORD* eventRecordPtr)
+    private unsafe EnergyEstimationEngineEventInfo? ParseEnergyEstimationEnginePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr)
     {
         if (eventRecordPtr == null)
         {
             return null;
         }
+        
+        var dic = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+        var ss = dic.Select(x => $"{x.Key}:{x.Value}");
+        System.Diagnostics.Trace.WriteLine(string.Join(',', ss));
 
         byte[]? energyBytes = GetRawProperty(eventRecordPtr, "Energy");
         if (energyBytes is null || energyBytes.Length != sizeof(ulong))
@@ -2460,58 +2462,6 @@ public sealed class EtlFileReader
         return analysis;
     }
 
-    private void PrintEnergyEstimationAnalysis(EtlReadResult result, EtlAnalysisResult analysis)
-    {
-        Console.WriteLine("能源估算程序摘要（Provider 原始數值，單位未經 schema 驗證）：");
-        if (result.EnergyEstimationEvents.Count == 0)
-        {
-            Console.WriteLine("  未蒐集到 Energy Estimation Engine 事件。");
-            return;
-        }
-
-        if (analysis.ProcessEnergySummaries.Count == 0)
-        {
-            Console.WriteLine("  未取得可彙總的能源估算事件。");
-            return;
-        }
-
-        foreach (ProcessEnergySummary summary in analysis.ProcessEnergySummaries.Take(10))
-        {
-            string process = summary.ProcessId is uint processId ? $"PID={processId}" : "系統";
-            string metrics = FormatMetricSummaries(summary.Metrics.Values);
-            Console.WriteLine($"  {process} {summary.ImageFileName}: 事件={summary.EventCount}；{metrics}");
-        }
-    }
-
-    private void PrintPowerMeterAnalysis(EtlReadResult result, EtlAnalysisResult analysis)
-    {
-        Console.WriteLine("硬體電錶摘要（Provider 原始數值，單位未經 schema 驗證）：");
-        if (result.PowerMeterPollingEvents.Count == 0)
-        {
-            Console.WriteLine("  未蒐集到 Power Meter Polling 事件；平台可能未提供硬體電錶資料。");
-            return;
-        }
-
-        if (analysis.PowerMeterMetricSummaries.Count == 0)
-        {
-            Console.WriteLine("  已蒐集到事件，但未發現可辨識的電源數值欄位。");
-            return;
-        }
-
-        foreach (PowerMeterMetricSummary summary in analysis.PowerMeterMetricSummaries.Take(10))
-        {
-            NumericMetricSummary metric = summary.Metric;
-            Console.WriteLine($"  EventId={summary.EventId} Version={summary.Version} Opcode={summary.Opcode} [{metric.Kind}] {FormatMetricSummary(metric)}");
-        }
-    }
-
-    private string FormatMetricSummaries(IEnumerable<NumericMetricSummary> metrics)
-    {
-        NumericMetricSummary[] metricArray = metrics.Take(5).ToArray();
-        return metricArray.Length == 0
-            ? "未發現可辨識的電源數值欄位"
-            : string.Join("；", metricArray.Select(metric => $"[{metric.Kind}] {FormatMetricSummary(metric)}"));
-    }
 
     private string FormatMetricSummary(NumericMetricSummary metric)
     {

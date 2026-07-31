@@ -348,7 +348,7 @@ namespace QSoft.ETW
                             in providerId,
                             EVENT_CONTROL_CODE_ENABLE_PROVIDER,
                             TRACE_LEVEL_VERBOSE,
-                            matchAnyKeyword: 0xFFFFFFFFFFFFFFFF,
+                            matchAnyKeyword: provider.MatchAnyKeyword,
                             matchAllKeyword: 0,
                             timeout: 0,
                             in enableParams),
@@ -726,7 +726,7 @@ namespace QSoft.ETW
 
         public TraceSessionBuilder WithProvider(Guid guid)
         {
-            m_UserProviders.Add(new TraceSession.UserProviderConfiguration(guid, 0));
+            m_UserProviders.Add(new TraceSession.UserProviderConfiguration(guid, 0xFFFFFFFFFFFFFFFF));
             return this;
         }
 
