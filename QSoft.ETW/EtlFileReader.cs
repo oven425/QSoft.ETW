@@ -1,5 +1,6 @@
 ﻿using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Dynamic;
 using System.Globalization;
 using System.IO;
@@ -229,11 +230,62 @@ internal struct EVENT_PROPERTY_INFO
 
 internal readonly record struct SchemaKey(Guid ProviderId, ushort Id, byte Version, byte Opcode);
 
+/// <summary>
+/// 對應 TDH (Trace Data Helper) 的 TDH_IN_TYPE,描述屬性原始資料的二進位格式/大小。
+/// </summary>
+internal enum TdhInType : ushort
+{
+    Null = 0,
+    UnicodeString = 1,
+    AnsiString = 2,
+    Int8 = 3,
+    UInt8 = 4,
+    Int16 = 5,
+    UInt16 = 6,
+    Int32 = 7,
+    UInt32 = 8,
+    Int64 = 9,
+    UInt64 = 10,
+    Float = 11,
+    Double = 12,
+    Boolean = 13,
+    Binary = 14,
+    Guid = 15,
+    Pointer = 16,
+    FileTime = 17,
+    SystemTime = 18,
+    Sid = 19,
+    HexInt32 = 20,
+    HexInt64 = 21,
+}
+
+/// <summary>
+/// 對應 TDH (Trace Data Helper) 的 TDH_OUT_TYPE,描述屬性的顯示/語意呈現方式。
+/// </summary>
+internal enum TdhOutType : ushort
+{
+    Null = 0,
+    String = 1,
+    DateTime = 2,
+    Byte = 3,
+    UnsignedByte = 4,
+    Int = 6,
+    UnsignedInt = 7,
+    HexInt32 = 10,
+    Pid = 12,
+    Tid = 13,
+    Port = 14,
+    Ipv4 = 15,
+    Guid = 21,
+    HResult = 25,
+    ErrorCode = 30,
+}
+
 internal readonly record struct CachedProperty(
     string Name,
     PROPERTY_FLAGS Flags,
-    ushort InType,
-    ushort OutType,
+    TdhInType InType,
+    TdhOutType OutType,
     ushort Length);
 
 internal sealed class CachedSchema
@@ -601,8 +653,33 @@ public readonly record struct EnergyEstimationEngineEventInfo
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
-    public ulong? Energy { get; init; }
 }
+
+public readonly record struct EnergyEstimationEngineEventInfo_37
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public string AppName { get; init; }
+    public int UserId { get; init; }
+    public int CpuEnergy { get; init; }
+    public int GpuEnergy { get; init; }
+    public int DisplayEnergy { get; init; }
+    public int DiskEnergy { get; init; }
+    public int NetworkEnergy { get; init; }
+    public int MbbEnergy { get; init; }
+
+    public int LossEnergy { get; init; }
+    public int OtherEnergy { get; init; }
+    public int EmiEnergy { get; init; }
+    public int TimeInMSec { get; init; }
+    public int NpuEnergy { get; init; }
+
+}
+
 
 internal static partial class NativeMethods
 {
@@ -896,8 +973,8 @@ public sealed class EtlFileReader
             properties.Add(new CachedProperty(
                 propertyName,
                 property.Flags,
-                property.InType,
-                property.OutType,
+                (TdhInType)property.InType,
+                (TdhOutType)property.OutType,
                 property.Length));
         }
 
@@ -949,8 +1026,8 @@ public sealed class EtlFileReader
             properties.Add(new CachedProperty(
                 propertyName,
                 property.Flags,
-                property.InType,
-                property.OutType,
+                (TdhInType)property.InType,
+                (TdhOutType)property.OutType,
                 property.Length));
         }
 
@@ -1148,7 +1225,7 @@ public sealed class EtlFileReader
         //    return;
         //}
 
-        var cache = GetOrAddCachedSchema(eventRecordPtr);
+        CachedSchema? cache = GetOrAddCachedSchema(eventRecordPtr);
         if (cache is null)
         {
             return;
@@ -1186,13 +1263,21 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         {
+            if (eventRecordPtr->EventHeader.EventDescriptor.Id == 37)
+            {
+                var e3_37 = ParseEnergyEstimationEnginePayload_37(timestamp, eventRecordPtr, cache);
+            }
             //if(EnergyEstimationEngine is not null)
             {
-                var energyEvent = ParseEnergyEstimationEnginePayload(timestamp, eventRecordPtr);
-                if (energyEvent is { } energyEventValue)
+                if(eventRecordPtr->EventHeader.EventDescriptor.Id == 37)
                 {
-                    //EnergyEstimationEngine(in energyEventValue);
+                    var e3_37 = ParseEnergyEstimationEnginePayload_37(timestamp, eventRecordPtr, cache);
                 }
+                //var energyEvent = ParseEnergyEstimationEnginePayload(timestamp, eventRecordPtr, cache);
+                //if (energyEvent is { } energyEventValue)
+                //{
+                //    //EnergyEstimationEngine(in energyEventValue);
+                //}
             }
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
@@ -1322,12 +1407,12 @@ public sealed class EtlFileReader
 
             uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
 
-            if (status != EtwNativeConstants.ERROR_SUCCESS)
+            if (status != EtwNativeConstants.ERROR_SUCCESS || propertySize != sizeof(uint))
             {
                 return defaultvalue;
             }
 
-            var rawValue = stackalloc byte[4];
+            byte* rawValue = stackalloc byte[(int)propertySize];
             status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, rawValue);
             var value = *(uint*)rawValue;
             return status == EtwNativeConstants.ERROR_SUCCESS ? value : defaultvalue;
@@ -1366,7 +1451,7 @@ public sealed class EtlFileReader
             int byteCount = checked((int)propertySize);
             switch (property.InType)
             {
-                case 1: // TDH_INTYPE_UNICODESTRING
+                case TdhInType.UnicodeString:
                     if ((byteCount & 1) != 0)
                     {
                         return defaultvalue;
@@ -1381,7 +1466,7 @@ public sealed class EtlFileReader
 
                     return new string(chars, 0, charCount);
 
-                case 2: // TDH_INTYPE_ANSISTRING
+                case TdhInType.AnsiString:
                     if (byteCount > 0 && rawValue[byteCount - 1] == 0)
                     {
                         byteCount--;
@@ -1430,7 +1515,25 @@ public sealed class EtlFileReader
         }
     }
 
-    private unsafe EnergyEstimationEngineEventInfo? ParseEnergyEstimationEnginePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr)
+    private unsafe EnergyEstimationEngineEventInfo_37? ParseEnergyEstimationEnginePayload_37(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        uint processId = eventRecordPtr->EventHeader.ProcessId;
+        byte[]? processIdBytes = GetRawProperty(eventRecordPtr, "ProcessId");
+        if (processIdBytes is { Length: sizeof(uint) })
+        {
+            processId = BinaryPrimitives.ReadUInt32LittleEndian(processIdBytes);
+        }
+        return new EnergyEstimationEngineEventInfo_37
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = processId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+        };
+    }
+    private unsafe EnergyEstimationEngineEventInfo? ParseEnergyEstimationEnginePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
         if (eventRecordPtr == null)
         {
@@ -1463,7 +1566,6 @@ public sealed class EtlFileReader
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
             ProcessId = processId,
             ThreadId = eventRecordPtr->EventHeader.ThreadId,
-            Energy = energy,
         };
     }
 
@@ -2514,19 +2616,7 @@ public sealed class EtlFileReader
         return sorted[Math.Clamp(index, 0, sorted.Length - 1)];
     }
 
-    private string FormatMilliseconds(double? value)
-    {
-        return value is double milliseconds ? $"{milliseconds:F3} ms" : "未知";
-    }
 
-    private void PrintEventTypeDistribution(IEnumerable<(ushort EventId, byte Version, byte Opcode)> eventTypes)
-    {
-        Console.WriteLine("事件類型分布:");
-        foreach (var group in eventTypes.GroupBy(eventType => eventType).OrderBy(group => group.Key.EventId).ThenBy(group => group.Key.Version).ThenBy(group => group.Key.Opcode))
-        {
-            Console.WriteLine($"  EventId={group.Key.EventId} Version={group.Key.Version} Opcode={group.Key.Opcode}: {group.Count()}");
-        }
-    }
 
     private void PrintCSwitchSummary(EtlReadResult result)
     {
@@ -2601,15 +2691,5 @@ public sealed class EtlFileReader
             process.ProcessId == processId &&
             process.StartTime <= timestamp &&
             (process.EndTime is null || timestamp <= process.EndTime));
-    }
-
-    private ThreadInfo? FindThreadAtTime(IEnumerable<ThreadInfo> threads, uint? threadId, DateTime timestamp)
-    {
-        return threadId is uint id
-            ? threads.FirstOrDefault(thread =>
-                thread.ThreadId == id &&
-                thread.StartTime <= timestamp &&
-                (thread.EndTime is null || timestamp <= thread.EndTime))
-            : null;
     }
 }
