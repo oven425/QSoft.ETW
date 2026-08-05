@@ -53,7 +53,7 @@ namespace WpfApp1
             {
                 command.CommandText =
                     @"PRAGMA journal_mode = WAL;
-                      PRAGMA synchronous = NORMAL;
+                      PRAGMA synchronous = OFF;
 
                       CREATE TABLE IF NOT EXISTS ImageLoads
                       (
@@ -115,7 +115,19 @@ namespace WpfApp1
                            Opcode INTEGER NOT NULL,
                            ProcessId INTEGER NOT NULL,
                            ThreadId INTEGER NOT NULL,
-                           Energy TEXT NULL
+                           AppName TEXT NOT NULL,
+                           UserId INTEGER NOT NULL,
+                           CpuEnergy TEXT NOT NULL,
+                           GpuEnergy TEXT NOT NULL,
+                           DisplayEnergy TEXT NOT NULL,
+                           DiskEnergy TEXT NOT NULL,
+                           NetworkEnergy TEXT NOT NULL,
+                           MbbEnergy TEXT NOT NULL,
+                           LossEnergy TEXT NOT NULL,
+                           OtherEnergy TEXT NOT NULL,
+                           EmiEnergy TEXT NOT NULL,
+                           TimeInMSec INTEGER NOT NULL,
+                           NpuEnergy TEXT NOT NULL
                        );
 
                        CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngineEvents_ProcessTimestamp
@@ -190,6 +202,8 @@ namespace WpfApp1
                 command.ExecuteNonQuery();
             }
 
+            EnsureEnergyEstimationEngineColumns(connection);
+
             SqliteTransaction transaction = connection.BeginTransaction();
             _writeImageLoadCommand = CreateWriteImageLoadCommand(connection, transaction);
             _writeImageUnloadCommand = CreateWriteImageUnloadCommand(connection, transaction);
@@ -231,21 +245,6 @@ namespace WpfApp1
             command.ExecuteNonQuery();
         }
 
-        public void WriteEnergyEstimationEngine(in EnergyEstimationEngineEventInfo data)
-        {
-            SqliteCommand command = _writeEnergyEstimationEngineCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
-            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
-            command.Parameters["$eventId"].Value = data.EventId;
-            command.Parameters["$version"].Value = data.Version;
-            command.Parameters["$opcode"].Value = data.Opcode;
-            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
-            command.Parameters["$energy"].Value = data.Energy is { } energy
-                ? energy.ToString(CultureInfo.InvariantCulture)
-                : DBNull.Value;
-            command.ExecuteNonQuery();
-        }
-
         public void WriteWmiActivity(in WmiActivityEventInfo data)
         {
             SqliteCommand command = _writeWmiActivityCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
@@ -258,6 +257,32 @@ namespace WpfApp1
             command.Parameters["$operation"].Value = data.Operation;
             command.Parameters["$namespaceName"].Value = data.NamespaceName;
             command.ExecuteNonQuery();
+        }
+
+        public void WriteEnergyEstimationEngine(in EnergyEstimationEngineEventInfo_37 data)
+        {
+            SqliteCommand command = _writeEnergyEstimationEngineCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$appName"].Value = data.AppName ?? string.Empty;
+            command.Parameters["$userId"].Value = data.UserId;
+            command.Parameters["$cpuEnergy"].Value = data.CpuEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$gpuEnergy"].Value = data.GpuEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$displayEnergy"].Value = data.DisplayEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$diskEnergy"].Value = data.DiskEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$networkEnergy"].Value = data.NetworkEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$mbbEnergy"].Value = data.MbbEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$lossEnergy"].Value = data.LossEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$otherEnergy"].Value = data.OtherEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$emiEnergy"].Value = data.EmiEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$timeInMSec"].Value = data.TimeInMSec;
+            command.Parameters["$npuEnergy"].Value = data.NpuEnergy.ToString(CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
         }
 
         public void WriteImageUnLoad(in ImageLoadEventInfo data)
@@ -498,16 +523,28 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO EnergyEstimationEngineEvents
-                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, Energy)
+                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, AppName, UserId, CpuEnergy, GpuEnergy, DisplayEnergy, DiskEnergy, NetworkEnergy, MbbEnergy, LossEnergy, OtherEnergy, EmiEnergy, TimeInMSec, NpuEnergy)
                   VALUES
-                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $energy);";
+                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $appName, $userId, $cpuEnergy, $gpuEnergy, $displayEnergy, $diskEnergy, $networkEnergy, $mbbEnergy, $lossEnergy, $otherEnergy, $emiEnergy, $timeInMSec, $npuEnergy);";
             command.Parameters.Add("$timestampUtc", SqliteType.Text);
             command.Parameters.Add("$eventId", SqliteType.Integer);
             command.Parameters.Add("$version", SqliteType.Integer);
             command.Parameters.Add("$opcode", SqliteType.Integer);
             command.Parameters.Add("$processId", SqliteType.Integer);
             command.Parameters.Add("$threadId", SqliteType.Integer);
-            command.Parameters.Add("$energy", SqliteType.Text);
+            command.Parameters.Add("$appName", SqliteType.Text);
+            command.Parameters.Add("$userId", SqliteType.Integer);
+            command.Parameters.Add("$cpuEnergy", SqliteType.Text);
+            command.Parameters.Add("$gpuEnergy", SqliteType.Text);
+            command.Parameters.Add("$displayEnergy", SqliteType.Text);
+            command.Parameters.Add("$diskEnergy", SqliteType.Text);
+            command.Parameters.Add("$networkEnergy", SqliteType.Text);
+            command.Parameters.Add("$mbbEnergy", SqliteType.Text);
+            command.Parameters.Add("$lossEnergy", SqliteType.Text);
+            command.Parameters.Add("$otherEnergy", SqliteType.Text);
+            command.Parameters.Add("$emiEnergy", SqliteType.Text);
+            command.Parameters.Add("$timeInMSec", SqliteType.Integer);
+            command.Parameters.Add("$npuEnergy", SqliteType.Text);
             command.Prepare();
             return command;
         }
@@ -589,6 +626,42 @@ namespace WpfApp1
             command.Parameters.Add("$startedAtUtc", SqliteType.Text);
             command.Prepare();
             return command;
+        }
+
+        private static void EnsureEnergyEstimationEngineColumns(SqliteConnection connection)
+        {
+            (string Name, string Definition)[] columns =
+            {
+                ("AppName", "TEXT NOT NULL DEFAULT ''"),
+                ("UserId", "INTEGER NOT NULL DEFAULT 0"),
+                ("CpuEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("GpuEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("DisplayEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("DiskEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("NetworkEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("MbbEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("LossEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("OtherEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("EmiEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("TimeInMSec", "INTEGER NOT NULL DEFAULT 0"),
+                ("NpuEnergy", "TEXT NOT NULL DEFAULT '0'"),
+            };
+
+            foreach ((string name, string definition) in columns)
+            {
+                using SqliteCommand columnExistsCommand = connection.CreateCommand();
+                columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('EnergyEstimationEngineEvents') WHERE name = $name;";
+                columnExistsCommand.Parameters.AddWithValue("$name", name);
+
+                if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                {
+                    continue;
+                }
+
+                using SqliteCommand addColumnCommand = connection.CreateCommand();
+                addColumnCommand.CommandText = $"ALTER TABLE EnergyEstimationEngineEvents ADD COLUMN {name} {definition};";
+                addColumnCommand.ExecuteNonQuery();
+            }
         }
 
         private static string ToUtcTimestamp(DateTime timestamp)

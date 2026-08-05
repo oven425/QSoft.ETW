@@ -41,17 +41,10 @@ internal class SQLiteExport(DataBase_SQLite db)
     {
         db.Fail();
     }
-    CSwitchEventInfo? m_Old;
 
     protected virtual void OnThreadCSwitch(in CSwitchEventInfo data)
     {
-        if(this.m_Old.HasValue)
-        {
-            var ts = data.Timestamp - m_Old.Value.Timestamp;
-            
-        }
-        //System.Diagnostics.Trace.WriteLine($"time:{data.Timestamp:HH:mm:ss.fffffff} ProcessorNumber:{data.ProcessorNumber} NewThreadId:{data.NewThreadId} OldThreadId:{data.OldThreadId}");
-        //db.WriteContextSwitchEvent(in data);
+        db.WriteContextSwitchEvent(in data);
     }
 
     protected virtual void OnDpc(in DpcEventInfo data)
@@ -64,12 +57,12 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void OnThreadStart(in ThreadStartStopEventInfo data)
     {
-        //db.WriteThreadEvent(in data);
+        db.WriteThreadEvent(in data);
     }
 
     protected virtual void OnThreadStop(in ThreadStartStopEventInfo data)
     {
-        //db.WriteThreadEvent(in data);
+        db.WriteThreadEvent(in data);
     }
 
     protected virtual void OnProcessStart(ProcessInfo process)
@@ -97,10 +90,6 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WriteWmiActivity(in data);
     }
 
-    protected virtual void OnEnergyEstimationEngine(in EnergyEstimationEngineEventInfo data)
-    {
-        db.WriteEnergyEstimationEngine(in data);
-    }
 
     protected virtual void OnKernelAcpi(KernelAcpiEventInfo data)
     {
@@ -113,25 +102,30 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     private void Attach(EtlFileReader reader)
     {
-        //reader.ThreadCSwitch += OnThreadCSwitch;
+        reader.ThreadCSwitch += OnThreadCSwitch;
         ////reader.PerfInfoThreadedDPC += OnDpc;
         ////reader.PerfInfoDPC += OnDpc;
         ////reader.PerfInfoTimerDPC += OnDpc;
         ////reader.PerfInfoISR += OnIsr;
-        //reader.ThreadStart += OnThreadStart;
-        //reader.ThreadStop += OnThreadStop;
-        //reader.ThreadDCStart += OnThreadStart;
-        //reader.ThreadDCStop += OnThreadStop;
-        //reader.ProcessStart += OnProcessStart;
-        //reader.ProcessStop += OnProcessStop;
+        reader.ThreadStart += OnThreadStart;
+        reader.ThreadStop += OnThreadStop;
+        reader.ThreadDCStart += OnThreadStart;
+        reader.ThreadDCStop += OnThreadStop;
+        reader.ProcessStart += OnProcessStart;
+        reader.ProcessStop += OnProcessStop;
         //reader.ImageLoad += OnImageLoad;
         //reader.ImageUnload += OnImageUnload;
         //reader.WmiActivity += OnWmiActivity;
-        //reader.EnergyEstimationEngine += OnEnergyEstimationEngine;
+        reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
         //reader.KernelAcpi += OnKernelAcpi;
         ////reader.ImageDCStart += OnImageLoad;
         ////reader.ImageDCStop += OnImageUnload;
         ////reader.PerfInfoProfile += OnProfile;
+    }
+
+    private void OnEnergyEstimationEngine_37(in EnergyEstimationEngineEventInfo_37 data)
+    {
+        db.WriteEnergyEstimationEngine(in data);
     }
 
     private void Detach(EtlFileReader reader)
@@ -150,7 +144,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ImageLoad -= OnImageLoad;
         reader.ImageUnload -= OnImageUnload;
         reader.WmiActivity -= OnWmiActivity;
-        reader.EnergyEstimationEngine -= OnEnergyEstimationEngine;
+        reader.EnergyEstimationEngine_37 -= OnEnergyEstimationEngine_37;
         reader.KernelAcpi -= OnKernelAcpi;
         //reader.ImageDCStart -= OnImageLoad;
         //reader.ImageDCStop -= OnImageUnload;

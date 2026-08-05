@@ -664,19 +664,19 @@ public readonly record struct EnergyEstimationEngineEventInfo_37
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
     public string AppName { get; init; }
-    public int UserId { get; init; }
-    public int CpuEnergy { get; init; }
-    public int GpuEnergy { get; init; }
-    public int DisplayEnergy { get; init; }
-    public int DiskEnergy { get; init; }
-    public int NetworkEnergy { get; init; }
-    public int MbbEnergy { get; init; }
+    public ushort UserId { get; init; }
+    public ulong CpuEnergy { get; init; }
+    public ulong GpuEnergy { get; init; }
+    public ulong DisplayEnergy { get; init; }
+    public ulong DiskEnergy { get; init; }
+    public ulong NetworkEnergy { get; init; }
+    public ulong MbbEnergy { get; init; }
 
-    public int LossEnergy { get; init; }
-    public int OtherEnergy { get; init; }
-    public int EmiEnergy { get; init; }
-    public int TimeInMSec { get; init; }
-    public int NpuEnergy { get; init; }
+    public ulong LossEnergy { get; init; }
+    public ulong OtherEnergy { get; init; }
+    public ulong EmiEnergy { get; init; }
+    public uint TimeInMSec { get; init; }
+    public ulong NpuEnergy { get; init; }
 
 }
 
@@ -1047,7 +1047,7 @@ public sealed class EtlFileReader
     }
 
     public delegate void ThreadCSwitchEventHandler(in CSwitchEventInfo data);
-    public event ThreadCSwitchEventHandler ThreadCSwitch;
+    public event ThreadCSwitchEventHandler? ThreadCSwitch;
 
     public delegate void ThreadStartStopEventHandler(in ThreadStartStopEventInfo data);
     public event ThreadStartStopEventHandler? ThreadStart;
@@ -1085,7 +1085,8 @@ public sealed class EtlFileReader
     public delegate void WmiActivityEventHandler(in WmiActivityEventInfo data);
     public event WmiActivityEventHandler? WmiActivity;
 
-
+    public delegate void EnergyEstimationEngine_37Handler(in EnergyEstimationEngineEventInfo_37 data);
+    public event EnergyEstimationEngine_37Handler? EnergyEstimationEngine_37;
     private unsafe void OnEventRecord(EVENT_RECORD* eventRecordPtr)
     {
         s_eventCount++;
@@ -1123,21 +1124,16 @@ public sealed class EtlFileReader
                 var threadEvent = ParseThreadStartStopPayload(timestamp, threadOpcode, in eventRecordPtr->EventHeader, eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
                 if (threadEvent is { } threadEventValue)
                 {
-                    switch (threadOpcode)
+                    ThreadStartStopEventHandler? handler = threadOpcode switch
                     {
-                        case ThreadStartOpcode:
-                            ThreadStart?.Invoke(in threadEventValue);
-                            break;
-                        case ThreadEndOpcode:
-                            ThreadStop?.Invoke(in threadEventValue);
-                            break;
-                        case ThreadDCStartOpcode:
-                            ThreadDCStart?.Invoke(in threadEventValue);
-                            break;
-                        case ThreadDCEndOpcode:
-                            ThreadDCStop?.Invoke(in threadEventValue);
-                            break;
-                    }
+                        ThreadStartOpcode => ThreadStart,
+                        ThreadEndOpcode => ThreadStop,
+                        ThreadDCStartOpcode => ThreadDCStart,
+                        ThreadDCEndOpcode => ThreadDCStop,
+                        _ => null,
+                    };
+
+                    handler?.Invoke(in threadEventValue);
                 }
             }
 
@@ -1161,18 +1157,15 @@ public sealed class EtlFileReader
                 var dpchr = ProcessDpcEvent(timestamp, eventRecordPtr->BufferContext.ProcessorNumber, in eventRecordPtr->EventHeader, eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
                 if (dpchr is { } dpcEventValue)
                 {
-                    switch (perfInfoOpcode)
+                    PerfInfoDpcEventHandler? handler = perfInfoOpcode switch
                     {
-                        case ThreadDpcOpcode:
-                            PerfInfoThreadedDPC?.Invoke(in dpcEventValue);
-                            break;
-                        case DpcOpcode:
-                            PerfInfoDPC?.Invoke(in dpcEventValue);
-                            break;
-                        case TimerDpcOpcode:
-                            PerfInfoTimerDPC?.Invoke(in dpcEventValue);
-                            break;
-                    }
+                        ThreadDpcOpcode => PerfInfoThreadedDPC,
+                        DpcOpcode => PerfInfoDPC,
+                        TimerDpcOpcode => PerfInfoTimerDPC,
+                        _ => null,
+                    };
+
+                    handler?.Invoke(in dpcEventValue);
                 }
                 return;
             }
@@ -1263,21 +1256,13 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         {
-            if (eventRecordPtr->EventHeader.EventDescriptor.Id == 37)
+            if(this.EnergyEstimationEngine_37 is not null && eventRecordPtr->EventHeader.EventDescriptor.Id == 37)
             {
                 var e3_37 = ParseEnergyEstimationEnginePayload_37(timestamp, eventRecordPtr, cache);
-            }
-            //if(EnergyEstimationEngine is not null)
-            {
-                if(eventRecordPtr->EventHeader.EventDescriptor.Id == 37)
+                if (e3_37 is { } e3_37value)
                 {
-                    var e3_37 = ParseEnergyEstimationEnginePayload_37(timestamp, eventRecordPtr, cache);
+                    this.EnergyEstimationEngine_37.Invoke(in e3_37value);
                 }
-                //var energyEvent = ParseEnergyEstimationEnginePayload(timestamp, eventRecordPtr, cache);
-                //if (energyEvent is { } energyEventValue)
-                //{
-                //    //EnergyEstimationEngine(in energyEventValue);
-                //}
             }
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
@@ -1395,8 +1380,20 @@ public sealed class EtlFileReader
         };
     }
 
-    private static unsafe uint GetRawPropertyUInt32(EVENT_RECORD* eventRecordPtr, string propertyName, uint defaultvalue = 0)
+
+    private static unsafe T GetRawProperty<T>(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, T defaultvalue = default) where T : unmanaged
     {
+        if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
+        {
+            return defaultvalue;
+        }
+
+        TdhInType expectedInType = GetExpectedInType<T>();
+        if (expectedInType != TdhInType.Null && property.InType != expectedInType)
+        {
+            return defaultvalue;
+        }
+
         fixed (char* propertyNamePtr = propertyName)
         {
             PROPERTY_DATA_DESCRIPTOR descriptor = new()
@@ -1407,16 +1404,29 @@ public sealed class EtlFileReader
 
             uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
 
-            if (status != EtwNativeConstants.ERROR_SUCCESS || propertySize != sizeof(uint))
+            if (status != EtwNativeConstants.ERROR_SUCCESS || propertySize != sizeof(T))
             {
                 return defaultvalue;
             }
 
-            byte* rawValue = stackalloc byte[(int)propertySize];
-            status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, rawValue);
-            var value = *(uint*)rawValue;
-            return status == EtwNativeConstants.ERROR_SUCCESS ? value : defaultvalue;
+            T* rawValue = stackalloc T[1];
+            status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, (byte*)rawValue);
+            return status == EtwNativeConstants.ERROR_SUCCESS ? *rawValue : defaultvalue;
         }
+    }
+
+    private static TdhInType GetExpectedInType<T>() where T : unmanaged
+    {
+        if (typeof(T) == typeof(int)) return TdhInType.Int32;
+        if (typeof(T) == typeof(uint)) return TdhInType.UInt32;
+        if (typeof(T) == typeof(long)) return TdhInType.Int64;
+        if (typeof(T) == typeof(ulong)) return TdhInType.UInt64;
+        if (typeof(T) == typeof(short)) return TdhInType.Int16;
+        if (typeof(T) == typeof(ushort)) return TdhInType.UInt16;
+        if (typeof(T) == typeof(sbyte)) return TdhInType.Int8;
+        if (typeof(T) == typeof(byte)) return TdhInType.UInt8;
+        if (typeof(T) == typeof(float)) return TdhInType.Float;
+        return TdhInType.Null;
     }
 
     private static unsafe string GetRawPropertyString(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, string defaultvalue = "")
@@ -1425,7 +1435,10 @@ public sealed class EtlFileReader
         {
             return defaultvalue;
         }
-
+        if(property.InType != TdhInType.AnsiString && property.InType != TdhInType.UnicodeString)
+        {
+            return defaultvalue;
+        }
         fixed (char* propertyNamePtr = propertyName)
         {
             PROPERTY_DATA_DESCRIPTOR descriptor = new()
@@ -1523,7 +1536,7 @@ public sealed class EtlFileReader
         {
             processId = BinaryPrimitives.ReadUInt32LittleEndian(processIdBytes);
         }
-        return new EnergyEstimationEngineEventInfo_37
+        var e3 = new EnergyEstimationEngineEventInfo_37
         {
             Timestamp = timestamp,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
@@ -1531,7 +1544,22 @@ public sealed class EtlFileReader
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
             ProcessId = processId,
             ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            AppName = GetRawPropertyString(eventRecordPtr, "AppName", cache, ""),
+            CpuEnergy = GetRawProperty<ulong>(eventRecordPtr, "CpuEnergy", cache),
+            GpuEnergy = GetRawProperty<ulong>(eventRecordPtr, "GpuEnergy", cache),
+            DiskEnergy = GetRawProperty<ulong>(eventRecordPtr, "DiskEnergy", cache),
+            DisplayEnergy = GetRawProperty<ulong>(eventRecordPtr, "DisplayEnergy", cache),
+            NetworkEnergy = GetRawProperty<ulong>(eventRecordPtr, "NetworkEnergy", cache),
+            MbbEnergy = GetRawProperty<ulong>(eventRecordPtr, "MbbEnergy", cache),
+            LossEnergy = GetRawProperty<ulong>(eventRecordPtr, "LossEnergy", cache),
+            NpuEnergy = GetRawProperty<ulong>(eventRecordPtr, "NpuEnergy", cache),
+            EmiEnergy = GetRawProperty<ulong>(eventRecordPtr, "EmiEnergy", cache),
+            OtherEnergy = GetRawProperty<ulong>(eventRecordPtr, "OtherEnergy", cache),
+            TimeInMSec = GetRawProperty<uint>(eventRecordPtr, "TimeInMSec", cache),
+            UserId = GetRawProperty<ushort>(eventRecordPtr, "UserId", cache),
         };
+
+        return e3;
     }
     private unsafe EnergyEstimationEngineEventInfo? ParseEnergyEstimationEnginePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
@@ -1540,9 +1568,9 @@ public sealed class EtlFileReader
             return null;
         }
         
-        var dic = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
-        var ss = dic.Select(x => $"{x.Key}:{x.Value}");
-        System.Diagnostics.Trace.WriteLine(string.Join(',', ss));
+        //var dic = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+        //var ss = dic.Select(x => $"{x.Key}:{x.Value}");
+        //System.Diagnostics.Trace.WriteLine(string.Join(',', ss));
 
         byte[]? energyBytes = GetRawProperty(eventRecordPtr, "Energy");
         if (energyBytes is null || energyBytes.Length != sizeof(ulong))
@@ -1571,13 +1599,13 @@ public sealed class EtlFileReader
 
     private unsafe void ProcessProcessEvent(byte opcode, DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
-        var processId = GetRawPropertyUInt32(eventRecordPtr, "ProcessId", eventRecordPtr->EventHeader.ProcessId);
+        var processId = GetRawProperty<uint>(eventRecordPtr, "ProcessId", cache, eventRecordPtr->EventHeader.ProcessId);
         if (opcode is 1 or 3)
         {
             var process = new ProcessInfo
             {
                 ProcessId = processId,
-                ParentProcessId = GetRawPropertyUInt32(eventRecordPtr, "ParentId", 0),
+                ParentProcessId = GetRawProperty<uint>(eventRecordPtr, "ParentId", cache, 0),
                 StartTime = timestamp,
                 ImageFileName = GetRawPropertyString(eventRecordPtr, "ImageFileName", cache),
                 CommandLine = GetRawPropertyString(eventRecordPtr, "CommandLine", cache),
