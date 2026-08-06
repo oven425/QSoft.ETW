@@ -7,6 +7,10 @@ namespace WpfApp1.Services;
 
 internal class SQLiteExport(DataBase_SQLite db)
 {
+    public int UnmatchedCpuIntervalCount { get; private set; }
+
+    public int IncompleteCpuIntervalCount { get; private set; }
+
     public void Export(EtlFileReader reader, string etlPath)
     {
         BeginExport(etlPath);
@@ -30,6 +34,9 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void BeginExport(string etlPath)
     {
+        m_ThreadCSwitchs.Clear();
+        UnmatchedCpuIntervalCount = 0;
+        IncompleteCpuIntervalCount = 0;
     }
 
     protected virtual void CompleteExport()
@@ -42,9 +49,47 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.Fail();
     }
 
+    private sealed class CSwitch
+    {
+        public required byte ProcessorNumber { get; init; }
+        public required DateTime StartedAt { get; init; }
+        public DateTime? EndedAt { get; set; }
+    }
+
+    private readonly Dictionary<uint, List<CSwitch>> m_ThreadCSwitchs = [];
+
     protected virtual void OnThreadCSwitch(in CSwitchEventInfo data)
     {
-        db.WriteContextSwitchEvent(in data);
+        //db.WriteContextSwitchEvent(in data);
+        byte processorNumber = data.ProcessorNumber;
+
+        if (m_ThreadCSwitchs.TryGetValue(data.OldThreadId, out List<CSwitch>? oldThreadCSwitchs))
+        {
+            CSwitch? runningCSwitch = oldThreadCSwitchs.LastOrDefault(cSwitch =>
+                cSwitch.ProcessorNumber == processorNumber && cSwitch.EndedAt is null);
+
+            if (runningCSwitch is not null)
+            {
+                runningCSwitch.EndedAt = data.Timestamp;
+            }
+            else
+            {
+                IncompleteCpuIntervalCount++;
+            }
+        }
+        else
+        {
+            UnmatchedCpuIntervalCount++;
+        }
+
+        if (m_ThreadCSwitchs.TryGetValue(data.NewThreadId, out List<CSwitch>? newThreadCSwitchs))
+        {
+            newThreadCSwitchs.Add(new CSwitch
+            {
+                ProcessorNumber = processorNumber,
+                StartedAt = data.Timestamp,
+            });
+        }
     }
 
     protected virtual void OnDpc(in DpcEventInfo data)
@@ -58,11 +103,25 @@ internal class SQLiteExport(DataBase_SQLite db)
     protected virtual void OnThreadStart(in ThreadStartStopEventInfo data)
     {
         db.WriteThreadEvent(in data);
+        m_ThreadCSwitchs[data.ThreadId] = [];
+
+        //_activeThreads[data.ThreadId] = new ActiveThread(data.ProcessId, data.Timestamp);
+        //_cpuExecutionSummaries.Remove(data.ThreadId);
     }
 
     protected virtual void OnThreadStop(in ThreadStartStopEventInfo data)
     {
-        db.WriteThreadEvent(in data);
+        if (m_ThreadCSwitchs.TryGetValue(data.ThreadId, out List<CSwitch>? threadCSwitchs))
+        {
+            foreach (CSwitch runningCSwitch in threadCSwitchs.Where(cSwitch => cSwitch.EndedAt is null))
+            {
+                runningCSwitch.EndedAt = data.Timestamp;
+            }
+        }
+
+        m_ThreadCSwitchs.Remove(data.ThreadId, out var vv);
+        //long threadStopEventId = db.WriteThreadEvent(in data);
+
     }
 
     protected virtual void OnProcessStart(ProcessInfo process)
@@ -150,4 +209,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         //reader.ImageDCStop -= OnImageUnload;
         //reader.PerfInfoProfile -= OnProfile;
     }
+
+
+
 }
