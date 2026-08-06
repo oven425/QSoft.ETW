@@ -21,8 +21,6 @@ namespace WpfApp1
         private SqliteCommand? _writeEnergyEstimationEngineCommand;
         private SqliteCommand? _writeKernelAcpiCommand;
         private SqliteCommand? _writeThreadEventCommand;
-        private SqliteCommand? _updateThreadCpuSummaryCommand;
-        private SqliteCommand? _writeContextSwitchEventCommand;
 
         public void Open(string filename)
         {
@@ -55,10 +53,12 @@ namespace WpfApp1
                 command.CommandText =
                     @"PRAGMA journal_mode = WAL;
                       PRAGMA synchronous = OFF;
+                      PRAGMA foreign_keys = ON;
 
                       CREATE TABLE IF NOT EXISTS ImageLoads
                       (
                           ImageLoadId INTEGER PRIMARY KEY,
+                          ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
                           ProcessId INTEGER NOT NULL,
                           ImageBase TEXT NULL,
                           ImageSize TEXT NULL,
@@ -73,6 +73,9 @@ namespace WpfApp1
                       CREATE INDEX IF NOT EXISTS IX_ImageLoads_ActiveImage
                       ON ImageLoads (ProcessId, ImageBase, UnloadedAtUtc, LoadedAtUtc DESC);
 
+                      CREATE INDEX IF NOT EXISTS IX_ImageLoads_ProcessRecord
+                      ON ImageLoads (ProcessRecordId, LoadedAtUtc);
+
                       CREATE TABLE IF NOT EXISTS Processes
                       (
                           ProcessRecordId INTEGER PRIMARY KEY,
@@ -82,6 +85,8 @@ namespace WpfApp1
                           CommandLine TEXT NOT NULL,
                           StartedAtUtc TEXT NOT NULL,
                           EndedAtUtc TEXT NULL,
+                          CpuDurationTicks INTEGER NULL,
+                          CpuUsagePercent REAL NULL,
                           UNIQUE (ProcessId, StartedAtUtc)
                       );
 
@@ -91,6 +96,7 @@ namespace WpfApp1
                        CREATE TABLE IF NOT EXISTS WmiActivityEvents
                        (
                            WmiActivityEventId INTEGER PRIMARY KEY,
+                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
                            TimestampUtc TEXT NOT NULL,
                            EventId INTEGER NOT NULL,
                            Version INTEGER NOT NULL,
@@ -106,6 +112,9 @@ namespace WpfApp1
 
                        CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_NamespaceTimestamp
                         ON WmiActivityEvents (NamespaceName, TimestampUtc);
+
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_ProcessRecord
+                       ON WmiActivityEvents (ProcessRecordId, TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngineEvents
                        (
@@ -151,6 +160,7 @@ namespace WpfApp1
                        CREATE TABLE IF NOT EXISTS ThreadEvents
                        (
                            ThreadEventId INTEGER PRIMARY KEY,
+                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
                            TimestampUtc TEXT NOT NULL,
                            Opcode INTEGER NOT NULL,
                            ProcessId INTEGER NOT NULL,
@@ -164,51 +174,26 @@ namespace WpfApp1
                            TebBase TEXT NULL,
                            SubProcessTag INTEGER NULL,
                            BasePriority INTEGER NULL,
-                           PagePriority INTEGER NULL,
-                           IoPriority INTEGER NULL,
-                            ThreadFlags INTEGER NULL,
-                            ProcessorNumber INTEGER NULL,
-                            CpuStartedAtUtc TEXT NULL,
-                            CpuEndedAtUtc TEXT NULL,
-                            CpuDurationTicks INTEGER NULL
-                       );
+                               PagePriority INTEGER NULL,
+                               IoPriority INTEGER NULL,
+                               ThreadFlags INTEGER NULL,
+                               CpuStartedAtUtc TEXT NULL,
+                               CpuEndedAtUtc TEXT NULL,
+                               CpuDurationTicks INTEGER NULL
+                           );
 
                        CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ThreadTimestamp
                        ON ThreadEvents (ThreadId, TimestampUtc);
 
-                       CREATE TABLE IF NOT EXISTS ContextSwitchEvents
-                       (
-                           ContextSwitchEventId INTEGER PRIMARY KEY,
-                           TimestampUtc TEXT NOT NULL,
-                           ProcessorNumber INTEGER NOT NULL,
-                           NewThreadId INTEGER NOT NULL,
-                           OldThreadId INTEGER NOT NULL,
-                           NewProcessId INTEGER NULL,
-                           OldProcessId INTEGER NULL,
-                           NewThreadPriority INTEGER NULL,
-                           OldThreadPriority INTEGER NULL,
-                           PreviousCState INTEGER NULL,
-                           OldThreadWaitReason INTEGER NULL,
-                           OldThreadWaitMode INTEGER NULL,
-                           OldThreadState INTEGER NULL,
-                           OldThreadWaitIdealProcessor INTEGER NULL,
-                           NewThreadWaitTime INTEGER NULL,
-                           Reserved INTEGER NULL
-                       );
-
-                       CREATE INDEX IF NOT EXISTS IX_ContextSwitchEvents_ProcessorTimestamp
-                       ON ContextSwitchEvents (ProcessorNumber, TimestampUtc);
-
-                       CREATE INDEX IF NOT EXISTS IX_ContextSwitchEvents_NewThreadTimestamp
-                       ON ContextSwitchEvents (NewThreadId, TimestampUtc);
-
-                       CREATE INDEX IF NOT EXISTS IX_ContextSwitchEvents_OldThreadTimestamp
-                       ON ContextSwitchEvents (OldThreadId, TimestampUtc);";
+                       CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ProcessRecord
+                       ON ThreadEvents (ProcessRecordId, TimestampUtc);";
                 command.ExecuteNonQuery();
             }
 
             EnsureEnergyEstimationEngineColumns(connection);
             EnsureThreadEventColumns(connection);
+            EnsureProcessColumns(connection);
+            EnsureWmiActivityColumns(connection);
 
             SqliteTransaction transaction = connection.BeginTransaction();
             _writeImageLoadCommand = CreateWriteImageLoadCommand(connection, transaction);
@@ -219,8 +204,6 @@ namespace WpfApp1
             _writeEnergyEstimationEngineCommand = CreateWriteEnergyEstimationEngineCommand(connection, transaction);
             _writeKernelAcpiCommand = CreateWriteKernelAcpiCommand(connection, transaction);
             _writeThreadEventCommand = CreateWriteThreadEventCommand(connection, transaction);
-            _updateThreadCpuSummaryCommand = CreateUpdateThreadCpuSummaryCommand(connection, transaction);
-            _writeContextSwitchEventCommand = CreateWriteContextSwitchEventCommand(connection, transaction);
             _connection = connection;
             _transaction = transaction;
             _batchedWriteCount = 0;
@@ -292,23 +275,6 @@ namespace WpfApp1
             CommitWriteBatchIfNeeded();
         }
 
-        public void UpdateThreadCpuSummary(long threadEventId, byte processorNumber, DateTime startedAt, DateTime endedAt, long durationTicks)
-        {
-            if (durationTicks < 0)
-            {
-                throw new ArgumentOutOfRangeException(nameof(durationTicks), "CPU 執行時間不可為負值。");
-            }
-
-            SqliteCommand command = _updateThreadCpuSummaryCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
-            command.Parameters["$threadEventId"].Value = threadEventId;
-            command.Parameters["$processorNumber"].Value = processorNumber;
-            command.Parameters["$cpuStartedAtUtc"].Value = ToUtcTimestamp(startedAt);
-            command.Parameters["$cpuEndedAtUtc"].Value = ToUtcTimestamp(endedAt);
-            command.Parameters["$cpuDurationTicks"].Value = durationTicks;
-            command.ExecuteNonQuery();
-            CommitWriteBatchIfNeeded();
-        }
-
         public void WriteImageUnLoad(in ImageLoadEventInfo data)
         {
             SqliteCommand command = _writeImageUnloadCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
@@ -329,18 +295,46 @@ namespace WpfApp1
             command.ExecuteNonQuery();
         }
 
-        public void WriteProcessStop(ProcessInfo process)
+        public void WriteProcessStop(ProcessInfo process, long? cpuDurationTicks = null, double? cpuUsagePercent = null)
         {
             DateTime endTime = process.EndTime ?? throw new InvalidOperationException("程序結束事件未提供結束時間。");
+            if ((cpuDurationTicks is null) != (cpuUsagePercent is null))
+            {
+                throw new ArgumentException("CPU 總時間與使用率必須同時提供。");
+            }
+
+            if (cpuDurationTicks < 0 || cpuUsagePercent < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(cpuDurationTicks), "CPU 使用資料不可為負值。");
+            }
+
             SqliteCommand command = _writeProcessStopCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
             command.Parameters["$endedAtUtc"].Value = ToUtcTimestamp(endTime);
             command.Parameters["$processId"].Value = Convert.ToInt64(process.ProcessId, CultureInfo.InvariantCulture);
             command.Parameters["$startedAtUtc"].Value = ToUtcTimestamp(process.StartTime);
+            command.Parameters["$cpuDurationTicks"].Value = ToDbValue(cpuDurationTicks);
+            command.Parameters["$cpuUsagePercent"].Value = ToDbValue(cpuUsagePercent);
             command.ExecuteNonQuery();
         }
 
-        public long WriteThreadEvent(in ThreadStartStopEventInfo data)
+        public long WriteThreadEvent(
+            in ThreadStartStopEventInfo data,
+            DateTime? cpuStartedAt = null,
+            DateTime? cpuEndedAt = null,
+            long? cpuDurationTicks = null)
         {
+            if ((cpuStartedAt is null) != (cpuEndedAt is null) ||
+                (cpuStartedAt is null) != (cpuDurationTicks is null))
+            {
+                throw new ArgumentException("CPU 執行資料必須同時提供開始時間、結束時間與持續時間。");
+            }
+
+            if (cpuStartedAt is not null &&
+                (cpuEndedAt < cpuStartedAt || cpuDurationTicks < 0))
+            {
+                throw new ArgumentOutOfRangeException(nameof(cpuDurationTicks), "CPU 執行資料無效。");
+            }
+
             SqliteCommand command = _writeThreadEventCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
             command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
             command.Parameters["$opcode"].Value = data.Opcode;
@@ -358,34 +352,12 @@ namespace WpfApp1
             command.Parameters["$pagePriority"].Value = ToDbValue(data.PagePriority);
             command.Parameters["$ioPriority"].Value = ToDbValue(data.IoPriority);
             command.Parameters["$threadFlags"].Value = ToDbValue(data.ThreadFlags);
-            command.Parameters["$processorNumber"].Value = DBNull.Value;
-            command.Parameters["$cpuStartedAtUtc"].Value = DBNull.Value;
-            command.Parameters["$cpuEndedAtUtc"].Value = DBNull.Value;
-            command.Parameters["$cpuDurationTicks"].Value = DBNull.Value;
+            command.Parameters["$cpuStartedAtUtc"].Value = cpuStartedAt is null ? DBNull.Value : ToUtcTimestamp(cpuStartedAt.Value);
+            command.Parameters["$cpuEndedAtUtc"].Value = cpuEndedAt is null ? DBNull.Value : ToUtcTimestamp(cpuEndedAt.Value);
+            command.Parameters["$cpuDurationTicks"].Value = ToDbValue(cpuDurationTicks);
             long threadEventId = Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
             CommitWriteBatchIfNeeded();
             return threadEventId;
-        }
-
-        public void WriteContextSwitchEvent(in CSwitchEventInfo data)
-        {
-            SqliteCommand command = _writeContextSwitchEventCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
-            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
-            command.Parameters["$processorNumber"].Value = data.ProcessorNumber;
-            command.Parameters["$newThreadId"].Value = Convert.ToInt64(data.NewThreadId, CultureInfo.InvariantCulture);
-            command.Parameters["$oldThreadId"].Value = Convert.ToInt64(data.OldThreadId, CultureInfo.InvariantCulture);
-            command.Parameters["$newProcessId"].Value = ToDbValue(data.NewProcessId);
-            command.Parameters["$oldProcessId"].Value = ToDbValue(data.OldProcessId);
-            command.Parameters["$newThreadPriority"].Value = data.NewThreadPriority;
-            command.Parameters["$oldThreadPriority"].Value = data.OldThreadPriority;
-            command.Parameters["$previousCState"].Value = data.PreviousCState;
-            command.Parameters["$oldThreadWaitReason"].Value = data.OldThreadWaitReason;
-            command.Parameters["$oldThreadWaitMode"].Value = data.OldThreadWaitMode;
-            command.Parameters["$oldThreadState"].Value = data.OldThreadState;
-            command.Parameters["$oldThreadWaitIdealProcessor"].Value = data.OldThreadWaitIdealProcessor;
-            command.Parameters["$newThreadWaitTime"].Value = data.NewThreadWaitTime;
-            command.ExecuteNonQuery();
-            CommitWriteBatchIfNeeded();
         }
 
         public void Complete()
@@ -423,10 +395,6 @@ namespace WpfApp1
             _writeKernelAcpiCommand = null;
             _writeThreadEventCommand?.Dispose();
             _writeThreadEventCommand = null;
-            _updateThreadCpuSummaryCommand?.Dispose();
-            _updateThreadCpuSummaryCommand = null;
-            _writeContextSwitchEventCommand?.Dispose();
-            _writeContextSwitchEventCommand = null;
             _transaction?.Dispose();
             _transaction = null;
             _connection?.Dispose();
@@ -464,8 +432,6 @@ namespace WpfApp1
                 _writeEnergyEstimationEngineCommand,
                 _writeKernelAcpiCommand,
                 _writeThreadEventCommand,
-                _updateThreadCpuSummaryCommand,
-                _writeContextSwitchEventCommand,
             })
             {
                 if (command is not null)
@@ -481,9 +447,20 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO ImageLoads
-                    (ProcessId, ImageBase, ImageSize, ImageCheckSum, TimeDateStamp, DefaultBase, FileName, LoadedAtUtc)
+                    (ProcessRecordId, ProcessId, ImageBase, ImageSize, ImageCheckSum, TimeDateStamp, DefaultBase, FileName, LoadedAtUtc)
                   VALUES
-                    ($processId, $imageBase, $imageSize, $imageCheckSum, $timeDateStamp, $defaultBase, $fileName, $loadedAtUtc);";
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $loadedAtUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $loadedAtUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $processId, $imageBase, $imageSize, $imageCheckSum, $timeDateStamp, $defaultBase, $fileName, $loadedAtUtc
+                    );";
             command.Parameters.Add("$processId", SqliteType.Integer);
             command.Parameters.Add("$imageBase", SqliteType.Text);
             command.Parameters.Add("$imageSize", SqliteType.Text);
@@ -502,48 +479,22 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO ThreadEvents
-                    (TimestampUtc, Opcode, ProcessId, ThreadId, StackBase, StackLimit, UserStackBase, UserStackLimit, Affinity, Win32StartAddr, TebBase, SubProcessTag, BasePriority, PagePriority, IoPriority, ThreadFlags, ProcessorNumber, CpuStartedAtUtc, CpuEndedAtUtc, CpuDurationTicks)
-                         VALUES
-                          ($timestampUtc, $opcode, $processId, $threadId, $stackBase, $stackLimit, $userStackBase, $userStackLimit, $affinity, $win32StartAddr, $tebBase, $subProcessTag, $basePriority, $pagePriority, $ioPriority, $threadFlags, $processorNumber, $cpuStartedAtUtc, $cpuEndedAtUtc, $cpuDurationTicks)
-                         RETURNING ThreadEventId;";
-                  foreach (string parameterName in new[] { "$timestampUtc", "$opcode", "$processId", "$threadId", "$stackBase", "$stackLimit", "$userStackBase", "$userStackLimit", "$affinity", "$win32StartAddr", "$tebBase", "$subProcessTag", "$basePriority", "$pagePriority", "$ioPriority", "$threadFlags", "$processorNumber", "$cpuStartedAtUtc", "$cpuEndedAtUtc", "$cpuDurationTicks" })
-            {
-                command.Parameters.AddWithValue(parameterName, DBNull.Value);
-            }
-            command.Prepare();
-            return command;
-        }
-
-        private static SqliteCommand CreateUpdateThreadCpuSummaryCommand(SqliteConnection connection, SqliteTransaction transaction)
-        {
-            SqliteCommand command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                @"UPDATE ThreadEvents
-                  SET ProcessorNumber = $processorNumber,
-                      CpuStartedAtUtc = $cpuStartedAtUtc,
-                      CpuEndedAtUtc = $cpuEndedAtUtc,
-                      CpuDurationTicks = $cpuDurationTicks
-                  WHERE ThreadEventId = $threadEventId;";
-            command.Parameters.Add("$processorNumber", SqliteType.Integer);
-            command.Parameters.Add("$cpuStartedAtUtc", SqliteType.Text);
-            command.Parameters.Add("$cpuEndedAtUtc", SqliteType.Text);
-            command.Parameters.Add("$cpuDurationTicks", SqliteType.Integer);
-            command.Parameters.Add("$threadEventId", SqliteType.Integer);
-            command.Prepare();
-            return command;
-        }
-
-        private static SqliteCommand CreateWriteContextSwitchEventCommand(SqliteConnection connection, SqliteTransaction transaction)
-        {
-            SqliteCommand command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                @"INSERT INTO ContextSwitchEvents
-                    (TimestampUtc, ProcessorNumber, NewThreadId, OldThreadId, NewProcessId, OldProcessId, NewThreadPriority, OldThreadPriority, PreviousCState, OldThreadWaitReason, OldThreadWaitMode, OldThreadState, OldThreadWaitIdealProcessor, NewThreadWaitTime)
+                    (ProcessRecordId, TimestampUtc, Opcode, ProcessId, ThreadId, StackBase, StackLimit, UserStackBase, UserStackLimit, Affinity, Win32StartAddr, TebBase, SubProcessTag, BasePriority, PagePriority, IoPriority, ThreadFlags, CpuStartedAtUtc, CpuEndedAtUtc, CpuDurationTicks)
                   VALUES
-                    ($timestampUtc, $processorNumber, $newThreadId, $oldThreadId, $newProcessId, $oldProcessId, $newThreadPriority, $oldThreadPriority, $previousCState, $oldThreadWaitReason, $oldThreadWaitMode, $oldThreadState, $oldThreadWaitIdealProcessor, $newThreadWaitTime);";
-            foreach (string parameterName in new[] { "$timestampUtc", "$processorNumber", "$newThreadId", "$oldThreadId", "$newProcessId", "$oldProcessId", "$newThreadPriority", "$oldThreadPriority", "$previousCState", "$oldThreadWaitReason", "$oldThreadWaitMode", "$oldThreadState", "$oldThreadWaitIdealProcessor", "$newThreadWaitTime" })
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $timestampUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $timestampUtc, $opcode, $processId, $threadId, $stackBase, $stackLimit, $userStackBase, $userStackLimit, $affinity, $win32StartAddr, $tebBase, $subProcessTag, $basePriority, $pagePriority, $ioPriority, $threadFlags, $cpuStartedAtUtc, $cpuEndedAtUtc, $cpuDurationTicks
+                    )
+                  RETURNING ThreadEventId;";
+            foreach (string parameterName in new[] { "$timestampUtc", "$opcode", "$processId", "$threadId", "$stackBase", "$stackLimit", "$userStackBase", "$userStackLimit", "$affinity", "$win32StartAddr", "$tebBase", "$subProcessTag", "$basePriority", "$pagePriority", "$ioPriority", "$threadFlags", "$cpuStartedAtUtc", "$cpuEndedAtUtc", "$cpuDurationTicks" })
             {
                 command.Parameters.AddWithValue(parameterName, DBNull.Value);
             }
@@ -608,9 +559,20 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO WmiActivityEvents
-                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, Operation, NamespaceName)
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, Operation, NamespaceName)
                   VALUES
-                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $operation, $namespaceName);";
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $timestampUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $operation, $namespaceName
+                    );";
             command.Parameters.Add("$timestampUtc", SqliteType.Text);
             command.Parameters.Add("$eventId", SqliteType.Integer);
             command.Parameters.Add("$version", SqliteType.Integer);
@@ -671,12 +633,16 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"UPDATE Processes
-                  SET EndedAtUtc = $endedAtUtc
+                  SET EndedAtUtc = $endedAtUtc,
+                      CpuDurationTicks = $cpuDurationTicks,
+                      CpuUsagePercent = $cpuUsagePercent
                   WHERE ProcessId = $processId
                     AND StartedAtUtc = $startedAtUtc;";
             command.Parameters.Add("$endedAtUtc", SqliteType.Text);
             command.Parameters.Add("$processId", SqliteType.Integer);
             command.Parameters.Add("$startedAtUtc", SqliteType.Text);
+            command.Parameters.Add("$cpuDurationTicks", SqliteType.Integer);
+            command.Parameters.Add("$cpuUsagePercent", SqliteType.Real);
             command.Prepare();
             return command;
         }
@@ -721,7 +687,6 @@ namespace WpfApp1
         {
             (string Name, string Definition)[] columns =
             {
-                ("ProcessorNumber", "INTEGER NULL"),
                 ("CpuStartedAtUtc", "TEXT NULL"),
                 ("CpuEndedAtUtc", "TEXT NULL"),
                 ("CpuDurationTicks", "INTEGER NULL"),
@@ -745,9 +710,53 @@ namespace WpfApp1
 
             using SqliteCommand createIndexCommand = connection.CreateCommand();
             createIndexCommand.CommandText =
-                @"CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ThreadProcessorCpuStarted
-                  ON ThreadEvents (ThreadId, ProcessorNumber, CpuStartedAtUtc);";
+                @"CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ThreadCpuStarted
+                  ON ThreadEvents (ThreadId, CpuStartedAtUtc);";
             createIndexCommand.ExecuteNonQuery();
+        }
+
+        private static void EnsureWmiActivityColumns(SqliteConnection connection)
+        {
+            using SqliteCommand columnExistsCommand = connection.CreateCommand();
+            columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('WmiActivityEvents') WHERE name = 'ProcessRecordId';";
+
+            if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
+            {
+                using SqliteCommand addColumnCommand = connection.CreateCommand();
+                addColumnCommand.CommandText = "ALTER TABLE WmiActivityEvents ADD COLUMN ProcessRecordId INTEGER NULL;";
+                addColumnCommand.ExecuteNonQuery();
+            }
+
+            using SqliteCommand createIndexCommand = connection.CreateCommand();
+            createIndexCommand.CommandText =
+                @"CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_ProcessRecord
+                  ON WmiActivityEvents (ProcessRecordId, TimestampUtc);";
+            createIndexCommand.ExecuteNonQuery();
+        }
+
+        private static void EnsureProcessColumns(SqliteConnection connection)
+        {
+            (string Name, string Definition)[] columns =
+            {
+                ("CpuDurationTicks", "INTEGER NULL"),
+                ("CpuUsagePercent", "REAL NULL"),
+            };
+
+            foreach ((string name, string definition) in columns)
+            {
+                using SqliteCommand columnExistsCommand = connection.CreateCommand();
+                columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('Processes') WHERE name = $name;";
+                columnExistsCommand.Parameters.AddWithValue("$name", name);
+
+                if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                {
+                    continue;
+                }
+
+                using SqliteCommand addColumnCommand = connection.CreateCommand();
+                addColumnCommand.CommandText = $"ALTER TABLE Processes ADD COLUMN {name} {definition};";
+                addColumnCommand.ExecuteNonQuery();
+            }
         }
 
         private static string ToUtcTimestamp(DateTime timestamp)

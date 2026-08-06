@@ -1531,11 +1531,7 @@ public sealed class EtlFileReader
     private unsafe EnergyEstimationEngineEventInfo_37? ParseEnergyEstimationEnginePayload_37(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
         uint processId = eventRecordPtr->EventHeader.ProcessId;
-        byte[]? processIdBytes = GetRawProperty(eventRecordPtr, "ProcessId");
-        if (processIdBytes is { Length: sizeof(uint) })
-        {
-            processId = BinaryPrimitives.ReadUInt32LittleEndian(processIdBytes);
-        }
+
         var e3 = new EnergyEstimationEngineEventInfo_37
         {
             Timestamp = timestamp,

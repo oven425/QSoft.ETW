@@ -35,6 +35,9 @@ internal class SQLiteExport(DataBase_SQLite db)
     protected virtual void BeginExport(string etlPath)
     {
         m_ThreadCSwitchs.Clear();
+        m_ThreadStartedAts.Clear();
+        m_ThreadProcessIds.Clear();
+        m_ProcessThreadCpuSummaries.Clear();
         UnmatchedCpuIntervalCount = 0;
         IncompleteCpuIntervalCount = 0;
     }
@@ -49,46 +52,22 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.Fail();
     }
 
-    private sealed class CSwitch
-    {
-        public required byte ProcessorNumber { get; init; }
-        public required DateTime StartedAt { get; init; }
-        public DateTime? EndedAt { get; set; }
-    }
-
-    private readonly Dictionary<uint, List<CSwitch>> m_ThreadCSwitchs = [];
+    private readonly Dictionary<uint, List<CSwitchEventInfo>> m_ThreadCSwitchs = [];
+    private readonly Dictionary<uint, DateTime> m_ThreadStartedAts = [];
+    private readonly Dictionary<uint, uint> m_ThreadProcessIds = [];
+    private readonly Dictionary<uint, List<ThreadCpuSummary>> m_ProcessThreadCpuSummaries = [];
 
     protected virtual void OnThreadCSwitch(in CSwitchEventInfo data)
     {
         //db.WriteContextSwitchEvent(in data);
-        byte processorNumber = data.ProcessorNumber;
-
-        if (m_ThreadCSwitchs.TryGetValue(data.OldThreadId, out List<CSwitch>? oldThreadCSwitchs))
+        if (m_ThreadCSwitchs.TryGetValue(data.OldThreadId, out List<CSwitchEventInfo>? threadCSwitchs))
         {
-            CSwitch? runningCSwitch = oldThreadCSwitchs.LastOrDefault(cSwitch =>
-                cSwitch.ProcessorNumber == processorNumber && cSwitch.EndedAt is null);
-
-            if (runningCSwitch is not null)
-            {
-                runningCSwitch.EndedAt = data.Timestamp;
-            }
-            else
-            {
-                IncompleteCpuIntervalCount++;
-            }
-        }
-        else
-        {
-            UnmatchedCpuIntervalCount++;
+            threadCSwitchs.Add(data);
         }
 
-        if (m_ThreadCSwitchs.TryGetValue(data.NewThreadId, out List<CSwitch>? newThreadCSwitchs))
+        if (m_ThreadCSwitchs.TryGetValue(data.NewThreadId, out List<CSwitchEventInfo>? threadCSwitchs1))
         {
-            newThreadCSwitchs.Add(new CSwitch
-            {
-                ProcessorNumber = processorNumber,
-                StartedAt = data.Timestamp,
-            });
+            threadCSwitchs1.Add(data);
         }
     }
 
@@ -104,24 +83,33 @@ internal class SQLiteExport(DataBase_SQLite db)
     {
         db.WriteThreadEvent(in data);
         m_ThreadCSwitchs[data.ThreadId] = [];
-
-        //_activeThreads[data.ThreadId] = new ActiveThread(data.ProcessId, data.Timestamp);
-        //_cpuExecutionSummaries.Remove(data.ThreadId);
+        m_ThreadStartedAts[data.ThreadId] = data.Timestamp;
+        m_ThreadProcessIds[data.ThreadId] = data.ProcessId;
     }
 
     protected virtual void OnThreadStop(in ThreadStartStopEventInfo data)
     {
-        if (m_ThreadCSwitchs.TryGetValue(data.ThreadId, out List<CSwitch>? threadCSwitchs))
+        m_ThreadCSwitchs.Remove(data.ThreadId, out List<CSwitchEventInfo>? threadCSwitchs);
+        bool hasThreadStartedAt = m_ThreadStartedAts.Remove(data.ThreadId, out DateTime threadStartedAt);
+        m_ThreadProcessIds.Remove(data.ThreadId);
+        ThreadCpuSummary? cpuSummary = threadCSwitchs is null
+            ? null
+            : CreateCpuSummary(
+                data.ThreadId,
+                hasThreadStartedAt ? threadStartedAt : null,
+                data.Timestamp,
+                threadCSwitchs);
+
+        if (cpuSummary is ThreadCpuSummary summary)
         {
-            foreach (CSwitch runningCSwitch in threadCSwitchs.Where(cSwitch => cSwitch.EndedAt is null))
-            {
-                runningCSwitch.EndedAt = data.Timestamp;
-            }
+            AddProcessThreadCpuSummary(data.ProcessId, summary);
         }
 
-        m_ThreadCSwitchs.Remove(data.ThreadId, out var vv);
-        //long threadStopEventId = db.WriteThreadEvent(in data);
-
+        db.WriteThreadEvent(
+            in data,
+            cpuSummary?.StartedAt,
+            cpuSummary?.EndedAt,
+            cpuSummary?.DurationTicks);
     }
 
     protected virtual void OnProcessStart(ProcessInfo process)
@@ -131,7 +119,36 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void OnProcessStop(ProcessInfo process)
     {
-        db.WriteProcessStop(process);
+        DateTime processStoppedAt = process.EndTime ?? throw new InvalidOperationException("程序結束事件未提供結束時間。");
+        List<uint> activeThreadIds = [];
+        foreach ((uint threadId, uint processId) in m_ThreadProcessIds)
+        {
+            if (processId == process.ProcessId)
+            {
+                activeThreadIds.Add(threadId);
+            }
+        }
+
+        foreach (uint threadId in activeThreadIds)
+        {
+            m_ThreadCSwitchs.Remove(threadId, out List<CSwitchEventInfo>? threadCSwitchs);
+            bool hasThreadStartedAt = m_ThreadStartedAts.Remove(threadId, out DateTime threadStartedAt);
+            m_ThreadProcessIds.Remove(threadId);
+
+            if (threadCSwitchs is not null &&
+                CreateCpuSummary(
+                    threadId,
+                    hasThreadStartedAt ? threadStartedAt : null,
+                    processStoppedAt,
+                    threadCSwitchs) is ThreadCpuSummary summary)
+            {
+                AddProcessThreadCpuSummary(process.ProcessId, summary);
+            }
+        }
+
+        m_ProcessThreadCpuSummaries.Remove(process.ProcessId, out List<ThreadCpuSummary>? threadCpuSummaries);
+        ProcessCpuSummary? cpuSummary = CreateProcessCpuSummary(process, threadCpuSummaries);
+        db.WriteProcessStop(process, cpuSummary?.DurationTicks, cpuSummary?.CpuUsagePercent);
     }
 
     protected virtual void OnImageLoad(in ImageLoadEventInfo data)
@@ -172,11 +189,11 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ThreadDCStop += OnThreadStop;
         reader.ProcessStart += OnProcessStart;
         reader.ProcessStop += OnProcessStop;
-        //reader.ImageLoad += OnImageLoad;
-        //reader.ImageUnload += OnImageUnload;
-        //reader.WmiActivity += OnWmiActivity;
+        reader.ImageLoad += OnImageLoad;
+        reader.ImageUnload += OnImageUnload;
+        reader.WmiActivity += OnWmiActivity;
         reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
-        //reader.KernelAcpi += OnKernelAcpi;
+        reader.KernelAcpi += OnKernelAcpi;
         ////reader.ImageDCStart += OnImageLoad;
         ////reader.ImageDCStop += OnImageUnload;
         ////reader.PerfInfoProfile += OnProfile;
@@ -211,5 +228,122 @@ internal class SQLiteExport(DataBase_SQLite db)
     }
 
 
+    private ThreadCpuSummary? CreateCpuSummary(
+        uint threadId,
+        DateTime? threadStartedAt,
+        DateTime threadStoppedAt,
+        List<CSwitchEventInfo> threadCSwitchs)
+    {
+        Dictionary<byte, DateTime> startedAtByProcessor = [];
+        DateTime? cpuStartedAt = null;
+        DateTime? cpuEndedAt = null;
+        long durationTicks = 0;
 
+        foreach (CSwitchEventInfo cSwitch in threadCSwitchs)
+        {
+            if (cSwitch.NewThreadId == threadId)
+            {
+                if (!startedAtByProcessor.TryAdd(cSwitch.ProcessorNumber, cSwitch.Timestamp))
+                {
+                    IncompleteCpuIntervalCount++;
+                    startedAtByProcessor[cSwitch.ProcessorNumber] = cSwitch.Timestamp;
+                }
+            }
+
+            if (cSwitch.OldThreadId == threadId)
+            {
+                if (startedAtByProcessor.Remove(cSwitch.ProcessorNumber, out DateTime startedAt) &&
+                    cSwitch.Timestamp >= startedAt)
+                {
+                    AddCpuInterval(startedAt, cSwitch.Timestamp, ref cpuStartedAt, ref cpuEndedAt, ref durationTicks);
+                }
+                else
+                {
+                    UnmatchedCpuIntervalCount++;
+                }
+            }
+        }
+
+        foreach (DateTime startedAt in startedAtByProcessor.Values)
+        {
+            if (threadStoppedAt >= startedAt)
+            {
+                AddCpuInterval(startedAt, threadStoppedAt, ref cpuStartedAt, ref cpuEndedAt, ref durationTicks);
+            }
+            else
+            {
+                UnmatchedCpuIntervalCount++;
+            }
+        }
+
+        if (cpuStartedAt is null)
+        {
+            return null;
+        }
+
+        long lifetimeTicks = threadStartedAt is null ? 0 : (threadStoppedAt - threadStartedAt.Value).Ticks;
+        double cpuUsagePercent = lifetimeTicks > 0
+            ? durationTicks * 100.0 / lifetimeTicks
+            : 0;
+
+        return new ThreadCpuSummary(
+            cpuStartedAt.Value,
+            cpuEndedAt!.Value,
+            durationTicks,
+            cpuUsagePercent);
+    }
+
+    private static void AddCpuInterval(
+        DateTime startedAt,
+        DateTime endedAt,
+        ref DateTime? cpuStartedAt,
+        ref DateTime? cpuEndedAt,
+        ref long durationTicks)
+    {
+        cpuStartedAt = cpuStartedAt is null || startedAt < cpuStartedAt ? startedAt : cpuStartedAt;
+        cpuEndedAt = cpuEndedAt is null || endedAt > cpuEndedAt ? endedAt : cpuEndedAt;
+        durationTicks = checked(durationTicks + (endedAt - startedAt).Ticks);
+    }
+
+    private void AddProcessThreadCpuSummary(uint processId, in ThreadCpuSummary summary)
+    {
+        if (!m_ProcessThreadCpuSummaries.TryGetValue(processId, out List<ThreadCpuSummary>? summaries))
+        {
+            summaries = [];
+            m_ProcessThreadCpuSummaries.Add(processId, summaries);
+        }
+
+        summaries.Add(summary);
+    }
+
+    private static ProcessCpuSummary? CreateProcessCpuSummary(
+        ProcessInfo process,
+        List<ThreadCpuSummary>? threadCpuSummaries)
+    {
+        if (threadCpuSummaries is null || threadCpuSummaries.Count == 0 || process.EndTime is not DateTime endedAt)
+        {
+            return null;
+        }
+
+        long durationTicks = 0;
+        foreach (ThreadCpuSummary threadCpuSummary in threadCpuSummaries)
+        {
+            durationTicks = checked(durationTicks + threadCpuSummary.DurationTicks);
+        }
+
+        long lifetimeTicks = (endedAt - process.StartTime).Ticks;
+        double cpuUsagePercent = lifetimeTicks > 0
+            ? durationTicks * 100.0 / lifetimeTicks
+            : 0;
+
+        return new ProcessCpuSummary(durationTicks, cpuUsagePercent);
+    }
+
+    private readonly record struct ThreadCpuSummary(
+        DateTime StartedAt,
+        DateTime EndedAt,
+        long DurationTicks,
+        double CpuUsagePercent);
+
+    private readonly record struct ProcessCpuSummary(long DurationTicks, double CpuUsagePercent);
 }
