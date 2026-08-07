@@ -19,6 +19,9 @@ namespace WpfApp1
         private SqliteCommand? _writeProcessStopCommand;
         private SqliteCommand? _writeWmiActivityCommand;
         private SqliteCommand? _writeEnergyEstimationEngineCommand;
+        private SqliteCommand? _writeEnergyEstimationQueryStatsCommand;
+        private SqliteCommand? _writeEnergyEstimationCpuPowerCommand;
+        private SqliteCommand? _writeEnergyEstimationEnergyDeltaCommand;
         private SqliteCommand? _writeKernelAcpiCommand;
         private SqliteCommand? _writeThreadEventCommand;
         private SqliteCommand? _writeCpuProfileSampleCommand;
@@ -146,6 +149,69 @@ namespace WpfApp1
 
                        CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngineEvents_ProcessTimestamp
                         ON EnergyEstimationEngineEvents (ProcessId, TimestampUtc);
+
+                       CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_33
+                       (
+                           EnergyEstimationEngine_33Id INTEGER PRIMARY KEY,
+                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                           TimestampUtc TEXT NOT NULL,
+                           EventId INTEGER NOT NULL,
+                           Version INTEGER NOT NULL,
+                           Opcode INTEGER NOT NULL,
+                           ProcessId INTEGER NOT NULL,
+                           ThreadId INTEGER NOT NULL,
+                           SruWorkItemType INTEGER NOT NULL,
+                           ProviderState INTEGER NOT NULL,
+                           DeviceState INTEGER NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_33_ProcessTimestamp
+                       ON EnergyEstimationEngine_33 (ProcessId, TimestampUtc);
+
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_33_ProcessRecord
+                       ON EnergyEstimationEngine_33 (ProcessRecordId, TimestampUtc);
+
+                       CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_18
+                       (
+                           EnergyEstimationEngine_18Id INTEGER PRIMARY KEY,
+                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                           TimestampUtc TEXT NOT NULL,
+                           EventId INTEGER NOT NULL,
+                           Version INTEGER NOT NULL,
+                           Opcode INTEGER NOT NULL,
+                           ProcessId INTEGER NOT NULL,
+                           ThreadId INTEGER NOT NULL,
+                           Component INTEGER NOT NULL,
+                           EnergyDelta TEXT NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_18_ProcessTimestamp
+                       ON EnergyEstimationEngine_18 (ProcessId, TimestampUtc);
+
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_18_ProcessRecord
+                       ON EnergyEstimationEngine_18 (ProcessRecordId, TimestampUtc);
+
+                       CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_14
+                       (
+                           EnergyEstimationEngine_14Id INTEGER PRIMARY KEY,
+                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                           TimestampUtc TEXT NOT NULL,
+                           EventId INTEGER NOT NULL,
+                           Version INTEGER NOT NULL,
+                           Opcode INTEGER NOT NULL,
+                           ProcessId INTEGER NOT NULL,
+                           ThreadId INTEGER NOT NULL,
+                           CpuId INTEGER NOT NULL,
+                           CurrentFrequency INTEGER NOT NULL,
+                           LastBusyFrequency INTEGER NOT NULL,
+                           Energy TEXT NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_14_ProcessTimestamp
+                       ON EnergyEstimationEngine_14 (ProcessId, TimestampUtc);
+
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_14_ProcessRecord
+                       ON EnergyEstimationEngine_14 (ProcessRecordId, TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS KernelAcpiEvents
                        (
@@ -289,6 +355,9 @@ namespace WpfApp1
             _writeProcessStopCommand = CreateWriteProcessStopCommand(connection, transaction);
             _writeWmiActivityCommand = CreateWriteWmiActivityCommand(connection, transaction);
             _writeEnergyEstimationEngineCommand = CreateWriteEnergyEstimationEngineCommand(connection, transaction);
+            _writeEnergyEstimationQueryStatsCommand = CreateWriteEnergyEstimationQueryStatsCommand(connection, transaction);
+            _writeEnergyEstimationEnergyDeltaCommand = CreateWriteEnergyEstimationEnergyDeltaCommand(connection, transaction);
+            _writeEnergyEstimationCpuPowerCommand = CreateWriteEnergyEstimationCpuPowerCommand(connection, transaction);
             _writeKernelAcpiCommand = CreateWriteKernelAcpiCommand(connection, transaction);
             _writeThreadEventCommand = CreateWriteThreadEventCommand(connection, transaction);
             _writeCpuProfileSampleCommand = CreateWriteCpuProfileSampleCommand(connection, transaction);
@@ -362,6 +431,54 @@ namespace WpfApp1
             command.Parameters["$emiEnergy"].Value = data.EmiEnergy.ToString(CultureInfo.InvariantCulture);
             command.Parameters["$timeInMSec"].Value = data.TimeInMSec;
             command.Parameters["$npuEnergy"].Value = data.NpuEnergy.ToString(CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteEnergyEstimationEngineQueryStats(in EnergyEstimationEngineEventInfo_33 data)
+        {
+            SqliteCommand command = _writeEnergyEstimationQueryStatsCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$sruWorkItemType"].Value = data.SruWorkItemType;
+            command.Parameters["$providerState"].Value = data.ProviderState;
+            command.Parameters["$deviceState"].Value = data.DeviceState;
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteEnergyEstimationEngineEnergyDelta(in EnergyEstimationEngineEventInfo_18 data)
+        {
+            SqliteCommand command = _writeEnergyEstimationEnergyDeltaCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$component"].Value = data.Component;
+            command.Parameters["$energyDelta"].Value = data.EnergyDelta.ToString(CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteEnergyEstimationEngineCpuPower(in EnergyEstimationEngineEventInfo_14 data)
+        {
+            SqliteCommand command = _writeEnergyEstimationCpuPowerCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$cpuId"].Value = data.CpuId;
+            command.Parameters["$currentFrequency"].Value = data.CurrentFrequency;
+            command.Parameters["$lastBusyFrequency"].Value = data.LastBusyFrequency;
+            command.Parameters["$energy"].Value = data.Energy.ToString(CultureInfo.InvariantCulture);
             command.ExecuteNonQuery();
             CommitWriteBatchIfNeeded();
         }
@@ -550,6 +667,12 @@ namespace WpfApp1
             _writeWmiActivityCommand = null;
             _writeEnergyEstimationEngineCommand?.Dispose();
             _writeEnergyEstimationEngineCommand = null;
+            _writeEnergyEstimationQueryStatsCommand?.Dispose();
+            _writeEnergyEstimationQueryStatsCommand = null;
+            _writeEnergyEstimationEnergyDeltaCommand?.Dispose();
+            _writeEnergyEstimationEnergyDeltaCommand = null;
+            _writeEnergyEstimationCpuPowerCommand?.Dispose();
+            _writeEnergyEstimationCpuPowerCommand = null;
             _writeKernelAcpiCommand?.Dispose();
             _writeKernelAcpiCommand = null;
             _writeThreadEventCommand?.Dispose();
@@ -597,6 +720,9 @@ namespace WpfApp1
                 _writeProcessStopCommand,
                 _writeWmiActivityCommand,
                 _writeEnergyEstimationEngineCommand,
+                _writeEnergyEstimationQueryStatsCommand,
+                _writeEnergyEstimationEnergyDeltaCommand,
+                _writeEnergyEstimationCpuPowerCommand,
                 _writeKernelAcpiCommand,
                 _writeThreadEventCommand,
                 _writeCpuProfileSampleCommand,
@@ -824,6 +950,105 @@ namespace WpfApp1
             command.Parameters.Add("$emiEnergy", SqliteType.Text);
             command.Parameters.Add("$timeInMSec", SqliteType.Integer);
             command.Parameters.Add("$npuEnergy", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteEnergyEstimationQueryStatsCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO EnergyEstimationEngine_33
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, SruWorkItemType, ProviderState, DeviceState)
+                  VALUES
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $timestampUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $sruWorkItemType, $providerState, $deviceState
+                    );";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$sruWorkItemType", SqliteType.Integer);
+            command.Parameters.Add("$providerState", SqliteType.Integer);
+            command.Parameters.Add("$deviceState", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteEnergyEstimationEnergyDeltaCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO EnergyEstimationEngine_18
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, Component, EnergyDelta)
+                  VALUES
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $timestampUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $component, $energyDelta
+                    );";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$component", SqliteType.Integer);
+            command.Parameters.Add("$energyDelta", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteEnergyEstimationCpuPowerCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO EnergyEstimationEngine_14
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, CpuId, CurrentFrequency, LastBusyFrequency, Energy)
+                  VALUES
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $timestampUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $cpuId, $currentFrequency, $lastBusyFrequency, $energy
+                    );";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$cpuId", SqliteType.Integer);
+            command.Parameters.Add("$currentFrequency", SqliteType.Integer);
+            command.Parameters.Add("$lastBusyFrequency", SqliteType.Integer);
+            command.Parameters.Add("$energy", SqliteType.Text);
             command.Prepare();
             return command;
         }

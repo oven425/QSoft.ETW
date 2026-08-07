@@ -239,10 +239,29 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ImageUnload += OnImageUnload;
         reader.WmiActivity += OnWmiActivity;
         reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
+        reader.EnergyEstimationEngine_14 += OnEnergyEstimationEngine_14;
+        reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
+        reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
         reader.KernelAcpi += OnKernelAcpi;
-        ////reader.ImageDCStart += OnImageLoad;
-        ////reader.ImageDCStop += OnImageUnload;
         reader.PerfInfoProfile += OnProfile;
+    }
+
+    private void OnEnergyEstimationEngine_33(in EnergyEstimationEngineEventInfo_33 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteEnergyEstimationEngineQueryStats(in data);
+    }
+
+    private void OnEnergyEstimationEngine_18(in EnergyEstimationEngineEventInfo_18 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteEnergyEstimationEngineEnergyDelta(in data);
+    }
+
+    private void OnEnergyEstimationEngine_14(in EnergyEstimationEngineEventInfo_14 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteEnergyEstimationEngineCpuPower(in data);
     }
 
     private void OnEnergyEstimationEngine_37(in EnergyEstimationEngineEventInfo_37 data)

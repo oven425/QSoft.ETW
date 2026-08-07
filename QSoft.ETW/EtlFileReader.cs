@@ -682,6 +682,53 @@ public readonly record struct EnergyEstimationEngineEventInfo_37
 
 }
 
+/// <summary>
+/// 對應 Event ID 33 (QueryStats):記錄本次能源估算查詢週期的觸發原因與裝置狀態快照(AC/DC、螢幕開關、省電模式等),
+/// 是解讀 Event 37 能耗數值不可或缺的情境資料。
+/// </summary>
+public readonly record struct EnergyEstimationEngineEventInfo_33
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public uint SruWorkItemType { get; init; }
+    public uint ProviderState { get; init; }
+    public uint DeviceState { get; init; }
+}
+
+/// <summary>
+/// 對應 Event ID 14 (QueryStatsCpuPowerInfo):每顆邏輯 CPU 在本次查詢間隔的原始能耗量測值(估算前的硬體輸入資料)。
+/// </summary>
+public readonly record struct EnergyEstimationEngineEventInfo_14
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public uint CpuId { get; init; }
+    public byte CurrentFrequency { get; init; }
+    public byte LastBusyFrequency { get; init; }
+    public ulong Energy { get; init; }
+}
+
+
+public readonly record struct EnergyEstimationEngineEventInfo_18
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public uint Component { get; init; }
+    public ulong EnergyDelta { get; init; }
+}
+
 
 internal static partial class NativeMethods
 {
@@ -694,18 +741,12 @@ internal static partial class NativeMethods
     [LibraryImport("advapi32.dll", EntryPoint = "CloseTrace")]
     internal static partial uint CloseTrace(ulong traceHandle);
 
-    /// <summary>
-    /// 取得指定事件的 schema(TRACE_EVENT_INFO + EVENT_PROPERTY_INFO[])。
-    /// 第一次呼叫時 pBuffer 傳 0 以探測所需的 pBufferSize,ERROR_INSUFFICIENT_BUFFER 時再配置緩衝區重試。
-    /// </summary>
-    /// 
     [LibraryImport("tdh.dll", EntryPoint = "TdhGetEventInformation")]
     internal static unsafe partial uint TdhGetEventInformation(EVENT_RECORD* pEvent, uint tdhContextCount, nint pTdhContext, nint pBuffer, ref uint pBufferSize);
 
     [LibraryImport("tdh.dll", EntryPoint = "TdhGetEventInformation")]
     internal static partial uint TdhGetEventInformation(nint pEvent, uint tdhContextCount, nint pTdhContext, nint pBuffer, ref uint pBufferSize);
 
-    /// <summary>將單一屬性的原始位元組資料依其型別格式化為字串,並回報實際消耗的位元組數。</summary>
     [LibraryImport("tdh.dll", EntryPoint = "TdhFormatProperty")]
     internal static partial uint TdhFormatProperty(
         nint pEventInfo,
@@ -1089,6 +1130,15 @@ public sealed class EtlFileReader
 
     public delegate void EnergyEstimationEngine_37Handler(in EnergyEstimationEngineEventInfo_37 data);
     public event EnergyEstimationEngine_37Handler? EnergyEstimationEngine_37;
+
+    public delegate void EnergyEstimationEngine_33Handler(in EnergyEstimationEngineEventInfo_33 data);
+    public event EnergyEstimationEngine_33Handler? EnergyEstimationEngine_33;
+
+    public delegate void EnergyEstimationEngine_14Handler(in EnergyEstimationEngineEventInfo_14 data);
+    public event EnergyEstimationEngine_14Handler? EnergyEstimationEngine_14;
+
+    public delegate void EnergyEstimationEngine_18Handler(in EnergyEstimationEngineEventInfo_18 data);
+    public event EnergyEstimationEngine_18Handler? EnergyEstimationEngine_18;
     private unsafe void OnEventRecord(EVENT_RECORD* eventRecordPtr)
     {
         s_eventCount++;
@@ -1258,7 +1308,8 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         {
-            if(this.EnergyEstimationEngine_37 is not null && eventRecordPtr->EventHeader.EventDescriptor.Id == 37)
+            ushort e3EventId = eventRecordPtr->EventHeader.EventDescriptor.Id;
+            if (this.EnergyEstimationEngine_37 is not null && e3EventId == 37)
             {
                 var e3_37 = ParseEnergyEstimationEnginePayload_37(timestamp, eventRecordPtr, cache);
                 if (e3_37 is { } e3_37value)
@@ -1266,9 +1317,29 @@ public sealed class EtlFileReader
                     this.EnergyEstimationEngine_37.Invoke(in e3_37value);
                 }
             }
-            else
+            else if (this.EnergyEstimationEngine_33 is not null && e3EventId == 33)
             {
-
+                var e3_33 = ParseEnergyEstimationEnginePayload_33(timestamp, eventRecordPtr, cache);
+                if (e3_33 is { } e3_33value)
+                {
+                    this.EnergyEstimationEngine_33.Invoke(in e3_33value);
+                }
+            }
+            else if (this.EnergyEstimationEngine_14 is not null && e3EventId == 14)
+            {
+                var e3_14 = ParseEnergyEstimationEnginePayload_14(timestamp, eventRecordPtr, cache);
+                if (e3_14 is { } e3_14value)
+                {
+                    this.EnergyEstimationEngine_14.Invoke(in e3_14value);
+                }
+            }
+            else if (this.EnergyEstimationEngine_18 is not null && e3EventId == 18)
+            {
+                var e3_18 = ParseEnergyEstimationEnginePayload_18(timestamp, eventRecordPtr, cache);
+                if (e3_18 is { } e3_18value)
+                {
+                    this.EnergyEstimationEngine_18.Invoke(in e3_18value);
+                }
             }
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
@@ -1562,6 +1633,54 @@ public sealed class EtlFileReader
         };
 
         return e3;
+    }
+
+    private unsafe EnergyEstimationEngineEventInfo_33? ParseEnergyEstimationEnginePayload_33(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        return new EnergyEstimationEngineEventInfo_33
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            SruWorkItemType = GetRawProperty<uint>(eventRecordPtr, "SruWorkItemType", cache),
+            ProviderState = GetRawProperty<uint>(eventRecordPtr, "ProviderState", cache),
+            DeviceState = GetRawProperty<uint>(eventRecordPtr, "DeviceState", cache),
+        };
+    }
+
+    private unsafe EnergyEstimationEngineEventInfo_14? ParseEnergyEstimationEnginePayload_14(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        return new EnergyEstimationEngineEventInfo_14
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            CpuId = GetRawProperty<uint>(eventRecordPtr, "CpuId", cache),
+            CurrentFrequency = GetRawProperty<byte>(eventRecordPtr, "CurrentFrequency", cache),
+            LastBusyFrequency = GetRawProperty<byte>(eventRecordPtr, "LastBusyFrequency", cache),
+            Energy = GetRawProperty<ulong>(eventRecordPtr, "Energy", cache),
+        };
+    }
+
+    private unsafe EnergyEstimationEngineEventInfo_18? ParseEnergyEstimationEnginePayload_18(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        return new EnergyEstimationEngineEventInfo_18
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            Component = GetRawProperty<uint>(eventRecordPtr, "Component", cache),
+            EnergyDelta = GetRawProperty<ulong>(eventRecordPtr, "EnergyDelta", cache),
+        };
     }
     private unsafe EnergyEstimationEngineEventInfo? ParseEnergyEstimationEnginePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
