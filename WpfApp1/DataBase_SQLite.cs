@@ -21,6 +21,10 @@ namespace WpfApp1
         private SqliteCommand? _writeEnergyEstimationEngineCommand;
         private SqliteCommand? _writeKernelAcpiCommand;
         private SqliteCommand? _writeThreadEventCommand;
+        private SqliteCommand? _writeCpuProfileSampleCommand;
+        private SqliteCommand? _writeDpcCommand;
+        private SqliteCommand? _writeInterruptCommand;
+        private SqliteCommand? _writeThreadLifetimeCommand;
 
         public void Open(string filename)
         {
@@ -185,9 +189,92 @@ namespace WpfApp1
                        CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ThreadTimestamp
                        ON ThreadEvents (ThreadId, TimestampUtc);
 
-                       CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ProcessRecord
-                       ON ThreadEvents (ProcessRecordId, TimestampUtc);";
-                command.ExecuteNonQuery();
+                              CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ProcessRecord
+                              ON ThreadEvents (ProcessRecordId, TimestampUtc);
+
+                              CREATE TABLE IF NOT EXISTS CpuProfileSamples
+                              (
+                                  CpuProfileSampleId INTEGER PRIMARY KEY,
+                                  ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                                  TimestampUtc TEXT NOT NULL,
+                                  ProcessorNumber INTEGER NOT NULL,
+                                  ProcessId INTEGER NOT NULL,
+                                  ThreadId INTEGER NOT NULL,
+                                  InstructionPointer TEXT NULL
+                              );
+
+                              CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_Timestamp
+                              ON CpuProfileSamples (TimestampUtc);
+
+                              CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ProcessRecordTimestamp
+                              ON CpuProfileSamples (ProcessRecordId, TimestampUtc);
+
+                              CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ProcessTimestamp
+                               ON CpuProfileSamples (ProcessId, TimestampUtc);
+
+                               CREATE TABLE IF NOT EXISTS ThreadLifetimes
+                               (
+                                   ThreadLifetimeId INTEGER PRIMARY KEY,
+                                   ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                                   ProcessId INTEGER NOT NULL,
+                                   ThreadId INTEGER NOT NULL,
+                                   StartedAtUtc TEXT NOT NULL,
+                                   EndedAtUtc TEXT NOT NULL,
+                                   CpuStartedAtUtc TEXT NULL,
+                                   CpuEndedAtUtc TEXT NULL,
+                                   CpuDurationTicks INTEGER NULL,
+                                   ContextSwitchCount INTEGER NOT NULL,
+                                   IsComplete INTEGER NOT NULL,
+                                   ContextSwitchJson TEXT NOT NULL,
+                                   UNIQUE (ProcessId, ThreadId, StartedAtUtc)
+                               );
+
+                               CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_ProcessRecordStarted
+                               ON ThreadLifetimes (ProcessRecordId, StartedAtUtc);
+
+                               CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_ThreadStarted
+                               ON ThreadLifetimes (ThreadId, StartedAtUtc);
+
+                               CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_IsCompleteEnded
+                               ON ThreadLifetimes (IsComplete, EndedAtUtc);
+
+                               CREATE TABLE IF NOT EXISTS DpcEvents
+                               (
+                                   DpcEventId INTEGER PRIMARY KEY,
+                                   TimestampUtc TEXT NOT NULL,
+                                   ProcessorNumber INTEGER NOT NULL,
+                                   EventId INTEGER NOT NULL,
+                                   Version INTEGER NOT NULL,
+                                   Opcode INTEGER NOT NULL,
+                                   InitialTime TEXT NULL,
+                                   Routine TEXT NULL
+                               );
+
+                               CREATE INDEX IF NOT EXISTS IX_DpcEvents_RoutineTimestamp
+                               ON DpcEvents (Routine, TimestampUtc);
+
+                               CREATE INDEX IF NOT EXISTS IX_DpcEvents_ProcessorTimestamp
+                               ON DpcEvents (ProcessorNumber, TimestampUtc);
+
+                               CREATE TABLE IF NOT EXISTS InterruptEvents
+                               (
+                                   InterruptEventId INTEGER PRIMARY KEY,
+                                   TimestampUtc TEXT NOT NULL,
+                                   ProcessorNumber INTEGER NOT NULL,
+                                   EventId INTEGER NOT NULL,
+                                   Version INTEGER NOT NULL,
+                                   Opcode INTEGER NOT NULL,
+                                   InitialTime TEXT NULL,
+                                   Routine TEXT NULL,
+                                   ReturnValue INTEGER NULL
+                               );
+
+                               CREATE INDEX IF NOT EXISTS IX_InterruptEvents_RoutineTimestamp
+                               ON InterruptEvents (Routine, TimestampUtc);
+
+                               CREATE INDEX IF NOT EXISTS IX_InterruptEvents_ProcessorTimestamp
+                               ON InterruptEvents (ProcessorNumber, TimestampUtc);";
+                       command.ExecuteNonQuery();
             }
 
             EnsureEnergyEstimationEngineColumns(connection);
@@ -204,6 +291,10 @@ namespace WpfApp1
             _writeEnergyEstimationEngineCommand = CreateWriteEnergyEstimationEngineCommand(connection, transaction);
             _writeKernelAcpiCommand = CreateWriteKernelAcpiCommand(connection, transaction);
             _writeThreadEventCommand = CreateWriteThreadEventCommand(connection, transaction);
+            _writeCpuProfileSampleCommand = CreateWriteCpuProfileSampleCommand(connection, transaction);
+            _writeDpcCommand = CreateWriteDpcCommand(connection, transaction);
+            _writeInterruptCommand = CreateWriteInterruptCommand(connection, transaction);
+            _writeThreadLifetimeCommand = CreateWriteThreadLifetimeCommand(connection, transaction);
             _connection = connection;
             _transaction = transaction;
             _batchedWriteCount = 0;
@@ -271,6 +362,74 @@ namespace WpfApp1
             command.Parameters["$emiEnergy"].Value = data.EmiEnergy.ToString(CultureInfo.InvariantCulture);
             command.Parameters["$timeInMSec"].Value = data.TimeInMSec;
             command.Parameters["$npuEnergy"].Value = data.NpuEnergy.ToString(CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteCpuProfileSample(ProfileEventInfo data)
+        {
+            SqliteCommand command = _writeCpuProfileSampleCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$processorNumber"].Value = data.ProcessorNumber;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$instructionPointer"].Value = ToDbValue(ToHex(data.InstructionPointer));
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteThreadLifetime(
+            uint processId,
+            uint threadId,
+            DateTime startedAt,
+            DateTime endedAt,
+            DateTime? cpuStartedAt,
+            DateTime? cpuEndedAt,
+            long? cpuDurationTicks,
+            int contextSwitchCount,
+            bool isComplete,
+            string contextSwitchJson)
+        {
+            SqliteCommand command = _writeThreadLifetimeCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$processId"].Value = Convert.ToInt64(processId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(threadId, CultureInfo.InvariantCulture);
+            command.Parameters["$startedAtUtc"].Value = ToUtcTimestamp(startedAt);
+            command.Parameters["$endedAtUtc"].Value = ToUtcTimestamp(endedAt);
+            command.Parameters["$cpuStartedAtUtc"].Value = cpuStartedAt is null ? DBNull.Value : ToUtcTimestamp(cpuStartedAt.Value);
+            command.Parameters["$cpuEndedAtUtc"].Value = cpuEndedAt is null ? DBNull.Value : ToUtcTimestamp(cpuEndedAt.Value);
+            command.Parameters["$cpuDurationTicks"].Value = ToDbValue(cpuDurationTicks);
+            command.Parameters["$contextSwitchCount"].Value = contextSwitchCount;
+            command.Parameters["$isComplete"].Value = isComplete ? 1 : 0;
+            command.Parameters["$contextSwitchJson"].Value = contextSwitchJson;
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteDpc(DpcEventInfo data)
+        {
+            SqliteCommand command = _writeDpcCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$processorNumber"].Value = data.ProcessorNumber;
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$initialTime"].Value = ToDbValue(ToHex(data.InitialTime));
+            command.Parameters["$routine"].Value = ToDbValue(ToHex(data.Routine));
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteInterrupt(InterruptEventInfo data)
+        {
+            SqliteCommand command = _writeInterruptCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$processorNumber"].Value = data.ProcessorNumber;
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$initialTime"].Value = ToDbValue(ToHex(data.InitialTime));
+            command.Parameters["$routine"].Value = ToDbValue(ToHex(data.Routine));
+            command.Parameters["$returnValue"].Value = ToDbValue(data.ReturnValue);
             command.ExecuteNonQuery();
             CommitWriteBatchIfNeeded();
         }
@@ -395,6 +554,14 @@ namespace WpfApp1
             _writeKernelAcpiCommand = null;
             _writeThreadEventCommand?.Dispose();
             _writeThreadEventCommand = null;
+            _writeCpuProfileSampleCommand?.Dispose();
+            _writeCpuProfileSampleCommand = null;
+            _writeDpcCommand?.Dispose();
+            _writeDpcCommand = null;
+            _writeInterruptCommand?.Dispose();
+            _writeInterruptCommand = null;
+            _writeThreadLifetimeCommand?.Dispose();
+            _writeThreadLifetimeCommand = null;
             _transaction?.Dispose();
             _transaction = null;
             _connection?.Dispose();
@@ -432,6 +599,10 @@ namespace WpfApp1
                 _writeEnergyEstimationEngineCommand,
                 _writeKernelAcpiCommand,
                 _writeThreadEventCommand,
+                _writeCpuProfileSampleCommand,
+                _writeDpcCommand,
+                _writeInterruptCommand,
+                _writeThreadLifetimeCommand,
             })
             {
                 if (command is not null)
@@ -502,6 +673,35 @@ namespace WpfApp1
             return command;
         }
 
+        private static SqliteCommand CreateWriteCpuProfileSampleCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO CpuProfileSamples
+                    (ProcessRecordId, TimestampUtc, ProcessorNumber, ProcessId, ThreadId, InstructionPointer)
+                  VALUES
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $timestampUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $timestampUtc, $processorNumber, $processId, $threadId, $instructionPointer
+                    );";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$processorNumber", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$instructionPointer", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
         private static SqliteCommand CreateWriteKernelAcpiCommand(SqliteConnection connection, SqliteTransaction transaction)
         {
             SqliteCommand command = connection.CreateCommand();
@@ -517,6 +717,81 @@ namespace WpfApp1
             command.Parameters.Add("$opcode", SqliteType.Integer);
             command.Parameters.Add("$processId", SqliteType.Integer);
             command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteDpcCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO DpcEvents
+                    (TimestampUtc, ProcessorNumber, EventId, Version, Opcode, InitialTime, Routine)
+                  VALUES
+                    ($timestampUtc, $processorNumber, $eventId, $version, $opcode, $initialTime, $routine);";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$processorNumber", SqliteType.Integer);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$initialTime", SqliteType.Text);
+            command.Parameters.Add("$routine", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteThreadLifetimeCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO ThreadLifetimes
+                    (ProcessRecordId, ProcessId, ThreadId, StartedAtUtc, EndedAtUtc, CpuStartedAtUtc, CpuEndedAtUtc, CpuDurationTicks, ContextSwitchCount, IsComplete, ContextSwitchJson)
+                  VALUES
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $startedAtUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $startedAtUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $processId, $threadId, $startedAtUtc, $endedAtUtc, $cpuStartedAtUtc, $cpuEndedAtUtc, $cpuDurationTicks, $contextSwitchCount, $isComplete, $contextSwitchJson
+                    );";
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$startedAtUtc", SqliteType.Text);
+            command.Parameters.Add("$endedAtUtc", SqliteType.Text);
+            command.Parameters.Add("$cpuStartedAtUtc", SqliteType.Text);
+            command.Parameters.Add("$cpuEndedAtUtc", SqliteType.Text);
+            command.Parameters.Add("$cpuDurationTicks", SqliteType.Integer);
+            command.Parameters.Add("$contextSwitchCount", SqliteType.Integer);
+            command.Parameters.Add("$isComplete", SqliteType.Integer);
+            command.Parameters.Add("$contextSwitchJson", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteInterruptCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO InterruptEvents
+                    (TimestampUtc, ProcessorNumber, EventId, Version, Opcode, InitialTime, Routine, ReturnValue)
+                  VALUES
+                    ($timestampUtc, $processorNumber, $eventId, $version, $opcode, $initialTime, $routine, $returnValue);";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$processorNumber", SqliteType.Integer);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$initialTime", SqliteType.Text);
+            command.Parameters.Add("$routine", SqliteType.Text);
+            command.Parameters.Add("$returnValue", SqliteType.Integer);
             command.Prepare();
             return command;
         }

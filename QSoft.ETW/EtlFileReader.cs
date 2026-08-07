@@ -615,6 +615,8 @@ public sealed class ProfileEventInfo
 {
     public required DateTime Timestamp { get; init; }
     public required byte ProcessorNumber { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
@@ -1264,6 +1266,10 @@ public sealed class EtlFileReader
                     this.EnergyEstimationEngine_37.Invoke(in e3_37value);
                 }
             }
+            else
+            {
+
+            }
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
         {
@@ -1732,6 +1738,8 @@ public sealed class EtlFileReader
         {
             Timestamp = timestamp,
             ProcessorNumber = processorNumber,
+            ProcessId = header.ProcessId,
+            ThreadId = header.ThreadId,
             EventId = header.EventDescriptor.Id,
             Version = header.EventDescriptor.Version,
             Opcode = header.EventDescriptor.Opcode,

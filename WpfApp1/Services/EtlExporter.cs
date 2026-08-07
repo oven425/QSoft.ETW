@@ -1,4 +1,5 @@
 using QSoft.ETW;
+using System.Text.Json;
 using WpfApp1.Models;
 
 namespace WpfApp1.Services;
@@ -38,12 +39,14 @@ internal class SQLiteExport(DataBase_SQLite db)
         m_ThreadStartedAts.Clear();
         m_ThreadProcessIds.Clear();
         m_ProcessThreadCpuSummaries.Clear();
+        m_LastEventTimestamp = null;
         UnmatchedCpuIntervalCount = 0;
         IncompleteCpuIntervalCount = 0;
     }
 
     protected virtual void CompleteExport()
     {
+        WriteIncompleteThreadLifetimes();
         db.Complete();
     }
 
@@ -56,9 +59,11 @@ internal class SQLiteExport(DataBase_SQLite db)
     private readonly Dictionary<uint, DateTime> m_ThreadStartedAts = [];
     private readonly Dictionary<uint, uint> m_ThreadProcessIds = [];
     private readonly Dictionary<uint, List<ThreadCpuSummary>> m_ProcessThreadCpuSummaries = [];
+    private DateTime? m_LastEventTimestamp;
 
     protected virtual void OnThreadCSwitch(in CSwitchEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
         //db.WriteContextSwitchEvent(in data);
         if (m_ThreadCSwitchs.TryGetValue(data.OldThreadId, out List<CSwitchEventInfo>? threadCSwitchs))
         {
@@ -73,14 +78,19 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void OnDpc(in DpcEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteDpc(data);
     }
 
     protected virtual void OnIsr(in InterruptEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteInterrupt(data);
     }
 
     protected virtual void OnThreadStart(in ThreadStartStopEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
         db.WriteThreadEvent(in data);
         m_ThreadCSwitchs[data.ThreadId] = [];
         m_ThreadStartedAts[data.ThreadId] = data.Timestamp;
@@ -89,6 +99,7 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void OnThreadStop(in ThreadStartStopEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
         m_ThreadCSwitchs.Remove(data.ThreadId, out List<CSwitchEventInfo>? threadCSwitchs);
         bool hasThreadStartedAt = m_ThreadStartedAts.Remove(data.ThreadId, out DateTime threadStartedAt);
         m_ThreadProcessIds.Remove(data.ThreadId);
@@ -110,16 +121,30 @@ internal class SQLiteExport(DataBase_SQLite db)
             cpuSummary?.StartedAt,
             cpuSummary?.EndedAt,
             cpuSummary?.DurationTicks);
+
+        if (hasThreadStartedAt)
+        {
+            WriteThreadLifetime(
+                data.ProcessId,
+                data.ThreadId,
+                threadStartedAt,
+                data.Timestamp,
+                cpuSummary,
+                threadCSwitchs,
+                isComplete: true);
+        }
     }
 
     protected virtual void OnProcessStart(ProcessInfo process)
     {
+        TrackEventTimestamp(process.StartTime);
         db.WriteProcessStart(process);
     }
 
     protected virtual void OnProcessStop(ProcessInfo process)
     {
         DateTime processStoppedAt = process.EndTime ?? throw new InvalidOperationException("程序結束事件未提供結束時間。");
+        TrackEventTimestamp(processStoppedAt);
         List<uint> activeThreadIds = [];
         foreach ((uint threadId, uint processId) in m_ThreadProcessIds)
         {
@@ -135,14 +160,29 @@ internal class SQLiteExport(DataBase_SQLite db)
             bool hasThreadStartedAt = m_ThreadStartedAts.Remove(threadId, out DateTime threadStartedAt);
             m_ThreadProcessIds.Remove(threadId);
 
-            if (threadCSwitchs is not null &&
-                CreateCpuSummary(
+            ThreadCpuSummary? threadCpuSummary = threadCSwitchs is null
+                ? null
+                : CreateCpuSummary(
                     threadId,
                     hasThreadStartedAt ? threadStartedAt : null,
                     processStoppedAt,
-                    threadCSwitchs) is ThreadCpuSummary summary)
+                    threadCSwitchs);
+
+            if (threadCpuSummary is ThreadCpuSummary summary)
             {
                 AddProcessThreadCpuSummary(process.ProcessId, summary);
+            }
+
+            if (hasThreadStartedAt)
+            {
+                WriteThreadLifetime(
+                    process.ProcessId,
+                    threadId,
+                    threadStartedAt,
+                    processStoppedAt,
+                    threadCpuSummary,
+                    threadCSwitchs,
+                    isComplete: false);
             }
         }
 
@@ -153,36 +193,42 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void OnImageLoad(in ImageLoadEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
         db.WriteImageLoad(data);
     }
 
     protected virtual void OnImageUnload(in ImageLoadEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
         db.WriteImageUnLoad(data);
     }
 
     protected virtual void OnWmiActivity(in WmiActivityEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
         db.WriteWmiActivity(in data);
     }
 
 
     protected virtual void OnKernelAcpi(KernelAcpiEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
         db.WriteKernelAcpi(data);
     }
 
     protected virtual void OnProfile(ProfileEventInfo data)
     {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteCpuProfileSample(data);
     }
 
     private void Attach(EtlFileReader reader)
     {
         reader.ThreadCSwitch += OnThreadCSwitch;
-        ////reader.PerfInfoThreadedDPC += OnDpc;
-        ////reader.PerfInfoDPC += OnDpc;
-        ////reader.PerfInfoTimerDPC += OnDpc;
-        ////reader.PerfInfoISR += OnIsr;
+        reader.PerfInfoThreadedDPC += OnDpc;
+        reader.PerfInfoDPC += OnDpc;
+        reader.PerfInfoTimerDPC += OnDpc;
+        reader.PerfInfoISR += OnIsr;
         reader.ThreadStart += OnThreadStart;
         reader.ThreadStop += OnThreadStop;
         reader.ThreadDCStart += OnThreadStart;
@@ -196,21 +242,22 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.KernelAcpi += OnKernelAcpi;
         ////reader.ImageDCStart += OnImageLoad;
         ////reader.ImageDCStop += OnImageUnload;
-        ////reader.PerfInfoProfile += OnProfile;
+        reader.PerfInfoProfile += OnProfile;
     }
 
     private void OnEnergyEstimationEngine_37(in EnergyEstimationEngineEventInfo_37 data)
     {
+        TrackEventTimestamp(data.Timestamp);
         db.WriteEnergyEstimationEngine(in data);
     }
 
     private void Detach(EtlFileReader reader)
     {
         reader.ThreadCSwitch -= OnThreadCSwitch;
-        //reader.PerfInfoThreadedDPC -= OnDpc;
-        //reader.PerfInfoDPC -= OnDpc;
-        //reader.PerfInfoTimerDPC -= OnDpc;
-        //reader.PerfInfoISR -= OnIsr;
+        reader.PerfInfoThreadedDPC -= OnDpc;
+        reader.PerfInfoDPC -= OnDpc;
+        reader.PerfInfoTimerDPC -= OnDpc;
+        reader.PerfInfoISR -= OnIsr;
         reader.ThreadStart -= OnThreadStart;
         reader.ThreadStop -= OnThreadStop;
         reader.ThreadDCStart -= OnThreadStart;
@@ -224,7 +271,75 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.KernelAcpi -= OnKernelAcpi;
         //reader.ImageDCStart -= OnImageLoad;
         //reader.ImageDCStop -= OnImageUnload;
-        //reader.PerfInfoProfile -= OnProfile;
+        reader.PerfInfoProfile -= OnProfile;
+    }
+
+    private void WriteIncompleteThreadLifetimes()
+    {
+        List<(uint ThreadId, uint ProcessId)> activeThreads = [];
+        foreach ((uint threadId, uint processId) in m_ThreadProcessIds)
+        {
+            activeThreads.Add((threadId, processId));
+        }
+
+        foreach ((uint threadId, uint processId) in activeThreads)
+        {
+            m_ThreadCSwitchs.Remove(threadId, out List<CSwitchEventInfo>? threadCSwitchs);
+            bool hasThreadStartedAt = m_ThreadStartedAts.Remove(threadId, out DateTime threadStartedAt);
+            m_ThreadProcessIds.Remove(threadId);
+
+            if (!hasThreadStartedAt)
+            {
+                continue;
+            }
+
+            DateTime endedAt = m_LastEventTimestamp is DateTime lastEventTimestamp && lastEventTimestamp >= threadStartedAt
+                ? lastEventTimestamp
+                : threadStartedAt;
+            ThreadCpuSummary? cpuSummary = threadCSwitchs is null
+                ? null
+                : CreateCpuSummary(threadId, threadStartedAt, endedAt, threadCSwitchs);
+
+            WriteThreadLifetime(
+                processId,
+                threadId,
+                threadStartedAt,
+                endedAt,
+                cpuSummary,
+                threadCSwitchs,
+                isComplete: false);
+        }
+    }
+
+    private void WriteThreadLifetime(
+        uint processId,
+        uint threadId,
+        DateTime startedAt,
+        DateTime endedAt,
+        ThreadCpuSummary? cpuSummary,
+        List<CSwitchEventInfo>? threadCSwitchs,
+        bool isComplete)
+    {
+        db.WriteThreadLifetime(
+            processId,
+            threadId,
+            startedAt,
+            endedAt,
+            cpuSummary?.StartedAt,
+            cpuSummary?.EndedAt,
+            cpuSummary?.DurationTicks,
+            threadCSwitchs?.Count ?? 0,
+            isComplete,
+            "");
+            //JsonSerializer.Serialize(threadCSwitchs ?? []));
+    }
+
+    private void TrackEventTimestamp(DateTime timestamp)
+    {
+        if (m_LastEventTimestamp is null || timestamp > m_LastEventTimestamp)
+        {
+            m_LastEventTimestamp = timestamp;
+        }
     }
 
 
