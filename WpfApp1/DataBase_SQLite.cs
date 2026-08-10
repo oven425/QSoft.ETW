@@ -3,6 +3,7 @@ using QSoft.ETW;
 using System;
 using System.Globalization;
 using System.IO;
+using WpfApp1.Analysis;
 
 namespace WpfApp1
 {
@@ -635,6 +636,7 @@ namespace WpfApp1
             CommitWriteBatchIfNeeded();
             return threadEventId;
         }
+
 
         public void Complete()
         {

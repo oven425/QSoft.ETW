@@ -1,4 +1,7 @@
 using QSoft.ETW;
+using System.Globalization;
+using System.IO;
+using System.Text;
 using System.Text.Json;
 using WpfApp1.Models;
 
@@ -35,6 +38,7 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void BeginExport(string etlPath)
     {
+        CloseCSwitchCsvWriter(deleteFile: true);
         m_ThreadCSwitchs.Clear();
         m_ThreadStartedAts.Clear();
         m_ThreadProcessIds.Clear();
@@ -42,29 +46,45 @@ internal class SQLiteExport(DataBase_SQLite db)
         m_LastEventTimestamp = null;
         UnmatchedCpuIntervalCount = 0;
         IncompleteCpuIntervalCount = 0;
+
+        m_CSwitchCsvPath = Path.ChangeExtension(etlPath, ".cswitch.csv");
+        FileStream stream = new(m_CSwitchCsvPath, FileMode.Create, FileAccess.Write, FileShare.Read, 64 * 1024, FileOptions.SequentialScan);
+        m_CSwitchCsvWriter = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 64 * 1024);
+        m_CSwitchCsvWriter.WriteLine("TimestampUtc,ProcessorNumber,NewThreadId,OldThreadId,NewProcessId,OldProcessId,NewThreadPriority,OldThreadPriority,PreviousCState,OldThreadWaitReason,OldThreadWaitMode,OldThreadState,OldThreadWaitIdealProcessor,NewThreadWaitTime");
     }
 
     protected virtual void CompleteExport()
     {
         WriteIncompleteThreadLifetimes();
+        m_CSwitchCsvWriter?.Flush();
         db.Complete();
+        CloseCSwitchCsvWriter(deleteFile: false);
     }
 
     protected virtual void FailExport()
     {
-        db.Fail();
+        try
+        {
+            db.Fail();
+        }
+        finally
+        {
+            CloseCSwitchCsvWriter(deleteFile: true);
+        }
     }
 
     private readonly Dictionary<uint, List<CSwitchEventInfo>> m_ThreadCSwitchs = [];
     private readonly Dictionary<uint, DateTime> m_ThreadStartedAts = [];
     private readonly Dictionary<uint, uint> m_ThreadProcessIds = [];
     private readonly Dictionary<uint, List<ThreadCpuSummary>> m_ProcessThreadCpuSummaries = [];
+    private StreamWriter? m_CSwitchCsvWriter;
+    private string? m_CSwitchCsvPath;
     private DateTime? m_LastEventTimestamp;
 
     protected virtual void OnThreadCSwitch(in CSwitchEventInfo data)
     {
         TrackEventTimestamp(data.Timestamp);
-        //db.WriteContextSwitchEvent(in data);
+        WriteCSwitchCsvRow(data);
         if (m_ThreadCSwitchs.TryGetValue(data.OldThreadId, out List<CSwitchEventInfo>? threadCSwitchs))
         {
             threadCSwitchs.Add(data);
@@ -74,6 +94,51 @@ internal class SQLiteExport(DataBase_SQLite db)
         {
             threadCSwitchs1.Add(data);
         }
+    }
+
+    private void WriteCSwitchCsvRow(in CSwitchEventInfo data)
+    {
+        StreamWriter writer = m_CSwitchCsvWriter ?? throw new InvalidOperationException("CSwitch CSV 寫出器尚未初始化。");
+        writer.Write(data.Timestamp.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        writer.Write(',');
+        writer.Write(data.ProcessorNumber);
+        writer.Write(',');
+        writer.Write(data.NewThreadId);
+        writer.Write(',');
+        writer.Write(data.OldThreadId);
+        writer.Write(',');
+        writer.Write(data.NewProcessId?.ToString(CultureInfo.InvariantCulture));
+        writer.Write(',');
+        writer.Write(data.OldProcessId?.ToString(CultureInfo.InvariantCulture));
+        writer.Write(',');
+        writer.Write(data.NewThreadPriority);
+        writer.Write(',');
+        writer.Write(data.OldThreadPriority);
+        writer.Write(',');
+        writer.Write(data.PreviousCState);
+        writer.Write(',');
+        writer.Write(data.OldThreadWaitReason);
+        writer.Write(',');
+        writer.Write(data.OldThreadWaitMode);
+        writer.Write(',');
+        writer.Write(data.OldThreadState);
+        writer.Write(',');
+        writer.Write(data.OldThreadWaitIdealProcessor);
+        writer.Write(',');
+        writer.WriteLine(data.NewThreadWaitTime);
+    }
+
+    private void CloseCSwitchCsvWriter(bool deleteFile)
+    {
+        m_CSwitchCsvWriter?.Dispose();
+        m_CSwitchCsvWriter = null;
+
+        if (deleteFile && m_CSwitchCsvPath is string csvPath && File.Exists(csvPath))
+        {
+            File.Delete(csvPath);
+        }
+
+        m_CSwitchCsvPath = null;
     }
 
     protected virtual void OnDpc(in DpcEventInfo data)
