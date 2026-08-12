@@ -647,16 +647,6 @@ public readonly record struct ImageLoadEventInfo
     public string FileName { get; init; }
 }
 
-public readonly record struct EnergyEstimationEngineEventInfo
-{
-    public required DateTime Timestamp { get; init; }
-    public required ushort EventId { get; init; }
-    public required byte Version { get; init; }
-    public required byte Opcode { get; init; }
-    public required uint ProcessId { get; init; }
-    public required uint ThreadId { get; init; }
-}
-
 public readonly record struct EnergyEstimationEngineEventInfo_37
 {
     public required DateTime Timestamp { get; init; }
@@ -692,8 +682,6 @@ public readonly record struct EnergyEstimationEngineEventInfo_33
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
-    public required uint ProcessId { get; init; }
-    public required uint ThreadId { get; init; }
     public uint SruWorkItemType { get; init; }
     public uint ProviderState { get; init; }
     public uint DeviceState { get; init; }
@@ -708,8 +696,6 @@ public readonly record struct EnergyEstimationEngineEventInfo_14
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
-    public required uint ProcessId { get; init; }
-    public required uint ThreadId { get; init; }
     public uint CpuId { get; init; }
     public byte CurrentFrequency { get; init; }
     public byte LastBusyFrequency { get; init; }
@@ -723,8 +709,6 @@ public readonly record struct EnergyEstimationEngineEventInfo_18
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
-    public required uint ProcessId { get; init; }
-    public required uint ThreadId { get; init; }
     public uint Component { get; init; }
     public ulong EnergyDelta { get; init; }
 }
@@ -1118,9 +1102,6 @@ public sealed class EtlFileReader
     public event ImageLoadEventHandler? ImageUnload;
     public event ImageLoadEventHandler? ImageDCStart;
     public event ImageLoadEventHandler? ImageDCStop;
-
-    public delegate void EnergyEstimationEngineEventHandler(in EnergyEstimationEngineEventInfo data);
-    public event EnergyEstimationEngineEventHandler? EnergyEstimationEngine;
 
     public delegate void KernelAcpiEventHandler(KernelAcpiEventInfo data);
     public event KernelAcpiEventHandler? KernelAcpi;
@@ -1643,8 +1624,6 @@ public sealed class EtlFileReader
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
-            ProcessId = eventRecordPtr->EventHeader.ProcessId,
-            ThreadId = eventRecordPtr->EventHeader.ThreadId,
             SruWorkItemType = GetRawProperty<uint>(eventRecordPtr, "SruWorkItemType", cache),
             ProviderState = GetRawProperty<uint>(eventRecordPtr, "ProviderState", cache),
             DeviceState = GetRawProperty<uint>(eventRecordPtr, "DeviceState", cache),
@@ -1659,8 +1638,6 @@ public sealed class EtlFileReader
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
-            ProcessId = eventRecordPtr->EventHeader.ProcessId,
-            ThreadId = eventRecordPtr->EventHeader.ThreadId,
             CpuId = GetRawProperty<uint>(eventRecordPtr, "CpuId", cache),
             CurrentFrequency = GetRawProperty<byte>(eventRecordPtr, "CurrentFrequency", cache),
             LastBusyFrequency = GetRawProperty<byte>(eventRecordPtr, "LastBusyFrequency", cache),
@@ -1676,45 +1653,8 @@ public sealed class EtlFileReader
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
-            ProcessId = eventRecordPtr->EventHeader.ProcessId,
-            ThreadId = eventRecordPtr->EventHeader.ThreadId,
             Component = GetRawProperty<uint>(eventRecordPtr, "Component", cache),
             EnergyDelta = GetRawProperty<ulong>(eventRecordPtr, "EnergyDelta", cache),
-        };
-    }
-    private unsafe EnergyEstimationEngineEventInfo? ParseEnergyEstimationEnginePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
-    {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
-        
-        //var dic = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
-        //var ss = dic.Select(x => $"{x.Key}:{x.Value}");
-        //System.Diagnostics.Trace.WriteLine(string.Join(',', ss));
-
-        byte[]? energyBytes = GetRawProperty(eventRecordPtr, "Energy");
-        if (energyBytes is null || energyBytes.Length != sizeof(ulong))
-        {
-            return null;
-        }
-
-        uint processId = eventRecordPtr->EventHeader.ProcessId;
-        byte[]? processIdBytes = GetRawProperty(eventRecordPtr, "ProcessId");
-        if (processIdBytes is { Length: sizeof(uint) })
-        {
-            processId = BinaryPrimitives.ReadUInt32LittleEndian(processIdBytes);
-        }
-
-        ulong energy = BinaryPrimitives.ReadUInt64LittleEndian(energyBytes);
-        return new EnergyEstimationEngineEventInfo
-        {
-            Timestamp = timestamp,
-            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
-            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
-            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
-            ProcessId = processId,
-            ThreadId = eventRecordPtr->EventHeader.ThreadId,
         };
     }
 

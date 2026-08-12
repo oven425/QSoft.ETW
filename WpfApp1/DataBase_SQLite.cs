@@ -135,17 +135,17 @@ namespace WpfApp1
                            ThreadId INTEGER NOT NULL,
                            AppName TEXT NOT NULL,
                            UserId INTEGER NOT NULL,
-                           CpuEnergy TEXT NOT NULL,
-                           GpuEnergy TEXT NOT NULL,
-                           DisplayEnergy TEXT NOT NULL,
-                           DiskEnergy TEXT NOT NULL,
-                           NetworkEnergy TEXT NOT NULL,
-                           MbbEnergy TEXT NOT NULL,
-                           LossEnergy TEXT NOT NULL,
-                           OtherEnergy TEXT NOT NULL,
-                           EmiEnergy TEXT NOT NULL,
+                           CpuEnergy INTEGER NOT NULL,
+                           GpuEnergy INTEGER NOT NULL,
+                           DisplayEnergy INTEGER NOT NULL,
+                           DiskEnergy INTEGER NOT NULL,
+                           NetworkEnergy INTEGER NOT NULL,
+                           MbbEnergy INTEGER NOT NULL,
+                           LossEnergy INTEGER NOT NULL,
+                           OtherEnergy INTEGER NOT NULL,
+                           EmiEnergy INTEGER NOT NULL,
                            TimeInMSec INTEGER NOT NULL,
-                           NpuEnergy TEXT NOT NULL
+                           NpuEnergy INTEGER NOT NULL
                        );
 
                        CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngineEvents_ProcessTimestamp
@@ -154,65 +154,47 @@ namespace WpfApp1
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_33
                        (
                            EnergyEstimationEngine_33Id INTEGER PRIMARY KEY,
-                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
                            TimestampUtc TEXT NOT NULL,
                            EventId INTEGER NOT NULL,
                            Version INTEGER NOT NULL,
                            Opcode INTEGER NOT NULL,
-                           ProcessId INTEGER NOT NULL,
-                           ThreadId INTEGER NOT NULL,
                            SruWorkItemType INTEGER NOT NULL,
                            ProviderState INTEGER NOT NULL,
                            DeviceState INTEGER NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_33_ProcessTimestamp
-                       ON EnergyEstimationEngine_33 (ProcessId, TimestampUtc);
-
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_33_ProcessRecord
-                       ON EnergyEstimationEngine_33 (ProcessRecordId, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_33_Timestamp
+                       ON EnergyEstimationEngine_33 (TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_18
                        (
                            EnergyEstimationEngine_18Id INTEGER PRIMARY KEY,
-                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
                            TimestampUtc TEXT NOT NULL,
                            EventId INTEGER NOT NULL,
                            Version INTEGER NOT NULL,
                            Opcode INTEGER NOT NULL,
-                           ProcessId INTEGER NOT NULL,
-                           ThreadId INTEGER NOT NULL,
                            Component INTEGER NOT NULL,
                            EnergyDelta TEXT NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_18_ProcessTimestamp
-                       ON EnergyEstimationEngine_18 (ProcessId, TimestampUtc);
-
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_18_ProcessRecord
-                       ON EnergyEstimationEngine_18 (ProcessRecordId, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_18_Timestamp
+                       ON EnergyEstimationEngine_18 (TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_14
                        (
                            EnergyEstimationEngine_14Id INTEGER PRIMARY KEY,
-                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
                            TimestampUtc TEXT NOT NULL,
                            EventId INTEGER NOT NULL,
                            Version INTEGER NOT NULL,
                            Opcode INTEGER NOT NULL,
-                           ProcessId INTEGER NOT NULL,
-                           ThreadId INTEGER NOT NULL,
                            CpuId INTEGER NOT NULL,
                            CurrentFrequency INTEGER NOT NULL,
                            LastBusyFrequency INTEGER NOT NULL,
                            Energy TEXT NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_14_ProcessTimestamp
-                       ON EnergyEstimationEngine_14 (ProcessId, TimestampUtc);
-
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_14_ProcessRecord
-                       ON EnergyEstimationEngine_14 (ProcessRecordId, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_14_Timestamp
+                       ON EnergyEstimationEngine_14 (TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS KernelAcpiEvents
                        (
@@ -345,6 +327,8 @@ namespace WpfApp1
             }
 
             EnsureEnergyEstimationEngineColumns(connection);
+            EnsureEnergyEstimationEngineEnergyColumnsAreIntegers(connection);
+            EnsureEnergyEstimationEngineTablesWithoutProcessColumns(connection);
             EnsureThreadEventColumns(connection);
             EnsureProcessColumns(connection);
             EnsureWmiActivityColumns(connection);
@@ -421,17 +405,17 @@ namespace WpfApp1
             command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
             command.Parameters["$appName"].Value = data.AppName ?? string.Empty;
             command.Parameters["$userId"].Value = data.UserId;
-            command.Parameters["$cpuEnergy"].Value = data.CpuEnergy.ToString(CultureInfo.InvariantCulture);
-            command.Parameters["$gpuEnergy"].Value = data.GpuEnergy.ToString(CultureInfo.InvariantCulture);
-            command.Parameters["$displayEnergy"].Value = data.DisplayEnergy.ToString(CultureInfo.InvariantCulture);
-            command.Parameters["$diskEnergy"].Value = data.DiskEnergy.ToString(CultureInfo.InvariantCulture);
-            command.Parameters["$networkEnergy"].Value = data.NetworkEnergy.ToString(CultureInfo.InvariantCulture);
-            command.Parameters["$mbbEnergy"].Value = data.MbbEnergy.ToString(CultureInfo.InvariantCulture);
-            command.Parameters["$lossEnergy"].Value = data.LossEnergy.ToString(CultureInfo.InvariantCulture);
-            command.Parameters["$otherEnergy"].Value = data.OtherEnergy.ToString(CultureInfo.InvariantCulture);
-            command.Parameters["$emiEnergy"].Value = data.EmiEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$cpuEnergy"].Value = checked((long)data.CpuEnergy);
+            command.Parameters["$gpuEnergy"].Value = checked((long)data.GpuEnergy);
+            command.Parameters["$displayEnergy"].Value = checked((long)data.DisplayEnergy);
+            command.Parameters["$diskEnergy"].Value = checked((long)data.DiskEnergy);
+            command.Parameters["$networkEnergy"].Value = checked((long)data.NetworkEnergy);
+            command.Parameters["$mbbEnergy"].Value = checked((long)data.MbbEnergy);
+            command.Parameters["$lossEnergy"].Value = checked((long)data.LossEnergy);
+            command.Parameters["$otherEnergy"].Value = checked((long)data.OtherEnergy);
+            command.Parameters["$emiEnergy"].Value = checked((long)data.EmiEnergy);
             command.Parameters["$timeInMSec"].Value = data.TimeInMSec;
-            command.Parameters["$npuEnergy"].Value = data.NpuEnergy.ToString(CultureInfo.InvariantCulture);
+            command.Parameters["$npuEnergy"].Value = checked((long)data.NpuEnergy);
             command.ExecuteNonQuery();
             CommitWriteBatchIfNeeded();
         }
@@ -443,8 +427,6 @@ namespace WpfApp1
             command.Parameters["$eventId"].Value = data.EventId;
             command.Parameters["$version"].Value = data.Version;
             command.Parameters["$opcode"].Value = data.Opcode;
-            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
             command.Parameters["$sruWorkItemType"].Value = data.SruWorkItemType;
             command.Parameters["$providerState"].Value = data.ProviderState;
             command.Parameters["$deviceState"].Value = data.DeviceState;
@@ -459,8 +441,6 @@ namespace WpfApp1
             command.Parameters["$eventId"].Value = data.EventId;
             command.Parameters["$version"].Value = data.Version;
             command.Parameters["$opcode"].Value = data.Opcode;
-            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
             command.Parameters["$component"].Value = data.Component;
             command.Parameters["$energyDelta"].Value = data.EnergyDelta.ToString(CultureInfo.InvariantCulture);
             command.ExecuteNonQuery();
@@ -474,8 +454,6 @@ namespace WpfApp1
             command.Parameters["$eventId"].Value = data.EventId;
             command.Parameters["$version"].Value = data.Version;
             command.Parameters["$opcode"].Value = data.Opcode;
-            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
             command.Parameters["$cpuId"].Value = data.CpuId;
             command.Parameters["$currentFrequency"].Value = data.CurrentFrequency;
             command.Parameters["$lastBusyFrequency"].Value = data.LastBusyFrequency;
@@ -941,17 +919,17 @@ namespace WpfApp1
             command.Parameters.Add("$threadId", SqliteType.Integer);
             command.Parameters.Add("$appName", SqliteType.Text);
             command.Parameters.Add("$userId", SqliteType.Integer);
-            command.Parameters.Add("$cpuEnergy", SqliteType.Text);
-            command.Parameters.Add("$gpuEnergy", SqliteType.Text);
-            command.Parameters.Add("$displayEnergy", SqliteType.Text);
-            command.Parameters.Add("$diskEnergy", SqliteType.Text);
-            command.Parameters.Add("$networkEnergy", SqliteType.Text);
-            command.Parameters.Add("$mbbEnergy", SqliteType.Text);
-            command.Parameters.Add("$lossEnergy", SqliteType.Text);
-            command.Parameters.Add("$otherEnergy", SqliteType.Text);
-            command.Parameters.Add("$emiEnergy", SqliteType.Text);
+            command.Parameters.Add("$cpuEnergy", SqliteType.Integer);
+            command.Parameters.Add("$gpuEnergy", SqliteType.Integer);
+            command.Parameters.Add("$displayEnergy", SqliteType.Integer);
+            command.Parameters.Add("$diskEnergy", SqliteType.Integer);
+            command.Parameters.Add("$networkEnergy", SqliteType.Integer);
+            command.Parameters.Add("$mbbEnergy", SqliteType.Integer);
+            command.Parameters.Add("$lossEnergy", SqliteType.Integer);
+            command.Parameters.Add("$otherEnergy", SqliteType.Integer);
+            command.Parameters.Add("$emiEnergy", SqliteType.Integer);
             command.Parameters.Add("$timeInMSec", SqliteType.Integer);
-            command.Parameters.Add("$npuEnergy", SqliteType.Text);
+            command.Parameters.Add("$npuEnergy", SqliteType.Integer);
             command.Prepare();
             return command;
         }
@@ -962,26 +940,13 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO EnergyEstimationEngine_33
-                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, SruWorkItemType, ProviderState, DeviceState)
+                    (TimestampUtc, EventId, Version, Opcode, SruWorkItemType, ProviderState, DeviceState)
                   VALUES
-                    (
-                        (
-                            SELECT ProcessRecordId
-                            FROM Processes
-                            WHERE ProcessId = $processId
-                              AND StartedAtUtc <= $timestampUtc
-                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
-                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
-                            LIMIT 1
-                        ),
-                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $sruWorkItemType, $providerState, $deviceState
-                    );";
+                    ($timestampUtc, $eventId, $version, $opcode, $sruWorkItemType, $providerState, $deviceState);";
             command.Parameters.Add("$timestampUtc", SqliteType.Text);
             command.Parameters.Add("$eventId", SqliteType.Integer);
             command.Parameters.Add("$version", SqliteType.Integer);
             command.Parameters.Add("$opcode", SqliteType.Integer);
-            command.Parameters.Add("$processId", SqliteType.Integer);
-            command.Parameters.Add("$threadId", SqliteType.Integer);
             command.Parameters.Add("$sruWorkItemType", SqliteType.Integer);
             command.Parameters.Add("$providerState", SqliteType.Integer);
             command.Parameters.Add("$deviceState", SqliteType.Integer);
@@ -995,26 +960,13 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO EnergyEstimationEngine_18
-                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, Component, EnergyDelta)
+                    (TimestampUtc, EventId, Version, Opcode, Component, EnergyDelta)
                   VALUES
-                    (
-                        (
-                            SELECT ProcessRecordId
-                            FROM Processes
-                            WHERE ProcessId = $processId
-                              AND StartedAtUtc <= $timestampUtc
-                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
-                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
-                            LIMIT 1
-                        ),
-                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $component, $energyDelta
-                    );";
+                    ($timestampUtc, $eventId, $version, $opcode, $component, $energyDelta);";
             command.Parameters.Add("$timestampUtc", SqliteType.Text);
             command.Parameters.Add("$eventId", SqliteType.Integer);
             command.Parameters.Add("$version", SqliteType.Integer);
             command.Parameters.Add("$opcode", SqliteType.Integer);
-            command.Parameters.Add("$processId", SqliteType.Integer);
-            command.Parameters.Add("$threadId", SqliteType.Integer);
             command.Parameters.Add("$component", SqliteType.Integer);
             command.Parameters.Add("$energyDelta", SqliteType.Text);
             command.Prepare();
@@ -1027,26 +979,13 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO EnergyEstimationEngine_14
-                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, CpuId, CurrentFrequency, LastBusyFrequency, Energy)
+                    (TimestampUtc, EventId, Version, Opcode, CpuId, CurrentFrequency, LastBusyFrequency, Energy)
                   VALUES
-                    (
-                        (
-                            SELECT ProcessRecordId
-                            FROM Processes
-                            WHERE ProcessId = $processId
-                              AND StartedAtUtc <= $timestampUtc
-                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
-                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
-                            LIMIT 1
-                        ),
-                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $cpuId, $currentFrequency, $lastBusyFrequency, $energy
-                    );";
+                    ($timestampUtc, $eventId, $version, $opcode, $cpuId, $currentFrequency, $lastBusyFrequency, $energy);";
             command.Parameters.Add("$timestampUtc", SqliteType.Text);
             command.Parameters.Add("$eventId", SqliteType.Integer);
             command.Parameters.Add("$version", SqliteType.Integer);
             command.Parameters.Add("$opcode", SqliteType.Integer);
-            command.Parameters.Add("$processId", SqliteType.Integer);
-            command.Parameters.Add("$threadId", SqliteType.Integer);
             command.Parameters.Add("$cpuId", SqliteType.Integer);
             command.Parameters.Add("$currentFrequency", SqliteType.Integer);
             command.Parameters.Add("$lastBusyFrequency", SqliteType.Integer);
@@ -1155,17 +1094,17 @@ namespace WpfApp1
             {
                 ("AppName", "TEXT NOT NULL DEFAULT ''"),
                 ("UserId", "INTEGER NOT NULL DEFAULT 0"),
-                ("CpuEnergy", "TEXT NOT NULL DEFAULT '0'"),
-                ("GpuEnergy", "TEXT NOT NULL DEFAULT '0'"),
-                ("DisplayEnergy", "TEXT NOT NULL DEFAULT '0'"),
-                ("DiskEnergy", "TEXT NOT NULL DEFAULT '0'"),
-                ("NetworkEnergy", "TEXT NOT NULL DEFAULT '0'"),
-                ("MbbEnergy", "TEXT NOT NULL DEFAULT '0'"),
-                ("LossEnergy", "TEXT NOT NULL DEFAULT '0'"),
-                ("OtherEnergy", "TEXT NOT NULL DEFAULT '0'"),
-                ("EmiEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("CpuEnergy", "INTEGER NOT NULL DEFAULT 0"),
+                ("GpuEnergy", "INTEGER NOT NULL DEFAULT 0"),
+                ("DisplayEnergy", "INTEGER NOT NULL DEFAULT 0"),
+                ("DiskEnergy", "INTEGER NOT NULL DEFAULT 0"),
+                ("NetworkEnergy", "INTEGER NOT NULL DEFAULT 0"),
+                ("MbbEnergy", "INTEGER NOT NULL DEFAULT 0"),
+                ("LossEnergy", "INTEGER NOT NULL DEFAULT 0"),
+                ("OtherEnergy", "INTEGER NOT NULL DEFAULT 0"),
+                ("EmiEnergy", "INTEGER NOT NULL DEFAULT 0"),
                 ("TimeInMSec", "INTEGER NOT NULL DEFAULT 0"),
-                ("NpuEnergy", "TEXT NOT NULL DEFAULT '0'"),
+                ("NpuEnergy", "INTEGER NOT NULL DEFAULT 0"),
             };
 
             foreach ((string name, string definition) in columns)
@@ -1183,6 +1122,111 @@ namespace WpfApp1
                 addColumnCommand.CommandText = $"ALTER TABLE EnergyEstimationEngineEvents ADD COLUMN {name} {definition};";
                 addColumnCommand.ExecuteNonQuery();
             }
+        }
+
+        private static void EnsureEnergyEstimationEngineEnergyColumnsAreIntegers(SqliteConnection connection)
+        {
+            using SqliteCommand columnTypeCommand = connection.CreateCommand();
+            columnTypeCommand.CommandText = "SELECT type FROM pragma_table_info('EnergyEstimationEngineEvents') WHERE name = 'CpuEnergy';";
+            string? columnType = columnTypeCommand.ExecuteScalar() as string;
+
+            if (string.Equals(columnType, "INTEGER", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            using SqliteTransaction transaction = connection.BeginTransaction();
+            using SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"CREATE TABLE EnergyEstimationEngineEvents_WithIntegerEnergy
+                  (
+                      EnergyEstimationEngineEventId INTEGER PRIMARY KEY,
+                      TimestampUtc TEXT NOT NULL,
+                      EventId INTEGER NOT NULL,
+                      Version INTEGER NOT NULL,
+                      Opcode INTEGER NOT NULL,
+                      ProcessId INTEGER NOT NULL,
+                      ThreadId INTEGER NOT NULL,
+                      AppName TEXT NOT NULL,
+                      UserId INTEGER NOT NULL,
+                      CpuEnergy INTEGER NOT NULL,
+                      GpuEnergy INTEGER NOT NULL,
+                      DisplayEnergy INTEGER NOT NULL,
+                      DiskEnergy INTEGER NOT NULL,
+                      NetworkEnergy INTEGER NOT NULL,
+                      MbbEnergy INTEGER NOT NULL,
+                      LossEnergy INTEGER NOT NULL,
+                      OtherEnergy INTEGER NOT NULL,
+                      EmiEnergy INTEGER NOT NULL,
+                      TimeInMSec INTEGER NOT NULL,
+                      NpuEnergy INTEGER NOT NULL
+                  );
+
+                  INSERT INTO EnergyEstimationEngineEvents_WithIntegerEnergy
+                  SELECT * FROM EnergyEstimationEngineEvents;
+
+                  DROP TABLE EnergyEstimationEngineEvents;
+
+                  ALTER TABLE EnergyEstimationEngineEvents_WithIntegerEnergy
+                  RENAME TO EnergyEstimationEngineEvents;
+
+                  CREATE INDEX IX_EnergyEstimationEngineEvents_ProcessTimestamp
+                  ON EnergyEstimationEngineEvents (ProcessId, TimestampUtc);";
+            command.ExecuteNonQuery();
+            transaction.Commit();
+        }
+
+        private static void EnsureEnergyEstimationEngineTablesWithoutProcessColumns(SqliteConnection connection)
+        {
+            RebuildEnergyEstimationEngineTableWithoutProcessColumns(
+                connection,
+                "EnergyEstimationEngine_33",
+                "EnergyEstimationEngine_33Id INTEGER PRIMARY KEY, TimestampUtc TEXT NOT NULL, EventId INTEGER NOT NULL, Version INTEGER NOT NULL, Opcode INTEGER NOT NULL, SruWorkItemType INTEGER NOT NULL, ProviderState INTEGER NOT NULL, DeviceState INTEGER NOT NULL",
+                "EnergyEstimationEngine_33Id, TimestampUtc, EventId, Version, Opcode, SruWorkItemType, ProviderState, DeviceState",
+                "IX_EnergyEstimationEngine_33_Timestamp");
+
+            RebuildEnergyEstimationEngineTableWithoutProcessColumns(
+                connection,
+                "EnergyEstimationEngine_18",
+                "EnergyEstimationEngine_18Id INTEGER PRIMARY KEY, TimestampUtc TEXT NOT NULL, EventId INTEGER NOT NULL, Version INTEGER NOT NULL, Opcode INTEGER NOT NULL, Component INTEGER NOT NULL, EnergyDelta TEXT NOT NULL",
+                "EnergyEstimationEngine_18Id, TimestampUtc, EventId, Version, Opcode, Component, EnergyDelta",
+                "IX_EnergyEstimationEngine_18_Timestamp");
+
+            RebuildEnergyEstimationEngineTableWithoutProcessColumns(
+                connection,
+                "EnergyEstimationEngine_14",
+                "EnergyEstimationEngine_14Id INTEGER PRIMARY KEY, TimestampUtc TEXT NOT NULL, EventId INTEGER NOT NULL, Version INTEGER NOT NULL, Opcode INTEGER NOT NULL, CpuId INTEGER NOT NULL, CurrentFrequency INTEGER NOT NULL, LastBusyFrequency INTEGER NOT NULL, Energy TEXT NOT NULL",
+                "EnergyEstimationEngine_14Id, TimestampUtc, EventId, Version, Opcode, CpuId, CurrentFrequency, LastBusyFrequency, Energy",
+                "IX_EnergyEstimationEngine_14_Timestamp");
+        }
+
+        private static void RebuildEnergyEstimationEngineTableWithoutProcessColumns(
+            SqliteConnection connection,
+            string tableName,
+            string columnDefinitions,
+            string retainedColumns,
+            string timestampIndexName)
+        {
+            using SqliteCommand columnExistsCommand = connection.CreateCommand();
+            columnExistsCommand.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{tableName}') WHERE name = 'ProcessId';";
+            if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
+            {
+                return;
+            }
+
+            string replacementTableName = $"{tableName}_WithoutProcessColumns";
+            using SqliteTransaction transaction = connection.BeginTransaction();
+            using SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                $"CREATE TABLE {replacementTableName} ({columnDefinitions});\n" +
+                $"INSERT INTO {replacementTableName} ({retainedColumns}) SELECT {retainedColumns} FROM {tableName};\n" +
+                $"DROP TABLE {tableName};\n" +
+                $"ALTER TABLE {replacementTableName} RENAME TO {tableName};\n" +
+                $"CREATE INDEX {timestampIndexName} ON {tableName} (TimestampUtc);";
+            command.ExecuteNonQuery();
+            transaction.Commit();
         }
 
         private static void EnsureThreadEventColumns(SqliteConnection connection)
