@@ -307,7 +307,6 @@ internal sealed class EtlReadResult
     public List<ProcessInfo> Processes { get; } = [];
     //public List<ThreadInfo> Threads { get; } = [];
     public List<ModuleInfo> UnmatchedModules { get; } = [];
-    public List<WmiActivityEventInfo> WmiActivityEvents { get; } = [];
     public List<EnergyEstimationEventInfo> EnergyEstimationEvents { get; } = [];
     public List<KernelAcpiEventInfo> KernelAcpiEvents { get; } = [];
     public List<KernelPowerEventInfo> KernelPowerEvents { get; } = [];
@@ -533,6 +532,8 @@ public readonly record struct WmiActivityEventInfo
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
     public string NamespaceName { get; init; }
+    public uint ClientProcessId { get; init;  }
+    public uint IntervalMs { get; init; }
     public string Operation { get; init; }
 
     //public required IReadOnlyDictionary<string, string> Properties { get; init; }
@@ -549,7 +550,7 @@ public sealed class KernelAcpiEventInfo
     //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
-internal sealed class KernelPowerEventInfo
+public sealed class KernelPowerEventInfo
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
@@ -1106,6 +1107,9 @@ public sealed class EtlFileReader
     public delegate void KernelAcpiEventHandler(KernelAcpiEventInfo data);
     public event KernelAcpiEventHandler? KernelAcpi;
 
+    public delegate void KernelPowerEventHandler(KernelPowerEventInfo data);
+    public event KernelPowerEventHandler? KernelPower;
+
     public delegate void WmiActivityEventHandler(in WmiActivityEventInfo data);
     public event WmiActivityEventHandler? WmiActivity;
 
@@ -1281,7 +1285,7 @@ public sealed class EtlFileReader
         //}
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.WmiActivityProviderGuid)
         {
-            WmiActivityEventInfo? wmiActivityEvent = ParseWmiActivityPayload(timestamp, eventRecordPtr);
+            WmiActivityEventInfo? wmiActivityEvent = ParseWmiActivityPayload(timestamp, eventRecordPtr, cache);
             if (wmiActivityEvent is { } wmiActivityEventValue)
             {
                 WmiActivity?.Invoke(in wmiActivityEventValue);
@@ -1328,10 +1332,11 @@ public sealed class EtlFileReader
             KernelAcpiEventInfo acpiEvent = ProcessKernelAcpiEvent(timestamp, in eventRecordPtr->EventHeader);
             KernelAcpi?.Invoke(acpiEvent);
         }
-        //else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
-        //{
-        //    var kernelpowerevt = ProcessKernelPowerEvent(timestamp, in eventRecordPtr->EventHeader);
-        //}
+        else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
+        {
+            KernelPowerEventInfo kernelPowerEvent = ProcessKernelPowerEvent(timestamp, in eventRecordPtr->EventHeader);
+            KernelPower?.Invoke(kernelPowerEvent);
+        }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.PowerMeterPollingProviderGuid)
         {
             var powerneter = ProcessPowerMeterPollingEvent(timestamp, eventRecordPtr, cache);
@@ -1415,26 +1420,25 @@ public sealed class EtlFileReader
         return m_Properties;
     }
 
-    private unsafe WmiActivityEventInfo? ParseWmiActivityPayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr)
+    private unsafe WmiActivityEventInfo? ParseWmiActivityPayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
         if (eventRecordPtr == null)
         {
             return null;
         }
-
-        ref EVENT_RECORD eventRecord = ref *eventRecordPtr;
-        CachedSchema? schema = GetOrAddCachedSchema(eventRecordPtr);
-
+        System.Diagnostics.Trace.WriteLine($"Id:{eventRecordPtr->EventHeader.EventDescriptor.Id} count:{schema.Properties.Count}");
         return new WmiActivityEventInfo
         {
             Timestamp = timestamp,
-            EventId = eventRecord.EventHeader.EventDescriptor.Id,
-            Version = eventRecord.EventHeader.EventDescriptor.Version,
-            Opcode = eventRecord.EventHeader.EventDescriptor.Opcode,
-            ProcessId = eventRecord.EventHeader.ProcessId,
-            ThreadId = eventRecord.EventHeader.ThreadId,
-            Operation = schema is null ? string.Empty : GetRawPropertyString(eventRecordPtr, "Operation", schema),
-            NamespaceName = schema is null ? string.Empty : GetRawPropertyString(eventRecordPtr, "NamespaceName", schema),
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            ClientProcessId = GetRawProperty<uint>(eventRecordPtr, "ClientProcessId", schema),
+            IntervalMs = GetRawProperty<uint>(eventRecordPtr, "IntervalMs", schema),
+            Operation = GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            NamespaceName = GetRawPropertyString(eventRecordPtr, "NamespaceName", schema),
         };
     }
 
@@ -1548,41 +1552,6 @@ public sealed class EtlFileReader
                 default:
                     return defaultvalue;
             }
-        }
-    }
-
-    private static unsafe byte[]? GetRawProperty(EVENT_RECORD* eventRecordPtr, string propertyName)
-    {
-        nint propertyNamePtr = Marshal.StringToCoTaskMemUni(propertyName);
-        try
-        {
-            PROPERTY_DATA_DESCRIPTOR descriptor = new()
-            {
-                PropertyName = (ulong)propertyNamePtr,
-                ArrayIndex = uint.MaxValue, // 取得非陣列屬性，或整個陣列
-            };
-
-            uint status = NativeMethods.TdhGetPropertySize(
-                eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
-
-            if (status != EtwNativeConstants.ERROR_SUCCESS)
-            {
-                return null;
-            }
-
-            byte[] rawValue = GC.AllocateUninitializedArray<byte>(checked((int)propertySize));
-
-            fixed (byte* rawValuePtr = rawValue)
-            {
-                status = NativeMethods.TdhGetProperty(
-                    eventRecordPtr, 0, 0, 1, &descriptor, propertySize, rawValuePtr);
-            }
-
-            return status == EtwNativeConstants.ERROR_SUCCESS ? rawValue : null;
-        }
-        finally
-        {
-            Marshal.FreeCoTaskMem(propertyNamePtr);
         }
     }
 
@@ -2380,101 +2349,6 @@ public sealed class EtlFileReader
         return metric;
     }
 
-    private void AnalyzeEnergyEstimationEvents(EtlReadResult result, EtlAnalysisResult analysis)
-    {
-        Dictionary<(uint? ProcessId, string ImageFileName), ProcessEnergySummary> summaries = [];
-        foreach (EnergyEstimationEventInfo energyEvent in result.EnergyEstimationEvents)
-        {
-            ProcessInfo? process = energyEvent.ProcessId is uint processId
-                ? FindProcessAtTime(result.Processes, processId, energyEvent.Timestamp)
-                : null;
-            string imageFileName = process?.ImageFileName ?? "<系統或未關聯>";
-            (uint? ProcessId, string ImageFileName) key = (energyEvent.ProcessId, imageFileName);
-            if (!summaries.TryGetValue(key, out ProcessEnergySummary? summary))
-            {
-                summary = new ProcessEnergySummary
-                {
-                    ProcessId = energyEvent.ProcessId,
-                    ImageFileName = imageFileName,
-                };
-                summaries.Add(key, summary);
-            }
-
-            if (process is null)
-            {
-                analysis.UnattributedEnergyEventCount++;
-            }
-
-            summary.EventCount++;
-            int recognizedMetricCount = 0;
-            foreach (string fieldName in energyEvent.Properties.Keys)
-            {
-                if (TryGetPowerMetric(energyEvent.Properties, fieldName, out PowerMetricKind kind, out double value))
-                {
-                    GetOrAddMetric(summary.Metrics, fieldName, kind).Add(value, energyEvent.Timestamp);
-                    recognizedMetricCount++;
-                }
-            }
-
-            if (recognizedMetricCount == 0)
-            {
-                analysis.EnergyEventsWithoutRecognizedMetrics++;
-            }
-        }
-
-        analysis.ProcessEnergySummaries.AddRange(summaries.Values
-            .OrderByDescending(summary => summary.Metrics.Values.Sum(metric => metric.SampleCount))
-            .ThenByDescending(summary => summary.EventCount));
-    }
-
-    private void AnalyzePowerMeterPollingEvents(EtlReadResult result, EtlAnalysisResult analysis)
-    {
-        //Dictionary<(ushort EventId, byte Version, byte Opcode, string FieldName), NumericMetricSummary> metrics = [];
-        //foreach (PowerMeterPollingEventInfo powerMeterEvent in result.PowerMeterPollingEvents)
-        //{
-        //    int recognizedMetricCount = 0;
-        //    foreach (string fieldName in powerMeterEvent.Properties.Keys)
-        //    {
-        //        if (!TryGetPowerMetric(powerMeterEvent.Properties, fieldName, out PowerMetricKind kind, out double value))
-        //        {
-        //            continue;
-        //        }
-
-        //        (ushort EventId, byte Version, byte Opcode, string FieldName) key =
-        //            (powerMeterEvent.EventId, powerMeterEvent.Version, powerMeterEvent.Opcode, fieldName);
-        //        if (!metrics.TryGetValue(key, out NumericMetricSummary? metric))
-        //        {
-        //            metric = new NumericMetricSummary
-        //            {
-        //                FieldName = fieldName,
-        //                Kind = kind,
-        //            };
-        //            metrics.Add(key, metric);
-        //        }
-
-        //        metric.Add(value, powerMeterEvent.Timestamp);
-        //        recognizedMetricCount++;
-        //    }
-
-        //    if (recognizedMetricCount == 0)
-        //    {
-        //        analysis.PowerMeterEventsWithoutRecognizedMetrics++;
-        //    }
-        //}
-
-        //analysis.PowerMeterMetricSummaries.AddRange(metrics
-        //    .OrderByDescending(pair => pair.Value.SampleCount)
-        //    .ThenBy(pair => pair.Key.EventId)
-        //    .ThenBy(pair => pair.Key.FieldName)
-        //    .Select(pair => new PowerMeterMetricSummary
-        //    {
-        //        EventId = pair.Key.EventId,
-        //        Version = pair.Key.Version,
-        //        Opcode = pair.Key.Opcode,
-        //        Metric = pair.Value,
-        //    }));
-    }
-
     private void AnalyzeProfileEvents(EtlReadResult result, EtlAnalysisResult analysis)
     {
         Dictionary<ulong, AddressSampleSummary> summaries = [];
@@ -2622,8 +2496,6 @@ public sealed class EtlFileReader
 
         AnalyzeCSwitchEvents(result, analysis);
         AnalyzeDiskIoEvents(result, analysis);
-        AnalyzeEnergyEstimationEvents(result, analysis);
-        AnalyzePowerMeterPollingEvents(result, analysis);
         AnalyzeProfileEvents(result, analysis);
         AnalyzeRoutineEvents(result, analysis);
 

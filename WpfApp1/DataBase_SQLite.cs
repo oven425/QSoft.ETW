@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 using QSoft.ETW;
 using System;
 using System.Globalization;
@@ -24,6 +24,7 @@ namespace WpfApp1
         private SqliteCommand? _writeEnergyEstimationCpuPowerCommand;
         private SqliteCommand? _writeEnergyEstimationEnergyDeltaCommand;
         private SqliteCommand? _writeKernelAcpiCommand;
+        private SqliteCommand? _writeKernelPowerCommand;
         private SqliteCommand? _writeThreadEventCommand;
         private SqliteCommand? _writeCpuProfileSampleCommand;
         private SqliteCommand? _writeDpcCommand;
@@ -210,6 +211,20 @@ namespace WpfApp1
                        CREATE INDEX IF NOT EXISTS IX_KernelAcpiEvents_ProcessTimestamp
                        ON KernelAcpiEvents (ProcessId, TimestampUtc);
 
+                       CREATE TABLE IF NOT EXISTS KernelPowerEvents
+                       (
+                           KernelPowerEventId INTEGER PRIMARY KEY,
+                           TimestampUtc TEXT NOT NULL,
+                           EventId INTEGER NOT NULL,
+                           Version INTEGER NOT NULL,
+                           Opcode INTEGER NOT NULL,
+                           ProcessId INTEGER NOT NULL,
+                           ThreadId INTEGER NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_KernelPowerEvents_ProcessTimestamp
+                       ON KernelPowerEvents (ProcessId, TimestampUtc);
+
                        CREATE TABLE IF NOT EXISTS ThreadEvents
                        (
                            ThreadEventId INTEGER PRIMARY KEY,
@@ -332,6 +347,7 @@ namespace WpfApp1
             EnsureThreadEventColumns(connection);
             EnsureProcessColumns(connection);
             EnsureWmiActivityColumns(connection);
+            EnsureKernelPowerEventColumns(connection);
 
             SqliteTransaction transaction = connection.BeginTransaction();
             _writeImageLoadCommand = CreateWriteImageLoadCommand(connection, transaction);
@@ -344,6 +360,7 @@ namespace WpfApp1
             _writeEnergyEstimationEnergyDeltaCommand = CreateWriteEnergyEstimationEnergyDeltaCommand(connection, transaction);
             _writeEnergyEstimationCpuPowerCommand = CreateWriteEnergyEstimationCpuPowerCommand(connection, transaction);
             _writeKernelAcpiCommand = CreateWriteKernelAcpiCommand(connection, transaction);
+            _writeKernelPowerCommand = CreateWriteKernelPowerCommand(connection, transaction);
             _writeThreadEventCommand = CreateWriteThreadEventCommand(connection, transaction);
             _writeCpuProfileSampleCommand = CreateWriteCpuProfileSampleCommand(connection, transaction);
             _writeDpcCommand = CreateWriteDpcCommand(connection, transaction);
@@ -371,6 +388,18 @@ namespace WpfApp1
         public void WriteKernelAcpi(KernelAcpiEventInfo data)
         {
             SqliteCommand command = _writeKernelAcpiCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+        }
+
+        public void WriteKernelPower(KernelPowerEventInfo data)
+        {
+            SqliteCommand command = _writeKernelPowerCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
             command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
             command.Parameters["$eventId"].Value = data.EventId;
             command.Parameters["$version"].Value = data.Version;
@@ -655,6 +684,8 @@ namespace WpfApp1
             _writeEnergyEstimationCpuPowerCommand = null;
             _writeKernelAcpiCommand?.Dispose();
             _writeKernelAcpiCommand = null;
+            _writeKernelPowerCommand?.Dispose();
+            _writeKernelPowerCommand = null;
             _writeThreadEventCommand?.Dispose();
             _writeThreadEventCommand = null;
             _writeCpuProfileSampleCommand?.Dispose();
@@ -704,6 +735,7 @@ namespace WpfApp1
                 _writeEnergyEstimationEnergyDeltaCommand,
                 _writeEnergyEstimationCpuPowerCommand,
                 _writeKernelAcpiCommand,
+                _writeKernelPowerCommand,
                 _writeThreadEventCommand,
                 _writeCpuProfileSampleCommand,
                 _writeDpcCommand,
@@ -823,6 +855,26 @@ namespace WpfApp1
             command.Parameters.Add("$opcode", SqliteType.Integer);
             command.Parameters.Add("$processId", SqliteType.Integer);
             command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteKernelPowerCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO KernelPowerEvents
+                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, PropertiesJson)
+                  VALUES
+                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $propertiesJson);";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$propertiesJson", SqliteType.Text);
             command.Prepare();
             return command;
         }
@@ -1278,6 +1330,19 @@ namespace WpfApp1
                 @"CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_ProcessRecord
                   ON WmiActivityEvents (ProcessRecordId, TimestampUtc);";
             createIndexCommand.ExecuteNonQuery();
+        }
+
+        private static void EnsureKernelPowerEventColumns(SqliteConnection connection)
+        {
+            using SqliteCommand columnExistsCommand = connection.CreateCommand();
+            columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('KernelPowerEvents') WHERE name = 'PropertiesJson';";
+
+            if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
+            {
+                using SqliteCommand addColumnCommand = connection.CreateCommand();
+                addColumnCommand.CommandText = "ALTER TABLE KernelPowerEvents ADD COLUMN PropertiesJson TEXT NULL;";
+                addColumnCommand.ExecuteNonQuery();
+            }
         }
 
         private static void EnsureProcessColumns(SqliteConnection connection)
