@@ -268,7 +268,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WriteImageUnLoad(data);
     }
 
-    protected virtual void OnWmiActivity(in WmiActivityEventInfo data)
+    protected virtual void OnWmiActivity_24(in WmiActivityEventInfo_24 data)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteWmiActivity(in data);
@@ -302,7 +302,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ProcessStop += OnProcessStop;
         reader.ImageLoad += OnImageLoad;
         reader.ImageUnload += OnImageUnload;
-        reader.WmiActivity += OnWmiActivity;
+        reader.WmiActivity_24 += OnWmiActivity_24;
         reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
         reader.EnergyEstimationEngine_14 += OnEnergyEstimationEngine_14;
         reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
@@ -350,11 +350,11 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ProcessStop -= OnProcessStop;
         reader.ImageLoad -= OnImageLoad;
         reader.ImageUnload -= OnImageUnload;
-        reader.WmiActivity -= OnWmiActivity;
+        reader.WmiActivity_24 -= OnWmiActivity_24;
         reader.EnergyEstimationEngine_37 -= OnEnergyEstimationEngine_37;
         reader.KernelAcpi -= OnKernelAcpi;
-        //reader.ImageDCStart -= OnImageLoad;
-        //reader.ImageDCStop -= OnImageUnload;
+        reader.ImageDCStart -= OnImageLoad;
+        reader.ImageDCStop -= OnImageUnload;
         reader.PerfInfoProfile -= OnProfile;
     }
 

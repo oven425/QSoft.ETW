@@ -102,7 +102,7 @@ namespace WpfApp1
                       CREATE INDEX IF NOT EXISTS IX_Processes_ActiveProcess
                        ON Processes (ProcessId, EndedAtUtc, StartedAtUtc DESC);
 
-                       CREATE TABLE IF NOT EXISTS WmiActivityEvents
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_24
                        (
                            WmiActivityEventId INTEGER PRIMARY KEY,
                            ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
@@ -112,18 +112,18 @@ namespace WpfApp1
                            Opcode INTEGER NOT NULL,
                            ProcessId INTEGER NOT NULL,
                            ThreadId INTEGER NOT NULL,
-                           Operation TEXT NOT NULL,
-                           NamespaceName TEXT NOT NULL
+                           NamespaceName TEXT NOT NULL,
+                           ClientProcessId INTEGER NULL,
+                           IntervalMs INTEGER NULL,
+                           Query TEXT NULL,
+                           GroupOperationId INTEGER NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_OperationTimestamp
-                       ON WmiActivityEvents (Operation, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_NamespaceTimestamp
+                        ON WmiActivityEvents_24 (NamespaceName, TimestampUtc);
 
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_NamespaceTimestamp
-                        ON WmiActivityEvents (NamespaceName, TimestampUtc);
-
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_ProcessRecord
-                       ON WmiActivityEvents (ProcessRecordId, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_ProcessRecord
+                       ON WmiActivityEvents_24 (ProcessRecordId, TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngineEvents
                        (
@@ -409,7 +409,7 @@ namespace WpfApp1
             command.ExecuteNonQuery();
         }
 
-        public void WriteWmiActivity(in WmiActivityEventInfo data)
+        public void WriteWmiActivity(in WmiActivityEventInfo_24 data)
         {
             SqliteCommand command = _writeWmiActivityCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
             command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
@@ -418,8 +418,11 @@ namespace WpfApp1
             command.Parameters["$opcode"].Value = data.Opcode;
             command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
             command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
-            command.Parameters["$operation"].Value = data.Operation;
-            command.Parameters["$namespaceName"].Value = data.NamespaceName;
+            command.Parameters["$namespaceName"].Value = ToDbValue(data.NamespaceName);
+            command.Parameters["$clientProcessId"].Value = Convert.ToInt64(data.ClientProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$intervalMs"].Value = Convert.ToInt64(data.IntervalMs, CultureInfo.InvariantCulture);
+            command.Parameters["$query"].Value = ToDbValue(data.Query);
+            command.Parameters["$groupOperationId"].Value = Convert.ToInt64(data.GroupOperationId, CultureInfo.InvariantCulture);
             command.ExecuteNonQuery();
         }
 
@@ -1051,8 +1054,8 @@ namespace WpfApp1
             SqliteCommand command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText =
-                @"INSERT INTO WmiActivityEvents
-                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, Operation, NamespaceName)
+                @"INSERT INTO WmiActivityEvents_24
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, NamespaceName, ClientProcessId, IntervalMs, Query, GroupOperationId)
                   VALUES
                     (
                         (
@@ -1064,7 +1067,7 @@ namespace WpfApp1
                             ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
                             LIMIT 1
                         ),
-                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $operation, $namespaceName
+                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $namespaceName, $clientProcessId, $intervalMs, $query, $groupOperationId
                     );";
             command.Parameters.Add("$timestampUtc", SqliteType.Text);
             command.Parameters.Add("$eventId", SqliteType.Integer);
@@ -1072,8 +1075,11 @@ namespace WpfApp1
             command.Parameters.Add("$opcode", SqliteType.Integer);
             command.Parameters.Add("$processId", SqliteType.Integer);
             command.Parameters.Add("$threadId", SqliteType.Integer);
-            command.Parameters.Add("$operation", SqliteType.Text);
             command.Parameters.Add("$namespaceName", SqliteType.Text);
+            command.Parameters.Add("$clientProcessId", SqliteType.Integer);
+            command.Parameters.Add("$intervalMs", SqliteType.Integer);
+            command.Parameters.Add("$query", SqliteType.Text);
+            command.Parameters.Add("$groupOperationId", SqliteType.Integer);
             command.Prepare();
             return command;
         }
@@ -1315,20 +1321,109 @@ namespace WpfApp1
 
         private static void EnsureWmiActivityColumns(SqliteConnection connection)
         {
+            using SqliteCommand legacyTableExistsCommand = connection.CreateCommand();
+            legacyTableExistsCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'WmiActivityEvents';";
+
+            using SqliteCommand newTableExistsCommand = connection.CreateCommand();
+            newTableExistsCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'WmiActivityEvents_24';";
+
+            bool legacyTableExists = Convert.ToInt64(legacyTableExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+            bool newTableExists = Convert.ToInt64(newTableExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+
+            if (legacyTableExists && !newTableExists)
+            {
+                // 舊版資料表名稱為 WmiActivityEvents，最新命名為 WmiActivityEvents_24，需先更名並移除舊索引。
+                using SqliteCommand renameTableCommand = connection.CreateCommand();
+                renameTableCommand.CommandText =
+                    @"ALTER TABLE WmiActivityEvents RENAME TO WmiActivityEvents_24;
+
+                      DROP INDEX IF EXISTS IX_WmiActivityEvents_OperationTimestamp;
+                      DROP INDEX IF EXISTS IX_WmiActivityEvents_NamespaceTimestamp;
+                      DROP INDEX IF EXISTS IX_WmiActivityEvents_ProcessRecord;";
+                renameTableCommand.ExecuteNonQuery();
+            }
+
             using SqliteCommand columnExistsCommand = connection.CreateCommand();
-            columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('WmiActivityEvents') WHERE name = 'ProcessRecordId';";
+            columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('WmiActivityEvents_24') WHERE name = 'ProcessRecordId';";
 
             if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
             {
                 using SqliteCommand addColumnCommand = connection.CreateCommand();
-                addColumnCommand.CommandText = "ALTER TABLE WmiActivityEvents ADD COLUMN ProcessRecordId INTEGER NULL;";
+                addColumnCommand.CommandText = "ALTER TABLE WmiActivityEvents_24 ADD COLUMN ProcessRecordId INTEGER NULL;";
                 addColumnCommand.ExecuteNonQuery();
             }
 
+            using SqliteCommand operationColumnExistsCommand = connection.CreateCommand();
+            operationColumnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('WmiActivityEvents_24') WHERE name = 'Operation';";
+
+            if (Convert.ToInt64(operationColumnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            {
+                // 舊版資料表含 Operation (NOT NULL) 欄位，最新事件定義已移除該欄位，需重建資料表結構。
+                using SqliteCommand rebuildCommand = connection.CreateCommand();
+                rebuildCommand.CommandText =
+                    @"ALTER TABLE WmiActivityEvents_24 RENAME TO WmiActivityEvents_24_Old;
+
+                      CREATE TABLE WmiActivityEvents_24
+                      (
+                          WmiActivityEventId INTEGER PRIMARY KEY,
+                          ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                          TimestampUtc TEXT NOT NULL,
+                          EventId INTEGER NOT NULL,
+                          Version INTEGER NOT NULL,
+                          Opcode INTEGER NOT NULL,
+                          ProcessId INTEGER NOT NULL,
+                          ThreadId INTEGER NOT NULL,
+                          NamespaceName TEXT NOT NULL,
+                          ClientProcessId INTEGER NULL,
+                          IntervalMs INTEGER NULL,
+                          Query TEXT NULL,
+                          GroupOperationId INTEGER NULL
+                      );
+
+                      INSERT INTO WmiActivityEvents_24
+                          (WmiActivityEventId, ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, NamespaceName)
+                      SELECT
+                          WmiActivityEventId, ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, NamespaceName
+                      FROM WmiActivityEvents_24_Old;
+
+                      DROP TABLE WmiActivityEvents_24_Old;";
+                rebuildCommand.ExecuteNonQuery();
+            }
+
+            (string Name, string Definition)[] wmiColumns =
+            {
+                ("ClientProcessId", "INTEGER NULL"),
+                ("IntervalMs", "INTEGER NULL"),
+                ("Query", "TEXT NULL"),
+                ("GroupOperationId", "INTEGER NULL"),
+            };
+
+            foreach ((string name, string definition) in wmiColumns)
+            {
+                using SqliteCommand wmiColumnExistsCommand = connection.CreateCommand();
+                wmiColumnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('WmiActivityEvents_24') WHERE name = $name;";
+                wmiColumnExistsCommand.Parameters.AddWithValue("$name", name);
+
+                if (Convert.ToInt64(wmiColumnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                {
+                    continue;
+                }
+
+                using SqliteCommand addWmiColumnCommand = connection.CreateCommand();
+                addWmiColumnCommand.CommandText = $"ALTER TABLE WmiActivityEvents_24 ADD COLUMN {name} {definition};";
+                addWmiColumnCommand.ExecuteNonQuery();
+            }
+
+            using SqliteCommand createNamespaceIndexCommand = connection.CreateCommand();
+            createNamespaceIndexCommand.CommandText =
+                @"CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_NamespaceTimestamp
+                  ON WmiActivityEvents_24 (NamespaceName, TimestampUtc);";
+            createNamespaceIndexCommand.ExecuteNonQuery();
+
             using SqliteCommand createIndexCommand = connection.CreateCommand();
             createIndexCommand.CommandText =
-                @"CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_ProcessRecord
-                  ON WmiActivityEvents (ProcessRecordId, TimestampUtc);";
+                @"CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_ProcessRecord
+                  ON WmiActivityEvents_24 (ProcessRecordId, TimestampUtc);";
             createIndexCommand.ExecuteNonQuery();
         }
 

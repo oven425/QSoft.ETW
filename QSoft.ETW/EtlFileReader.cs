@@ -523,7 +523,7 @@ internal sealed class EnergyEstimationEventInfo
     public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
-public readonly record struct WmiActivityEventInfo
+public readonly record struct WmiActivityEventInfo_24
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
@@ -534,8 +534,8 @@ public readonly record struct WmiActivityEventInfo
     public string NamespaceName { get; init; }
     public uint ClientProcessId { get; init;  }
     public uint IntervalMs { get; init; }
-    public string Operation { get; init; }
-
+    public string Query { get; init; }
+    public uint GroupOperationId { get; init; }
     //public required IReadOnlyDictionary<string, string> Properties { get; init; }
 }
 
@@ -1110,8 +1110,8 @@ public sealed class EtlFileReader
     public delegate void KernelPowerEventHandler(KernelPowerEventInfo data);
     public event KernelPowerEventHandler? KernelPower;
 
-    public delegate void WmiActivityEventHandler(in WmiActivityEventInfo data);
-    public event WmiActivityEventHandler? WmiActivity;
+    public delegate void WmiActivityEventHandler_24(in WmiActivityEventInfo_24 data);
+    public event WmiActivityEventHandler_24? WmiActivity_24;
 
     public delegate void EnergyEstimationEngine_37Handler(in EnergyEstimationEngineEventInfo_37 data);
     public event EnergyEstimationEngine_37Handler? EnergyEstimationEngine_37;
@@ -1285,11 +1285,25 @@ public sealed class EtlFileReader
         //}
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.WmiActivityProviderGuid)
         {
-            WmiActivityEventInfo? wmiActivityEvent = ParseWmiActivityPayload(timestamp, eventRecordPtr, cache);
-            if (wmiActivityEvent is { } wmiActivityEventValue)
+            var wmiEventId = eventRecordPtr->EventHeader.EventDescriptor.Id;
+            if(wmiEventId == 24)
             {
-                WmiActivity?.Invoke(in wmiActivityEventValue);
+                var wmiActivityEvent_24 = ParseWmiActivityPayload_24(timestamp, eventRecordPtr, cache);
+                if (wmiActivityEvent_24 is { } wmiActivityEventValue_24)
+                {
+                    WmiActivity_24?.Invoke(in wmiActivityEventValue_24);
+                }
             }
+
+            var kk = cache.Properties.Select(x => x.Key);
+            var strb = new StringBuilder();
+            strb.Append($"wmiEventId:{wmiEventId}");
+            foreach (var oo in kk)
+            {
+                strb.Append($",{oo}");
+                
+            }
+            System.Diagnostics.Trace.WriteLine(strb.ToString());
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         {
@@ -1420,14 +1434,14 @@ public sealed class EtlFileReader
         return m_Properties;
     }
 
-    private unsafe WmiActivityEventInfo? ParseWmiActivityPayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    private unsafe WmiActivityEventInfo_24? ParseWmiActivityPayload_24(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
         if (eventRecordPtr == null)
         {
             return null;
         }
-        System.Diagnostics.Trace.WriteLine($"Id:{eventRecordPtr->EventHeader.EventDescriptor.Id} count:{schema.Properties.Count}");
-        return new WmiActivityEventInfo
+
+        return new WmiActivityEventInfo_24
         {
             Timestamp = timestamp,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
@@ -1437,8 +1451,9 @@ public sealed class EtlFileReader
             ThreadId = eventRecordPtr->EventHeader.ThreadId,
             ClientProcessId = GetRawProperty<uint>(eventRecordPtr, "ClientProcessId", schema),
             IntervalMs = GetRawProperty<uint>(eventRecordPtr, "IntervalMs", schema),
-            Operation = GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            Query = GetRawPropertyString(eventRecordPtr, "Query", schema),
             NamespaceName = GetRawPropertyString(eventRecordPtr, "NamespaceName", schema),
+            GroupOperationId = GetRawProperty<uint>(eventRecordPtr, "GroupOperationId", schema),
         };
     }
 
