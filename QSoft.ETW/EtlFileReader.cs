@@ -523,6 +523,27 @@ internal sealed class EnergyEstimationEventInfo
     public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
+public readonly record struct WmiActivityEventInfo_11
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public string CorrelationId { get; init; }
+    public uint GroupOperationId { get; init; }
+    public uint OperationId { get; init; }
+    public string Operation { get; init; }
+    public string ClientMachine { get; init; }
+    public string ClientMachineFQDN { get; init; }
+    public string User { get; init; }
+    public uint ClientProcessId { get; init; }
+    public ulong ClientProcessCreationTime { get; init; }
+    public string NamespaceName { get; init; }
+    public bool IsLocal { get; init; }
+}
+
 public readonly record struct WmiActivityEventInfo_24
 {
     public required DateTime Timestamp { get; init; }
@@ -536,7 +557,6 @@ public readonly record struct WmiActivityEventInfo_24
     public uint IntervalMs { get; init; }
     public string Query { get; init; }
     public uint GroupOperationId { get; init; }
-    //public required IReadOnlyDictionary<string, string> Properties { get; init; }
 }
 
 public sealed class KernelAcpiEventInfo
@@ -1294,6 +1314,10 @@ public sealed class EtlFileReader
                     WmiActivity_24?.Invoke(in wmiActivityEventValue_24);
                 }
             }
+            else if(wmiEventId == 11)
+            {
+                var wmiActivityEvent_11 = ParseWmiActivityPayload_11(timestamp, eventRecordPtr, cache);
+            }
 
             var kk = cache.Properties.Select(x => x.Key);
             var strb = new StringBuilder();
@@ -1457,6 +1481,39 @@ public sealed class EtlFileReader
         };
     }
 
+    private unsafe WmiActivityEventInfo_11? ParseWmiActivityPayload_11(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+        foreach (var oo in schema.Properties)
+        {
+            System.Diagnostics.Trace.Write($"{oo.Key}:{oo.Value.InType} ");
+        }
+        System.Diagnostics.Trace.WriteLine("");
+        return new WmiActivityEventInfo_11
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            CorrelationId = GetRawPropertyString(eventRecordPtr, "CorrelationId", schema),
+            GroupOperationId = GetRawProperty<uint>(eventRecordPtr, "GroupOperationId", schema),
+            OperationId = GetRawProperty<uint>(eventRecordPtr, "OperationId", schema),
+            Operation = GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            ClientMachine = GetRawPropertyString(eventRecordPtr, "ClientMachine", schema),
+            ClientMachineFQDN = GetRawPropertyString(eventRecordPtr, "ClientMachineFQDN", schema),
+            User = GetRawPropertyString(eventRecordPtr, "User", schema),
+            ClientProcessId = GetRawProperty<uint>(eventRecordPtr, "ClientProcessId", schema),
+            ClientProcessCreationTime = GetRawProperty<UInt64>(eventRecordPtr, "ClientProcessCreationTime", schema),
+            NamespaceName = GetRawPropertyString(eventRecordPtr, "NamespaceName", schema),
+            IsLocal = GetRawProperty<bool>(eventRecordPtr, "IsLocal", schema),
+        };
+    }
+
 
     private static unsafe T GetRawProperty<T>(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, T defaultvalue = default) where T : unmanaged
     {
@@ -1503,6 +1560,7 @@ public sealed class EtlFileReader
         if (typeof(T) == typeof(sbyte)) return TdhInType.Int8;
         if (typeof(T) == typeof(byte)) return TdhInType.UInt8;
         if (typeof(T) == typeof(float)) return TdhInType.Float;
+        if (typeof(T) == typeof(bool)) return TdhInType.Boolean;
         return TdhInType.Null;
     }
 
