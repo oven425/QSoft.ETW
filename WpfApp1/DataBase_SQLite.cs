@@ -19,6 +19,7 @@ namespace WpfApp1
         private SqliteCommand? _writeProcessStartCommand;
         private SqliteCommand? _writeProcessStopCommand;
         private SqliteCommand? _writeWmiActivityCommand;
+        private SqliteCommand? _writeWmiActivity11Command;
         private SqliteCommand? _writeEnergyEstimationEngineCommand;
         private SqliteCommand? _writeEnergyEstimationQueryStatsCommand;
         private SqliteCommand? _writeEnergyEstimationCpuPowerCommand;
@@ -123,7 +124,36 @@ namespace WpfApp1
                         ON WmiActivityEvents_24 (NamespaceName, TimestampUtc);
 
                        CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_ProcessRecord
-                       ON WmiActivityEvents_24 (ProcessRecordId, TimestampUtc);
+                        ON WmiActivityEvents_24 (ProcessRecordId, TimestampUtc);
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_11
+                       (
+                           WmiActivityEvent11Id INTEGER PRIMARY KEY,
+                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                           TimestampUtc TEXT NOT NULL,
+                           EventId INTEGER NOT NULL,
+                           Version INTEGER NOT NULL,
+                           Opcode INTEGER NOT NULL,
+                           ProcessId INTEGER NOT NULL,
+                           ThreadId INTEGER NOT NULL,
+                           CorrelationId TEXT NULL,
+                           GroupOperationId INTEGER NULL,
+                           OperationId INTEGER NULL,
+                           Operation TEXT NULL,
+                           ClientMachine TEXT NULL,
+                           ClientMachineFQDN TEXT NULL,
+                           UserName TEXT NULL,
+                           ClientProcessId INTEGER NULL,
+                           ClientProcessCreationTime INTEGER NULL,
+                           NamespaceName TEXT NULL,
+                           IsLocal INTEGER NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_11_NamespaceTimestamp
+                       ON WmiActivityEvents_11 (NamespaceName, TimestampUtc);
+
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_11_ProcessRecord
+                       ON WmiActivityEvents_11 (ProcessRecordId, TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngineEvents
                        (
@@ -355,6 +385,7 @@ namespace WpfApp1
             _writeProcessStartCommand = CreateWriteProcessStartCommand(connection, transaction);
             _writeProcessStopCommand = CreateWriteProcessStopCommand(connection, transaction);
             _writeWmiActivityCommand = CreateWriteWmiActivityCommand(connection, transaction);
+            _writeWmiActivity11Command = CreateWriteWmiActivity11Command(connection, transaction);
             _writeEnergyEstimationEngineCommand = CreateWriteEnergyEstimationEngineCommand(connection, transaction);
             _writeEnergyEstimationQueryStatsCommand = CreateWriteEnergyEstimationQueryStatsCommand(connection, transaction);
             _writeEnergyEstimationEnergyDeltaCommand = CreateWriteEnergyEstimationEnergyDeltaCommand(connection, transaction);
@@ -424,6 +455,30 @@ namespace WpfApp1
             command.Parameters["$query"].Value = ToDbValue(data.Query);
             command.Parameters["$groupOperationId"].Value = Convert.ToInt64(data.GroupOperationId, CultureInfo.InvariantCulture);
             command.ExecuteNonQuery();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_11 data)
+        {
+            SqliteCommand command = _writeWmiActivity11Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$correlationId"].Value = ToDbValue(data.CorrelationId);
+            command.Parameters["$groupOperationId"].Value = Convert.ToInt64(data.GroupOperationId, CultureInfo.InvariantCulture);
+            command.Parameters["$operationId"].Value = Convert.ToInt64(data.OperationId, CultureInfo.InvariantCulture);
+            command.Parameters["$operation"].Value = ToDbValue(data.Operation);
+            command.Parameters["$clientMachine"].Value = ToDbValue(data.ClientMachine);
+            command.Parameters["$clientMachineFqdn"].Value = ToDbValue(data.ClientMachineFQDN);
+            command.Parameters["$userName"].Value = ToDbValue(data.User);
+            command.Parameters["$clientProcessId"].Value = Convert.ToInt64(data.ClientProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$clientProcessCreationTime"].Value = checked((long)data.ClientProcessCreationTime);
+            command.Parameters["$namespaceName"].Value = ToDbValue(data.NamespaceName);
+            command.Parameters["$isLocal"].Value = data.IsLocal ? 1 : 0;
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
         }
 
         public void WriteEnergyEstimationEngine(in EnergyEstimationEngineEventInfo_37 data)
@@ -677,6 +732,8 @@ namespace WpfApp1
             _writeProcessStopCommand = null;
             _writeWmiActivityCommand?.Dispose();
             _writeWmiActivityCommand = null;
+            _writeWmiActivity11Command?.Dispose();
+            _writeWmiActivity11Command = null;
             _writeEnergyEstimationEngineCommand?.Dispose();
             _writeEnergyEstimationEngineCommand = null;
             _writeEnergyEstimationQueryStatsCommand?.Dispose();
@@ -733,6 +790,7 @@ namespace WpfApp1
                 _writeProcessStartCommand,
                 _writeProcessStopCommand,
                 _writeWmiActivityCommand,
+                _writeWmiActivity11Command,
                 _writeEnergyEstimationEngineCommand,
                 _writeEnergyEstimationQueryStatsCommand,
                 _writeEnergyEstimationEnergyDeltaCommand,
@@ -1080,6 +1138,47 @@ namespace WpfApp1
             command.Parameters.Add("$intervalMs", SqliteType.Integer);
             command.Parameters.Add("$query", SqliteType.Text);
             command.Parameters.Add("$groupOperationId", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity11Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_11
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, CorrelationId, GroupOperationId, OperationId, Operation, ClientMachine, ClientMachineFQDN, UserName, ClientProcessId, ClientProcessCreationTime, NamespaceName, IsLocal)
+                  VALUES
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $clientProcessId
+                              AND StartedAtUtc <= $timestampUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $correlationId, $groupOperationId, $operationId, $operation, $clientMachine, $clientMachineFqdn, $userName, $clientProcessId, $clientProcessCreationTime, $namespaceName, $isLocal
+                    );";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$correlationId", SqliteType.Text);
+            command.Parameters.Add("$groupOperationId", SqliteType.Integer);
+            command.Parameters.Add("$operationId", SqliteType.Integer);
+            command.Parameters.Add("$operation", SqliteType.Text);
+            command.Parameters.Add("$clientMachine", SqliteType.Text);
+            command.Parameters.Add("$clientMachineFqdn", SqliteType.Text);
+            command.Parameters.Add("$userName", SqliteType.Text);
+            command.Parameters.Add("$clientProcessId", SqliteType.Integer);
+            command.Parameters.Add("$clientProcessCreationTime", SqliteType.Integer);
+            command.Parameters.Add("$namespaceName", SqliteType.Text);
+            command.Parameters.Add("$isLocal", SqliteType.Integer);
             command.Prepare();
             return command;
         }

@@ -468,7 +468,7 @@ public sealed class ModuleInfo
     public string FileName { get; init; } = string.Empty;
     public string ImageBase { get; init; } = string.Empty;
     public string ImageSize { get; init; } = string.Empty;
-    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+    //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
 internal sealed class DiskIoEventInfo
@@ -1132,6 +1132,8 @@ public sealed class EtlFileReader
 
     public delegate void WmiActivityEventHandler_24(in WmiActivityEventInfo_24 data);
     public event WmiActivityEventHandler_24? WmiActivity_24;
+    public delegate void WmiActivityEventHandler_11(in WmiActivityEventInfo_11 data);
+    public event WmiActivityEventHandler_11? WmiActivity_11;
 
     public delegate void EnergyEstimationEngine_37Handler(in EnergyEstimationEngineEventInfo_37 data);
     public event EnergyEstimationEngine_37Handler? EnergyEstimationEngine_37;
@@ -1291,10 +1293,10 @@ public sealed class EtlFileReader
         {
             //ProcessThreadEvent(opcode, timestamp, properties);
         }
-        //else if (eventRecordPtr->EventHeader.ProviderId == s_imageLoadProviderId && (opcode == 3 || opcode == 10))
-        //{
-        //    ProcessImageLoadEvent(timestamp, eventRecordPtr->EventHeader.ProcessId, null);
-        //}
+        else if (eventRecordPtr->EventHeader.ProviderId == s_imageLoadProviderId && (opcode == 3 || opcode == 10))
+        {
+            ProcessImageLoadEvent(timestamp, eventRecordPtr->EventHeader.ProcessId, null);
+        }
         //else if (record.EventHeader.ProviderId == s_diskIoProviderId)
         //{
         //    ProcessDiskIoEvent(timestamp, in record.EventHeader, properties);
@@ -1317,17 +1319,11 @@ public sealed class EtlFileReader
             else if(wmiEventId == 11)
             {
                 var wmiActivityEvent_11 = ParseWmiActivityPayload_11(timestamp, eventRecordPtr, cache);
+                if (wmiActivityEvent_11 is { } wmiActivityEventValue_11)
+                {
+                    WmiActivity_11?.Invoke(in wmiActivityEventValue_11);
+                }
             }
-
-            var kk = cache.Properties.Select(x => x.Key);
-            var strb = new StringBuilder();
-            strb.Append($"wmiEventId:{wmiEventId}");
-            foreach (var oo in kk)
-            {
-                strb.Append($",{oo}");
-                
-            }
-            System.Diagnostics.Trace.WriteLine(strb.ToString());
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         {
@@ -1487,11 +1483,6 @@ public sealed class EtlFileReader
         {
             return null;
         }
-        foreach (var oo in schema.Properties)
-        {
-            System.Diagnostics.Trace.Write($"{oo.Key}:{oo.Value.InType} ");
-        }
-        System.Diagnostics.Trace.WriteLine("");
         return new WmiActivityEventInfo_11
         {
             Timestamp = timestamp,
@@ -1735,7 +1726,6 @@ public sealed class EtlFileReader
             FileName = GetString(properties, "FileName", "ImageFileName"),
             ImageBase = GetString(properties, "ImageBase", "BaseAddress"),
             ImageSize = GetString(properties, "ImageSize", "ModuleSize"),
-            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
         };
 
         if (s_activeProcesses.TryGetValue(processId, out ProcessInfo? process))
