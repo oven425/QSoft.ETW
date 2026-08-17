@@ -235,6 +235,16 @@ public partial class MainViewModel : ObservableObject
 
     private async Task AnalyzeAsync(string etlPath, CancellationToken cancellationToken)
     {
+        var filename = System.IO.Path.GetFileNameWithoutExtension(etlPath);
+        var dir = System.IO.Path.GetDirectoryName(etlPath);
+        if(filename is not null && dir is not null)
+        {
+            var files = Directory.GetFiles(dir, $"{filename}.db*");
+            foreach (var oo in files ?? [])
+            {
+                File.Delete(oo);
+            }
+        }
         await _analyzer.AnalyzeAsync(etlPath, cancellationToken);
         await LoadDatabaseAsync(etlPath, cancellationToken);
     }

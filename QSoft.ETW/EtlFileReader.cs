@@ -310,7 +310,6 @@ internal sealed class EtlReadResult
     public List<EnergyEstimationEventInfo> EnergyEstimationEvents { get; } = [];
     public List<KernelAcpiEventInfo> KernelAcpiEvents { get; } = [];
     public List<KernelPowerEventInfo> KernelPowerEvents { get; } = [];
-    public List<PowerMeterPollingEventInfo> PowerMeterPollingEvents { get; } = [];
     public List<CSwitchEventInfo> CSwitchEvents { get; } = [];
     public List<InterruptEventInfo> InterruptEvents { get; } = [];
     public List<ProfileEventInfo> ProfileEvents { get; } = [];
@@ -502,13 +501,15 @@ internal sealed class ThreadInfo
     public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
-internal sealed class PowerMeterPollingEventInfo
+public sealed class PowerMeterPollingEventInfo_4
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
-    //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+    public ulong MeterId { get; init; }
+    public ulong AbsoluteEnergy { get; init; }
+    public ulong AbsoluteTime { get; init; }
 }
 
 internal sealed class EnergyEstimationEventInfo
@@ -1007,14 +1008,9 @@ public sealed class EtlFileReader
             nint propertyInfoPtr = infoPtr + propertyInfoBase + (i * propertyInfoSize);
             ref readonly EVENT_PROPERTY_INFO property = ref Unsafe.AsRef<EVENT_PROPERTY_INFO>((void*)propertyInfoPtr);
 
-            const PROPERTY_FLAGS UnsupportedFlags =
-                PROPERTY_FLAGS.PropertyStruct |
-                PROPERTY_FLAGS.PropertyParamCount |
-                PROPERTY_FLAGS.PropertyParamLength;
-
-            if ((property.Flags & UnsupportedFlags) != 0)
+            if ((property.Flags & PROPERTY_FLAGS.PropertyStruct) != 0)
             {
-                break;
+                continue;
             }
 
             string propertyName = Marshal.PtrToStringUni(infoPtr + property.NameOffset) ?? string.Empty;
@@ -1060,14 +1056,9 @@ public sealed class EtlFileReader
             nint propertyInfoPtr = infoPtr + propertyInfoBase + (i * propertyInfoSize);
             ref readonly EVENT_PROPERTY_INFO property = ref Unsafe.AsRef<EVENT_PROPERTY_INFO>((void*)propertyInfoPtr);
 
-            const PROPERTY_FLAGS UnsupportedFlags =
-                PROPERTY_FLAGS.PropertyStruct |
-                PROPERTY_FLAGS.PropertyParamCount |
-                PROPERTY_FLAGS.PropertyParamLength;
-
-            if ((property.Flags & UnsupportedFlags) != 0)
+            if ((property.Flags & PROPERTY_FLAGS.PropertyStruct) != 0)
             {
-                break;
+                continue;
             }
 
             string propertyName = Marshal.PtrToStringUni(infoPtr + property.NameOffset) ?? string.Empty;
@@ -1146,6 +1137,12 @@ public sealed class EtlFileReader
 
     public delegate void EnergyEstimationEngine_18Handler(in EnergyEstimationEngineEventInfo_18 data);
     public event EnergyEstimationEngine_18Handler? EnergyEstimationEngine_18;
+
+    public delegate void PowerMeterPollingEventInfo_4Handler(in PowerMeterPollingEventInfo_4 data);
+    public event PowerMeterPollingEventInfo_4Handler? PowerMeterPollingEventInfo_4;
+
+
+
     private unsafe void OnEventRecord(EVENT_RECORD* eventRecordPtr)
     {
         s_eventCount++;
@@ -1265,7 +1262,6 @@ public sealed class EtlFileReader
                     }
                 }
             }
-
             return;
         }
 
@@ -1292,10 +1288,6 @@ public sealed class EtlFileReader
         else if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
         {
             //ProcessThreadEvent(opcode, timestamp, properties);
-        }
-        else if (eventRecordPtr->EventHeader.ProviderId == s_imageLoadProviderId && (opcode == 3 || opcode == 10))
-        {
-            ProcessImageLoadEvent(timestamp, eventRecordPtr->EventHeader.ProcessId, null);
         }
         //else if (record.EventHeader.ProviderId == s_diskIoProviderId)
         //{
@@ -1363,17 +1355,37 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
         {
+            //var properties = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+            //System.Diagnostics.Trace.Write($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+            //if (properties is not null)
+            //{
+            //    foreach (var property in properties)
+            //    {
+            //        System.Diagnostics.Trace.Write($"{property.Key}={property.Value}; ");
+            //    }
+            //}
+            //System.Diagnostics.Trace.WriteLine("");
             KernelAcpiEventInfo acpiEvent = ProcessKernelAcpiEvent(timestamp, in eventRecordPtr->EventHeader);
             KernelAcpi?.Invoke(acpiEvent);
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
         {
+            
             KernelPowerEventInfo kernelPowerEvent = ProcessKernelPowerEvent(timestamp, in eventRecordPtr->EventHeader);
             KernelPower?.Invoke(kernelPowerEvent);
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.PowerMeterPollingProviderGuid)
         {
-            var powerneter = ProcessPowerMeterPollingEvent(timestamp, eventRecordPtr, cache);
+            var pepid = eventRecordPtr->EventHeader.EventDescriptor.Id;
+            if(pepid == 4)
+            {
+                var powerneter_4 = ProcessPowerMeterPollingEvent_4(timestamp, eventRecordPtr, cache);
+                if(PowerMeterPollingEventInfo_4 is not null)
+                {
+                    PowerMeterPollingEventInfo_4(powerneter_4);
+                }
+            }
+            
         }
     }
 
@@ -1385,72 +1397,101 @@ public sealed class EtlFileReader
         {
             return null;
         }
+
         m_Properties.Clear();
         ref readonly TRACE_EVENT_INFO info = ref Unsafe.AsRef<TRACE_EVENT_INFO>((void*)infoPtr);
         uint pointerSize = (header.Flags & EtwNativeConstants.EVENT_HEADER_FLAG_32_BIT_HEADER) != 0 ? 4u : 8u;
+        int propertyInfoBase = Marshal.SizeOf<TRACE_EVENT_INFO>();
+        int propertyInfoSize = Marshal.SizeOf<EVENT_PROPERTY_INFO>();
 
-        var propertyInfoBase = Marshal.SizeOf<TRACE_EVENT_INFO>();
-        var propertyInfoSize = Marshal.SizeOf<EVENT_PROPERTY_INFO>();
-
-        nint cursor = eventRecordPtr->UserData;
-        int remaining = eventRecordPtr->UserDataLength;
-        for (int i = 0; i < info.TopLevelPropertyCount && remaining > 0; i++)
+        for (int i = 0; i < info.TopLevelPropertyCount; i++)
         {
             nint propertyInfoPtr = infoPtr + propertyInfoBase + (i * propertyInfoSize);
             ref readonly EVENT_PROPERTY_INFO property = ref Unsafe.AsRef<EVENT_PROPERTY_INFO>((void*)propertyInfoPtr);
+            string propertyName = Marshal.PtrToStringUni(infoPtr + property.NameOffset) ?? string.Empty;
 
-            const PROPERTY_FLAGS UnsupportedFlags =
-                PROPERTY_FLAGS.PropertyStruct |
-                PROPERTY_FLAGS.PropertyParamCount |
-                PROPERTY_FLAGS.PropertyParamLength;
-
-            if ((property.Flags & UnsupportedFlags) != 0)
+            fixed (char* propertyNamePtr = propertyName)
             {
-                break;
-            }
-
-            var propertyName = Marshal.PtrToStringUni(infoPtr + property.NameOffset) ?? string.Empty;
-
-            uint formatBufferSize = 0;
-            uint formatStatus = NativeMethods.TdhFormatProperty(
-                infoPtr, 0, pointerSize, property.InType, property.OutType,
-                property.Length, (ushort)remaining, cursor, ref formatBufferSize, 0, out ushort userDataConsumed);
-
-            nint formatBufferPtr = 0;
-            try
-            {
-                if (formatStatus == EtwNativeConstants.ERROR_INSUFFICIENT_BUFFER && formatBufferSize > 0)
+                PROPERTY_DATA_DESCRIPTOR descriptor = new()
                 {
-                    formatBufferPtr = Marshal.AllocHGlobal((int)formatBufferSize);
-                    formatStatus = NativeMethods.TdhFormatProperty(
+                    PropertyName = (ulong)propertyNamePtr,
+                    ArrayIndex = uint.MaxValue,
+                };
+
+                uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
+                if (status != EtwNativeConstants.ERROR_SUCCESS || propertySize > ushort.MaxValue)
+                {
+                    continue;
+                }
+
+                nint propertyDataPtr = Marshal.AllocHGlobal((int)propertySize);
+                try
+                {
+                    status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, (byte*)propertyDataPtr);
+                    if (status != EtwNativeConstants.ERROR_SUCCESS)
+                    {
+                        continue;
+                    }
+
+                    if (property.InType == (ushort)TdhInType.UnicodeString)
+                    {
+                        int characterCount = checked((int)propertySize / sizeof(char));
+                        char* characters = (char*)propertyDataPtr;
+                        if (characterCount > 0 && characters[characterCount - 1] == '\0')
+                        {
+                            characterCount--;
+                        }
+
+                        m_Properties[propertyName] = new string(characters, 0, characterCount);
+                        continue;
+                    }
+
+                    if (property.InType == (ushort)TdhInType.AnsiString)
+                    {
+                        int byteCount = checked((int)propertySize);
+                        byte* bytes = (byte*)propertyDataPtr;
+                        if (byteCount > 0 && bytes[byteCount - 1] == 0)
+                        {
+                            byteCount--;
+                        }
+
+                        m_Properties[propertyName] = Encoding.Default.GetString(new ReadOnlySpan<byte>(bytes, byteCount));
+                        continue;
+                    }
+
+                    uint formatBufferSize = 0;
+                    ushort formattedPropertySize = (ushort)propertySize;
+                    status = NativeMethods.TdhFormatProperty(
                         infoPtr, 0, pointerSize, property.InType, property.OutType,
-                        property.Length, (ushort)remaining, cursor, ref formatBufferSize, formatBufferPtr, out userDataConsumed);
-                }
+                        formattedPropertySize, formattedPropertySize, propertyDataPtr, ref formatBufferSize, 0, out _);
+                    if (status != EtwNativeConstants.ERROR_INSUFFICIENT_BUFFER || formatBufferSize == 0)
+                    {
+                        continue;
+                    }
 
-                if (formatStatus != EtwNativeConstants.ERROR_SUCCESS)
+                    nint formatBufferPtr = Marshal.AllocHGlobal((int)formatBufferSize);
+                    try
+                    {
+                        status = NativeMethods.TdhFormatProperty(
+                            infoPtr, 0, pointerSize, property.InType, property.OutType,
+                            formattedPropertySize, formattedPropertySize, propertyDataPtr, ref formatBufferSize, formatBufferPtr, out _);
+                        if (status == EtwNativeConstants.ERROR_SUCCESS)
+                        {
+                            m_Properties[propertyName] = Marshal.PtrToStringUni(formatBufferPtr) ?? string.Empty;
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(formatBufferPtr);
+                    }
+                }
+                finally
                 {
-                    break;
-                }
-
-                string value = Marshal.PtrToStringUni(formatBufferPtr) ?? string.Empty;
-                m_Properties[propertyName] = value;
-            }
-            finally
-            {
-                if (formatBufferPtr != 0)
-                {
-                    Marshal.FreeHGlobal(formatBufferPtr);
+                    Marshal.FreeHGlobal(propertyDataPtr);
                 }
             }
-
-            if (userDataConsumed == 0)
-            {
-                break;
-            }
-
-            cursor += userDataConsumed;
-            remaining -= userDataConsumed;
         }
+
         return m_Properties;
     }
 
@@ -1529,7 +1570,30 @@ public sealed class EtlFileReader
 
             uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
 
-            if (status != EtwNativeConstants.ERROR_SUCCESS || propertySize != sizeof(T))
+            if (status != EtwNativeConstants.ERROR_SUCCESS)
+            {
+                return defaultvalue;
+            }
+
+            if (typeof(T) == typeof(bool))
+            {
+                if (propertySize != sizeof(uint))
+                {
+                    return defaultvalue;
+                }
+
+                uint* rawBoolean = stackalloc uint[1];
+                status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, (byte*)rawBoolean);
+                if (status != EtwNativeConstants.ERROR_SUCCESS)
+                {
+                    return defaultvalue;
+                }
+
+                bool value = *rawBoolean != 0;
+                return Unsafe.As<bool, T>(ref value);
+            }
+
+            if (propertySize != sizeof(T))
             {
                 return defaultvalue;
             }
@@ -1537,6 +1601,33 @@ public sealed class EtlFileReader
             T* rawValue = stackalloc T[1];
             status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, (byte*)rawValue);
             return status == EtwNativeConstants.ERROR_SUCCESS ? *rawValue : defaultvalue;
+        }
+    }
+
+    private static unsafe ulong GetRawPointerProperty(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, ulong defaultvalue = default)
+    {
+        if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property) || property.InType != TdhInType.Pointer)
+        {
+            return defaultvalue;
+        }
+
+        fixed (char* propertyNamePtr = propertyName)
+        {
+            PROPERTY_DATA_DESCRIPTOR descriptor = new()
+            {
+                PropertyName = (ulong)propertyNamePtr,
+                ArrayIndex = uint.MaxValue,
+            };
+
+            uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
+            if (status != EtwNativeConstants.ERROR_SUCCESS || propertySize is not sizeof(uint) and not sizeof(ulong))
+            {
+                return defaultvalue;
+            }
+
+            ulong rawValue = 0;
+            status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, (byte*)&rawValue);
+            return status == EtwNativeConstants.ERROR_SUCCESS ? rawValue : defaultvalue;
         }
     }
 
@@ -1716,28 +1807,6 @@ public sealed class EtlFileReader
         }
     }
 
-    private void ProcessImageLoadEvent(DateTime timestamp, uint headerProcessId, IReadOnlyDictionary<string, string> properties)
-    {
-        uint processId = GetUInt32(properties, "ProcessId") ?? headerProcessId;
-        var module = new ModuleInfo
-        {
-            ProcessId = processId,
-            LoadTime = timestamp,
-            FileName = GetString(properties, "FileName", "ImageFileName"),
-            ImageBase = GetString(properties, "ImageBase", "BaseAddress"),
-            ImageSize = GetString(properties, "ImageSize", "ModuleSize"),
-        };
-
-        if (s_activeProcesses.TryGetValue(processId, out ProcessInfo? process))
-        {
-            process.Modules.Add(module);
-        }
-        else
-        {
-            _readResult!.UnmatchedModules.Add(module);
-        }
-    }
-
     private void ProcessDiskIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
         var diskIoEvent = new DiskIoEventInfo
@@ -1803,16 +1872,17 @@ public sealed class EtlFileReader
         };
     }
 
-    private unsafe PowerMeterPollingEventInfo ProcessPowerMeterPollingEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    private unsafe PowerMeterPollingEventInfo_4 ProcessPowerMeterPollingEvent_4(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
-        var dic = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
-        return new PowerMeterPollingEventInfo
+        return new PowerMeterPollingEventInfo_4
         {
             Timestamp = timestamp,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
-            //Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
+            MeterId = GetRawPointerProperty(eventRecordPtr, "MeterId", cache),
+            AbsoluteEnergy = GetRawProperty<ulong>(eventRecordPtr, "AbsoluteEnergy", cache),
+            AbsoluteTime = GetRawProperty<ulong>(eventRecordPtr, "AbsoluteTime", cache),
         };
     }
 

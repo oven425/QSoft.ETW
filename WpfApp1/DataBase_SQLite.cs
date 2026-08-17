@@ -25,12 +25,12 @@ namespace WpfApp1
         private SqliteCommand? _writeEnergyEstimationCpuPowerCommand;
         private SqliteCommand? _writeEnergyEstimationEnergyDeltaCommand;
         private SqliteCommand? _writeKernelAcpiCommand;
-        private SqliteCommand? _writeKernelPowerCommand;
         private SqliteCommand? _writeThreadEventCommand;
         private SqliteCommand? _writeCpuProfileSampleCommand;
         private SqliteCommand? _writeDpcCommand;
         private SqliteCommand? _writeInterruptCommand;
         private SqliteCommand? _writeThreadLifetimeCommand;
+        private SqliteCommand? _writePowerMeterPollingEvent4Command;
 
         public void Open(string filename)
         {
@@ -241,20 +241,6 @@ namespace WpfApp1
                        CREATE INDEX IF NOT EXISTS IX_KernelAcpiEvents_ProcessTimestamp
                        ON KernelAcpiEvents (ProcessId, TimestampUtc);
 
-                       CREATE TABLE IF NOT EXISTS KernelPowerEvents
-                       (
-                           KernelPowerEventId INTEGER PRIMARY KEY,
-                           TimestampUtc TEXT NOT NULL,
-                           EventId INTEGER NOT NULL,
-                           Version INTEGER NOT NULL,
-                           Opcode INTEGER NOT NULL,
-                           ProcessId INTEGER NOT NULL,
-                           ThreadId INTEGER NOT NULL
-                       );
-
-                       CREATE INDEX IF NOT EXISTS IX_KernelPowerEvents_ProcessTimestamp
-                       ON KernelPowerEvents (ProcessId, TimestampUtc);
-
                        CREATE TABLE IF NOT EXISTS ThreadEvents
                        (
                            ThreadEventId INTEGER PRIMARY KEY,
@@ -367,17 +353,33 @@ namespace WpfApp1
                                ON InterruptEvents (Routine, TimestampUtc);
 
                                CREATE INDEX IF NOT EXISTS IX_InterruptEvents_ProcessorTimestamp
-                               ON InterruptEvents (ProcessorNumber, TimestampUtc);";
+                              ON InterruptEvents (ProcessorNumber, TimestampUtc);
+
+                              CREATE TABLE IF NOT EXISTS PowerMeterPollingEvents_4
+                              (
+                                  PowerMeterPollingEvent4Id INTEGER PRIMARY KEY,
+                                  TimestampUtc TEXT NOT NULL,
+                                  EventId INTEGER NOT NULL,
+                                  Version INTEGER NOT NULL,
+                                  Opcode INTEGER NOT NULL,
+                                  MeterId TEXT NOT NULL,
+                                  AbsoluteEnergy INTEGER NOT NULL,
+                                  AbsoluteTime TEXT NOT NULL
+                              );
+
+                              CREATE INDEX IF NOT EXISTS IX_PowerMeterPollingEvents_4_MeterTimestamp
+                              ON PowerMeterPollingEvents_4 (MeterId, TimestampUtc);";
                        command.ExecuteNonQuery();
             }
 
+            RemoveLegacyPowerMeterPollingTables(connection);
+            EnsurePowerMeterPollingEvent4EnergyIsInteger(connection);
             EnsureEnergyEstimationEngineColumns(connection);
             EnsureEnergyEstimationEngineEnergyColumnsAreIntegers(connection);
             EnsureEnergyEstimationEngineTablesWithoutProcessColumns(connection);
             EnsureThreadEventColumns(connection);
             EnsureProcessColumns(connection);
             EnsureWmiActivityColumns(connection);
-            EnsureKernelPowerEventColumns(connection);
 
             SqliteTransaction transaction = connection.BeginTransaction();
             _writeImageLoadCommand = CreateWriteImageLoadCommand(connection, transaction);
@@ -391,12 +393,12 @@ namespace WpfApp1
             _writeEnergyEstimationEnergyDeltaCommand = CreateWriteEnergyEstimationEnergyDeltaCommand(connection, transaction);
             _writeEnergyEstimationCpuPowerCommand = CreateWriteEnergyEstimationCpuPowerCommand(connection, transaction);
             _writeKernelAcpiCommand = CreateWriteKernelAcpiCommand(connection, transaction);
-            _writeKernelPowerCommand = CreateWriteKernelPowerCommand(connection, transaction);
             _writeThreadEventCommand = CreateWriteThreadEventCommand(connection, transaction);
             _writeCpuProfileSampleCommand = CreateWriteCpuProfileSampleCommand(connection, transaction);
             _writeDpcCommand = CreateWriteDpcCommand(connection, transaction);
             _writeInterruptCommand = CreateWriteInterruptCommand(connection, transaction);
             _writeThreadLifetimeCommand = CreateWriteThreadLifetimeCommand(connection, transaction);
+            _writePowerMeterPollingEvent4Command = CreateWritePowerMeterPollingEvent4Command(connection, transaction);
             _connection = connection;
             _transaction = transaction;
             _batchedWriteCount = 0;
@@ -419,18 +421,6 @@ namespace WpfApp1
         public void WriteKernelAcpi(KernelAcpiEventInfo data)
         {
             SqliteCommand command = _writeKernelAcpiCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
-            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
-            command.Parameters["$eventId"].Value = data.EventId;
-            command.Parameters["$version"].Value = data.Version;
-            command.Parameters["$opcode"].Value = data.Opcode;
-            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
-            command.ExecuteNonQuery();
-        }
-
-        public void WriteKernelPower(KernelPowerEventInfo data)
-        {
-            SqliteCommand command = _writeKernelPowerCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
             command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
             command.Parameters["$eventId"].Value = data.EventId;
             command.Parameters["$version"].Value = data.Version;
@@ -545,6 +535,20 @@ namespace WpfApp1
             command.Parameters["$currentFrequency"].Value = data.CurrentFrequency;
             command.Parameters["$lastBusyFrequency"].Value = data.LastBusyFrequency;
             command.Parameters["$energy"].Value = data.Energy.ToString(CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WritePowerMeterPollingEvent_4(in PowerMeterPollingEventInfo_4 data)
+        {
+            SqliteCommand command = _writePowerMeterPollingEvent4Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$meterId"].Value = ToHex(data.MeterId) ?? string.Empty;
+            command.Parameters["$absoluteEnergy"].Value = checked((long)data.AbsoluteEnergy);
+            command.Parameters["$absoluteTime"].Value = data.AbsoluteTime.ToString(CultureInfo.InvariantCulture);
             command.ExecuteNonQuery();
             CommitWriteBatchIfNeeded();
         }
@@ -744,8 +748,6 @@ namespace WpfApp1
             _writeEnergyEstimationCpuPowerCommand = null;
             _writeKernelAcpiCommand?.Dispose();
             _writeKernelAcpiCommand = null;
-            _writeKernelPowerCommand?.Dispose();
-            _writeKernelPowerCommand = null;
             _writeThreadEventCommand?.Dispose();
             _writeThreadEventCommand = null;
             _writeCpuProfileSampleCommand?.Dispose();
@@ -756,6 +758,8 @@ namespace WpfApp1
             _writeInterruptCommand = null;
             _writeThreadLifetimeCommand?.Dispose();
             _writeThreadLifetimeCommand = null;
+            _writePowerMeterPollingEvent4Command?.Dispose();
+            _writePowerMeterPollingEvent4Command = null;
             _transaction?.Dispose();
             _transaction = null;
             _connection?.Dispose();
@@ -796,12 +800,12 @@ namespace WpfApp1
                 _writeEnergyEstimationEnergyDeltaCommand,
                 _writeEnergyEstimationCpuPowerCommand,
                 _writeKernelAcpiCommand,
-                _writeKernelPowerCommand,
                 _writeThreadEventCommand,
                 _writeCpuProfileSampleCommand,
                 _writeDpcCommand,
                 _writeInterruptCommand,
                 _writeThreadLifetimeCommand,
+                _writePowerMeterPollingEvent4Command,
             })
             {
                 if (command is not null)
@@ -916,26 +920,6 @@ namespace WpfApp1
             command.Parameters.Add("$opcode", SqliteType.Integer);
             command.Parameters.Add("$processId", SqliteType.Integer);
             command.Parameters.Add("$threadId", SqliteType.Integer);
-            command.Prepare();
-            return command;
-        }
-
-        private static SqliteCommand CreateWriteKernelPowerCommand(SqliteConnection connection, SqliteTransaction transaction)
-        {
-            SqliteCommand command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                @"INSERT INTO KernelPowerEvents
-                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, PropertiesJson)
-                  VALUES
-                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $propertiesJson);";
-            command.Parameters.Add("$timestampUtc", SqliteType.Text);
-            command.Parameters.Add("$eventId", SqliteType.Integer);
-            command.Parameters.Add("$version", SqliteType.Integer);
-            command.Parameters.Add("$opcode", SqliteType.Integer);
-            command.Parameters.Add("$processId", SqliteType.Integer);
-            command.Parameters.Add("$threadId", SqliteType.Integer);
-            command.Parameters.Add("$propertiesJson", SqliteType.Text);
             command.Prepare();
             return command;
         }
@@ -1103,6 +1087,26 @@ namespace WpfApp1
             command.Parameters.Add("$currentFrequency", SqliteType.Integer);
             command.Parameters.Add("$lastBusyFrequency", SqliteType.Integer);
             command.Parameters.Add("$energy", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWritePowerMeterPollingEvent4Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO PowerMeterPollingEvents_4
+                    (TimestampUtc, EventId, Version, Opcode, MeterId, AbsoluteEnergy, AbsoluteTime)
+                  VALUES
+                    ($timestampUtc, $eventId, $version, $opcode, $meterId, $absoluteEnergy, $absoluteTime);";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$meterId", SqliteType.Text);
+            command.Parameters.Add("$absoluteEnergy", SqliteType.Integer);
+            command.Parameters.Add("$absoluteTime", SqliteType.Text);
             command.Prepare();
             return command;
         }
@@ -1279,6 +1283,87 @@ namespace WpfApp1
                 addColumnCommand.CommandText = $"ALTER TABLE EnergyEstimationEngineEvents ADD COLUMN {name} {definition};";
                 addColumnCommand.ExecuteNonQuery();
             }
+        }
+
+        private static void RemoveLegacyPowerMeterPollingTables(SqliteConnection connection)
+        {
+            List<string> legacyTableNames = [];
+            using (SqliteCommand listTablesCommand = connection.CreateCommand())
+            {
+                listTablesCommand.CommandText =
+                    @"SELECT name
+                      FROM sqlite_master
+                      WHERE type = 'table'
+                        AND name LIKE 'PowerMeterPolling%'
+                        AND name <> 'PowerMeterPollingEvents_4';";
+
+                using SqliteDataReader reader = listTablesCommand.ExecuteReader();
+                while (reader.Read())
+                {
+                    legacyTableNames.Add(reader.GetString(0));
+                }
+            }
+
+            foreach (string tableName in legacyTableNames)
+            {
+                using SqliteCommand dropTableCommand = connection.CreateCommand();
+                dropTableCommand.CommandText = $"DROP TABLE \"{tableName.Replace("\"", "\"\"")}\";";
+                dropTableCommand.ExecuteNonQuery();
+            }
+        }
+
+        private static void EnsurePowerMeterPollingEvent4EnergyIsInteger(SqliteConnection connection)
+        {
+            using SqliteCommand columnTypeCommand = connection.CreateCommand();
+            columnTypeCommand.CommandText = "SELECT type FROM pragma_table_info('PowerMeterPollingEvents_4') WHERE name = 'AbsoluteEnergy';";
+            string? columnType = columnTypeCommand.ExecuteScalar() as string;
+            if (string.Equals(columnType, "INTEGER", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            using SqliteCommand overflowCheckCommand = connection.CreateCommand();
+            overflowCheckCommand.CommandText =
+                @"SELECT COUNT(*)
+                  FROM PowerMeterPollingEvents_4
+                  WHERE length(AbsoluteEnergy) > 19
+                     OR (length(AbsoluteEnergy) = 19 AND AbsoluteEnergy > '9223372036854775807');";
+            if (Convert.ToInt64(overflowCheckCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            {
+                throw new InvalidOperationException("PowerMeterPollingEvents_4 包含超出 Int64 範圍的 AbsoluteEnergy，無法轉換為 INTEGER。");
+            }
+
+            using SqliteTransaction transaction = connection.BeginTransaction();
+            using SqliteCommand rebuildCommand = connection.CreateCommand();
+            rebuildCommand.Transaction = transaction;
+            rebuildCommand.CommandText =
+                @"CREATE TABLE PowerMeterPollingEvents_4_WithIntegerEnergy
+                  (
+                      PowerMeterPollingEvent4Id INTEGER PRIMARY KEY,
+                      TimestampUtc TEXT NOT NULL,
+                      EventId INTEGER NOT NULL,
+                      Version INTEGER NOT NULL,
+                      Opcode INTEGER NOT NULL,
+                      MeterId TEXT NOT NULL,
+                      AbsoluteEnergy INTEGER NOT NULL,
+                      AbsoluteTime TEXT NOT NULL
+                  );
+
+                  INSERT INTO PowerMeterPollingEvents_4_WithIntegerEnergy
+                      (PowerMeterPollingEvent4Id, TimestampUtc, EventId, Version, Opcode, MeterId, AbsoluteEnergy, AbsoluteTime)
+                  SELECT
+                      PowerMeterPollingEvent4Id, TimestampUtc, EventId, Version, Opcode, MeterId, CAST(AbsoluteEnergy AS INTEGER), AbsoluteTime
+                  FROM PowerMeterPollingEvents_4;
+
+                  DROP TABLE PowerMeterPollingEvents_4;
+
+                  ALTER TABLE PowerMeterPollingEvents_4_WithIntegerEnergy
+                  RENAME TO PowerMeterPollingEvents_4;
+
+                  CREATE INDEX IX_PowerMeterPollingEvents_4_MeterTimestamp
+                  ON PowerMeterPollingEvents_4 (MeterId, TimestampUtc);";
+            rebuildCommand.ExecuteNonQuery();
+            transaction.Commit();
         }
 
         private static void EnsureEnergyEstimationEngineEnergyColumnsAreIntegers(SqliteConnection connection)
@@ -1524,19 +1609,6 @@ namespace WpfApp1
                 @"CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_ProcessRecord
                   ON WmiActivityEvents_24 (ProcessRecordId, TimestampUtc);";
             createIndexCommand.ExecuteNonQuery();
-        }
-
-        private static void EnsureKernelPowerEventColumns(SqliteConnection connection)
-        {
-            using SqliteCommand columnExistsCommand = connection.CreateCommand();
-            columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('KernelPowerEvents') WHERE name = 'PropertiesJson';";
-
-            if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
-            {
-                using SqliteCommand addColumnCommand = connection.CreateCommand();
-                addColumnCommand.CommandText = "ALTER TABLE KernelPowerEvents ADD COLUMN PropertiesJson TEXT NULL;";
-                addColumnCommand.ExecuteNonQuery();
-            }
         }
 
         private static void EnsureProcessColumns(SqliteConnection connection)

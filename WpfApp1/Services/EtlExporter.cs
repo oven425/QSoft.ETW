@@ -293,6 +293,12 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WriteCpuProfileSample(data);
     }
 
+    private void OnPowerMeterPollingEvent_4(in PowerMeterPollingEventInfo_4 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WritePowerMeterPollingEvent_4(in data);
+    }
+
     private void Attach(EtlFileReader reader)
     {
         reader.ThreadCSwitch += OnThreadCSwitch;
@@ -316,6 +322,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
         reader.KernelAcpi += OnKernelAcpi;
         reader.PerfInfoProfile += OnProfile;
+        reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
     }
 
     private void OnEnergyEstimationEngine_33(in EnergyEstimationEngineEventInfo_33 data)
@@ -360,10 +367,14 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.WmiActivity_24 -= OnWmiActivity_24;
         reader.WmiActivity_11 -= OnWmiActivity_11;
         reader.EnergyEstimationEngine_37 -= OnEnergyEstimationEngine_37;
+        reader.EnergyEstimationEngine_14 -= OnEnergyEstimationEngine_14;
+        reader.EnergyEstimationEngine_18 -= OnEnergyEstimationEngine_18;
+        reader.EnergyEstimationEngine_33 -= OnEnergyEstimationEngine_33;
         reader.KernelAcpi -= OnKernelAcpi;
         reader.ImageDCStart -= OnImageLoad;
         reader.ImageDCStop -= OnImageUnload;
         reader.PerfInfoProfile -= OnProfile;
+        reader.PowerMeterPollingEventInfo_4 -= OnPowerMeterPollingEvent_4;
     }
 
     private void WriteIncompleteThreadLifetimes()
