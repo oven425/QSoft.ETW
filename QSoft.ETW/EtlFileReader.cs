@@ -1,6 +1,7 @@
 ﻿using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Dynamic;
 using System.Globalization;
 using System.IO;
@@ -257,6 +258,7 @@ internal enum TdhInType : ushort
     Sid = 19,
     HexInt32 = 20,
     HexInt64 = 21,
+    WBEMSID = 310,
 }
 
 /// <summary>
@@ -304,11 +306,10 @@ internal sealed class EtlReadResult
     public uint BuffersLost { get; set; }
     public uint EventsLost { get; set; }
     public EtlAnalysisResult? Analysis { get; set; }
-    public List<ProcessInfo> Processes { get; } = [];
+    //public List<ProcessInfo> Processes { get; } = [];
     //public List<ThreadInfo> Threads { get; } = [];
     public List<ModuleInfo> UnmatchedModules { get; } = [];
     public List<EnergyEstimationEventInfo> EnergyEstimationEvents { get; } = [];
-    public List<KernelAcpiEventInfo> KernelAcpiEvents { get; } = [];
     public List<KernelPowerEventInfo> KernelPowerEvents { get; } = [];
     public List<CSwitchEventInfo> CSwitchEvents { get; } = [];
     public List<InterruptEventInfo> InterruptEvents { get; } = [];
@@ -316,7 +317,6 @@ internal sealed class EtlReadResult
     public List<DpcEventInfo> DpcEvents { get; } = [];
     public List<DiskIoEventInfo> DiskIoEvents { get; } = [];
     public List<DiskIoEventInfo> DiskIoInitEvents { get; } = [];
-    public List<FileIoEventInfo> DiskFileIoEvents { get; } = [];
 }
 
 internal sealed class EtlAnalysisResult
@@ -448,17 +448,35 @@ internal sealed class RoutineEventSummary
     public List<TimedSample> Samples { get; } = [];
 }
 
-public sealed class ProcessInfo
+public readonly record struct ProcessInfo
 {
-    public required uint ProcessId { get; init; }
-    public uint ParentProcessId { get; init; }
-    public required DateTime StartTime { get; init; }
-    public DateTime? EndTime { get; set; }
-    public string ImageFileName { get; init; } = string.Empty;
-    public string CommandLine { get; init; } = string.Empty;
-    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
-    public List<ModuleInfo> Modules { get; } = [];
+    public UIntPtr UniqueProcessKey { get; init; }
+    public uint ProcessId { get; init; }
+    public uint ParentId { get; init; }
+    public uint SessionId { get; init; }
+    public int ExitStatus { get; init; }
+    public UIntPtr DirectoryTableBase { get; init; }
+    public uint Flags { get; init; }
+    /// <summary>使用者 SID 字串(例如 "S-1-5-21-..."),無法解析時為空字串。</summary>
+    public string UserSID { get; init; }
+    public string ImageFileName { get; init; }
+    public string CommandLine { get; init; }
+    public string PackageFullName { get; init;  }
+    public string ApplicationId { get; init; }    
+    public DateTime TimeStamp { get; init; }
 }
+
+/// <summary>
+/// 對應 Process provider 的 Opcode 11(Terminate)事件,schema 只含 ProcessId,無其他程序資訊。
+/// </summary>
+public readonly record struct ProcessTerminateInfo
+{
+    public uint ProcessId { get; init; }
+    public DateTime TimeStamp { get; init; }
+}
+
+
+
 
 public sealed class ModuleInfo
 {
@@ -481,6 +499,23 @@ internal sealed class DiskIoEventInfo
     public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
+public sealed class DiskIoOperation
+{
+    public required DateTime Timestamp { get; init; }
+    public DateTime? StartedAt { get; init; }
+    public DateTime? CompletedAt { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public string? CorrelationId { get; init; }
+    public ulong? TransferSize { get; init; }
+    public string? Operation { get; init; }
+    public double? LatencyMilliseconds { get; init; }
+    public required string MatchStatus { get; init; }
+}
+
 internal sealed class FileIoEventInfo
 {
     public required DateTime Timestamp { get; init; }
@@ -489,7 +524,6 @@ internal sealed class FileIoEventInfo
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
-    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
 internal sealed class ThreadInfo
@@ -501,7 +535,7 @@ internal sealed class ThreadInfo
     public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
-public sealed class PowerMeterPollingEventInfo_4
+public readonly record struct PowerMeterPollingEventInfo_4
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
@@ -510,6 +544,16 @@ public sealed class PowerMeterPollingEventInfo_4
     public ulong MeterId { get; init; }
     public ulong AbsoluteEnergy { get; init; }
     public ulong AbsoluteTime { get; init; }
+}
+
+public readonly record struct PowerMeterPollingEventInfo_3
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public ulong MeterId { get; init; }
+    public ulong Value { get; init; }
 }
 
 internal sealed class EnergyEstimationEventInfo
@@ -545,6 +589,23 @@ public readonly record struct WmiActivityEventInfo_11
     public bool IsLocal { get; init; }
 }
 
+public readonly record struct WmiActivityEventInfo_12
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public uint GroupOperationId { get; init; }
+    public string Operation { get; init; }
+    public uint HostId { get; init; }
+    public string ProviderName { get; init; }
+    public string ProviderGuid { get; init; }
+    public string Path { get; init; }
+}
+
+
 public readonly record struct WmiActivityEventInfo_24
 {
     public required DateTime Timestamp { get; init; }
@@ -560,7 +621,7 @@ public readonly record struct WmiActivityEventInfo_24
     public uint GroupOperationId { get; init; }
 }
 
-public sealed class KernelAcpiEventInfo
+public readonly record struct WmiActivityEventInfo_5857
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
@@ -568,7 +629,76 @@ public sealed class KernelAcpiEventInfo
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
-    //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
+    public string ProviderName { get; init; }
+    public uint Code { get; init; }
+    public string HostProcess { get; init; }
+    public uint ProcessID { get; init; }
+    public string ProviderPath { get; init; }
+}
+
+public readonly record struct WmiActivityEventInfo_100
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public string ComponentName { get; init; }
+    public string MessageDetail { get; init; }
+    public string FileName { get; init; }
+}
+
+public readonly record struct WmiActivityEventInfo_13
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public uint OperationId { get; init; }
+    public uint ResultCode { get; init; }
+}
+
+public readonly record struct WmiActivityEventInfo_16
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public uint OperationId { get; init; }
+    public string Operation { get; init; }
+    public uint ErrorId { get; init; }
+    public string Message { get; init; }
+}
+public readonly record struct KernelAcpiEventInfo_23
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public ushort AmlMethodNameLength { get; init; }
+    public string AmlMethodName { get; init; }
+    public UInt64 Frequency { get; init; }
+}
+
+public readonly record struct KernelAcpiEventInfo_7
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public ushort AmlMethodNameLength { get; init; }
+    public string AmlMethodName { get; init; }
+    public ushort AmlMethodState { get; init; }
+    public UInt64 AmlElapsedTime { get; init; }
 }
 
 public sealed class KernelPowerEventInfo
@@ -579,7 +709,6 @@ public sealed class KernelPowerEventInfo
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
     public required uint ThreadId { get; init; }
-    //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
 public readonly record struct ThreadStartStopEventInfo
@@ -787,6 +916,13 @@ internal static partial class NativeMethods
         uint bufferSize,
         byte* buffer);
 
+    [LibraryImport("advapi32.dll", EntryPoint = "ConvertSidToStringSidW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool ConvertSidToStringSid(nint sid, out nint stringSid);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "LocalFree")]
+    internal static partial nint LocalFree(nint hMem);
+
 }
 
 public sealed class EtlFileReader
@@ -812,7 +948,7 @@ public sealed class EtlFileReader
     private const byte ImageDCStopOpcode = 4;
     private const byte ImageLoadOpcode = 10;
     private long s_eventCount;
-    private readonly Dictionary<uint, ProcessInfo> s_activeProcesses = [];
+    //private readonly Dictionary<uint, ProcessInfo> s_activeProcesses = [];
 
     private EtlReadResult? _readResult;
 
@@ -830,7 +966,7 @@ public sealed class EtlFileReader
         s_eventCount = 0;
         s_schemaCache.Clear();
         s_cachedSchemaCache.Clear();
-        s_activeProcesses.Clear();
+        //s_activeProcesses.Clear();
         _readResult = new EtlReadResult();
 
         nint logFileNamePtr = 0;
@@ -1098,6 +1234,14 @@ public sealed class EtlFileReader
     public event ProcessEventHandler? ProcessStart;
     public event ProcessEventHandler? ProcessStop;
 
+    /// <summary>
+    /// 對應 Process provider 的 Opcode 11(Terminate)。此事件的 TDH schema 只定義 ProcessId 一個欄位,
+    /// 不含 ImageFileName/UserSID 等完整資訊,因此獨立為輕量事件,避免與 ProcessStart/ProcessStop
+    /// (opcode 1/2/3/4,擁有完整 ProcessInfo)混用造成接收端誤判欄位缺漏原因。
+    /// </summary>
+    public delegate void ProcessTerminateEventHandler(in ProcessTerminateInfo data);
+    public event ProcessTerminateEventHandler? ProcessTerminate;
+
     public delegate void PerfInfoDpcEventHandler(in DpcEventInfo data);
     public event PerfInfoDpcEventHandler? PerfInfoThreadedDPC;
     public event PerfInfoDpcEventHandler? PerfInfoDPC;
@@ -1115,8 +1259,11 @@ public sealed class EtlFileReader
     public event ImageLoadEventHandler? ImageDCStart;
     public event ImageLoadEventHandler? ImageDCStop;
 
-    public delegate void KernelAcpiEventHandler(KernelAcpiEventInfo data);
-    public event KernelAcpiEventHandler? KernelAcpi;
+    public delegate void KernelAcpiEventHandler_7(KernelAcpiEventInfo_7 data);
+    public event KernelAcpiEventHandler_7? KernelAcpi_7;
+
+    public delegate void KernelAcpiEventHandler_23(KernelAcpiEventInfo_23 data);
+    public event KernelAcpiEventHandler_23? KernelAcpi_23;
 
     public delegate void KernelPowerEventHandler(KernelPowerEventInfo data);
     public event KernelPowerEventHandler? KernelPower;
@@ -1125,6 +1272,8 @@ public sealed class EtlFileReader
     public event WmiActivityEventHandler_24? WmiActivity_24;
     public delegate void WmiActivityEventHandler_11(in WmiActivityEventInfo_11 data);
     public event WmiActivityEventHandler_11? WmiActivity_11;
+    public delegate void WmiActivityEventHandler_12(in WmiActivityEventInfo_12 data);
+    public event WmiActivityEventHandler_12? WmiActivity_12;
 
     public delegate void EnergyEstimationEngine_37Handler(in EnergyEstimationEngineEventInfo_37 data);
     public event EnergyEstimationEngine_37Handler? EnergyEstimationEngine_37;
@@ -1140,6 +1289,8 @@ public sealed class EtlFileReader
 
     public delegate void PowerMeterPollingEventInfo_4Handler(in PowerMeterPollingEventInfo_4 data);
     public event PowerMeterPollingEventInfo_4Handler? PowerMeterPollingEventInfo_4;
+    public delegate void DiskIoOperationHandler(DiskIoOperation operation);
+    public event DiskIoOperationHandler? DiskIoOperationCompleted;
 
 
 
@@ -1265,14 +1416,6 @@ public sealed class EtlFileReader
             return;
         }
 
-        //比較新舊版本時，保留其中一行並註解另一行。
-        //Dictionary<string, string>? properties = ReadProperties(eventRecordPtr, in record.EventHeader, in record);
-        //Dictionary<string, string>? properties = ReadProperties_CC(eventRecordPtr);
-        //if (properties is null)
-        //{
-        //    return;
-        //}
-
         CachedSchema? cache = GetOrAddCachedSchema(eventRecordPtr);
         if (cache is null)
         {
@@ -1284,37 +1427,117 @@ public sealed class EtlFileReader
         if (eventRecordPtr->EventHeader.ProviderId == s_processProviderId)
         {
             ProcessProcessEvent(opcode, timestamp, eventRecordPtr, cache);
+            //var strb = new StringBuilder();
+            //strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+            //foreach (var oo in cache.Properties)
+            //{
+            //    strb.Append($"{oo.Key}:{oo.Value.InType} ");
+            //}
+            //strb.AppendLine();
+            //System.Diagnostics.Trace.WriteLine(strb.ToString());
         }
         else if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
         {
+            
+
             //ProcessThreadEvent(opcode, timestamp, properties);
         }
-        //else if (record.EventHeader.ProviderId == s_diskIoProviderId)
+        //else if (eventRecordPtr->EventHeader.ProviderId == s_diskIoProviderId)
         //{
-        //    ProcessDiskIoEvent(timestamp, in record.EventHeader, properties);
+        //    Dictionary<string, string>? properties = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+        //    if (properties is not null)
+        //    {
+        //        ProcessDiskIoEvent(timestamp, in eventRecordPtr->EventHeader, properties);
+        //    }
         //}
-        //else if (record.EventHeader.ProviderId == s_fileIoProviderId)
+        //else if (eventRecordPtr->EventHeader.ProviderId == s_fileIoProviderId)
         //{
-        //    ProcessFileIoEvent(timestamp, in record.EventHeader, properties);
+        //    var strb = new StringBuilder();
+        //    strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+        //    foreach(var oo in cache.Properties)
+        //    {
+        //        strb.Append($"{oo.Key}:{oo.Value.InType}");
+        //    }
+        //    strb.AppendLine();
+        //    System.Diagnostics.Trace.WriteLine(strb.ToString());
+        //    ProcessFileIoEvent(timestamp, eventRecordPtr, cache);
         //}
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.WmiActivityProviderGuid)
         {
             var wmiEventId = eventRecordPtr->EventHeader.EventDescriptor.Id;
-            if(wmiEventId == 24)
+            if (wmiEventId == 24)
             {
-                var wmiActivityEvent_24 = ParseWmiActivityPayload_24(timestamp, eventRecordPtr, cache);
-                if (wmiActivityEvent_24 is { } wmiActivityEventValue_24)
+                if (WmiActivity_24 is not null)
                 {
-                    WmiActivity_24?.Invoke(in wmiActivityEventValue_24);
+                    var wmiActivityEvent_24 = ParseWmiActivityPayload_24(timestamp, eventRecordPtr, cache);
+                    if (wmiActivityEvent_24 is { } wmiActivityEventValue)
+                    {
+                        WmiActivity_24(in wmiActivityEventValue);
+                    }
                 }
             }
-            else if(wmiEventId == 11)
+            else if (wmiEventId == 11)
             {
-                var wmiActivityEvent_11 = ParseWmiActivityPayload_11(timestamp, eventRecordPtr, cache);
-                if (wmiActivityEvent_11 is { } wmiActivityEventValue_11)
+                if (WmiActivity_11 is not null)
                 {
-                    WmiActivity_11?.Invoke(in wmiActivityEventValue_11);
+                    var wmiActivityEvent_11 = ParseWmiActivityPayload_11(timestamp, eventRecordPtr, cache);
+                    if (wmiActivityEvent_11 is { } wmiActivityEventValue)
+                    {
+                        WmiActivity_11(in wmiActivityEventValue);
+                    }
                 }
+            }
+            else if (wmiEventId == 12)
+            {
+                var wmiActivityEvent = ParseWmiActivityPayload_12(timestamp, eventRecordPtr, cache);
+                if (wmiActivityEvent is { } wmiActivityEventValue)
+                {
+
+                }
+            }
+            else if (wmiEventId == 5857)
+            {
+                var wmiActivityEvent = ParseWmiActivityPayload_5857(timestamp, eventRecordPtr, cache);
+                if (wmiActivityEvent is { } wmiActivityEventValue)
+                {
+
+                }
+            }
+            else if (wmiEventId == 16)
+            {
+                var wmiActivityEvent = ParseWmiActivityPayload_16(timestamp, eventRecordPtr, cache);
+                if (wmiActivityEvent is { } wmiActivityEventValue)
+                {
+
+                }
+            }
+            else if (wmiEventId == 13)
+            {
+                var wmiActivityEvent = ParseWmiActivityPayload_13(timestamp, eventRecordPtr, cache);
+                if (wmiActivityEvent is { } wmiActivityEventValue)
+                {
+
+                }
+            }
+            else if (wmiEventId == 100)
+            {
+                var wmiActivityEvent = ParseWmiActivityPayload_100(timestamp, eventRecordPtr, cache);
+                if (wmiActivityEvent is { } wmiActivityEventValue)
+                {
+
+                }
+            }
+            else if (wmiEventId == 50) { }
+            else
+            {
+                var strb = new StringBuilder();
+                strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+                foreach (var oo in cache.Properties)
+                {
+                    strb.Append($"{oo.Key}:{oo.Value.InType} ");
+                }
+                strb.AppendLine();
+                System.Diagnostics.Trace.WriteLine(strb.ToString());
             }
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
@@ -1355,24 +1578,39 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
         {
-            //var properties = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
-            //System.Diagnostics.Trace.Write($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
-            //if (properties is not null)
-            //{
-            //    foreach (var property in properties)
-            //    {
-            //        System.Diagnostics.Trace.Write($"{property.Key}={property.Value}; ");
-            //    }
-            //}
-            //System.Diagnostics.Trace.WriteLine("");
-            KernelAcpiEventInfo acpiEvent = ProcessKernelAcpiEvent(timestamp, in eventRecordPtr->EventHeader);
-            KernelAcpi?.Invoke(acpiEvent);
+
+            var evtid = eventRecordPtr->EventHeader.EventDescriptor.Id;
+            if (evtid == 7)
+            {
+                var acpiEvent = ProcessKernelAcpiEvent_7(timestamp, eventRecordPtr, cache);
+                if (acpiEvent is { } acpievtvalue)
+                    KernelAcpi_7?.Invoke(acpievtvalue);
+            }
+            else if (evtid == 23)
+            {
+                var acpiEvent = ProcessKernelAcpiEvent_23(timestamp, eventRecordPtr, cache);
+                if (acpiEvent is { } acpievtvalue)
+                    KernelAcpi_23?.Invoke(acpievtvalue);
+            }
+            else
+            {
+                var strb = new StringBuilder();
+                strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+                foreach (var oo in cache.Properties)
+                {
+                    strb.Append($"{oo.Key}:{oo.Value.InType} ");
+                }
+                strb.AppendLine();
+                System.Diagnostics.Trace.WriteLine(strb.ToString());
+            }
+            
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
         {
             
             KernelPowerEventInfo kernelPowerEvent = ProcessKernelPowerEvent(timestamp, in eventRecordPtr->EventHeader);
             KernelPower?.Invoke(kernelPowerEvent);
+
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.PowerMeterPollingProviderGuid)
         {
@@ -1385,7 +1623,24 @@ public sealed class EtlFileReader
                     PowerMeterPollingEventInfo_4(powerneter_4);
                 }
             }
-            
+            else if (pepid == 3)
+            {
+                var powerneter = ProcessPowerMeterPollingEvent_3(timestamp, eventRecordPtr, cache);
+                if (PowerMeterPollingEventInfo_4 is not null)
+                {
+                }
+            }
+            else
+            {
+                var strb = new StringBuilder();
+                strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+                foreach (var oo in cache.Properties)
+                {
+                    strb.Append($"{oo.Key}:{oo.Value.InType} ");
+                }
+                strb.AppendLine();
+                System.Diagnostics.Trace.WriteLine(strb.ToString());
+            }
         }
     }
 
@@ -1518,6 +1773,92 @@ public sealed class EtlFileReader
         };
     }
 
+    private unsafe WmiActivityEventInfo_5857? ParseWmiActivityPayload_5857(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+
+        return new WmiActivityEventInfo_5857
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            ProviderName = GetRawPropertyString(eventRecordPtr, "ProviderName", schema),
+            Code = GetRawProperty<uint>(eventRecordPtr, "Code", schema),
+            HostProcess = GetRawPropertyString(eventRecordPtr, "HostProcess", schema),
+            ProviderPath = GetRawPropertyString(eventRecordPtr, "ProviderPath", schema),
+            ProcessID = GetRawProperty<uint>(eventRecordPtr, "ProcessID", schema),
+        };
+    }
+
+    private unsafe WmiActivityEventInfo_16? ParseWmiActivityPayload_16(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+
+        return new WmiActivityEventInfo_16
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            OperationId = GetRawProperty<uint>(eventRecordPtr, "OperationId", schema),
+            Operation = GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            ErrorId = GetRawProperty<uint>(eventRecordPtr, "ErrorId", schema),
+            Message = GetRawPropertyString(eventRecordPtr, "Message", schema),
+        };
+    }
+
+    private unsafe WmiActivityEventInfo_100? ParseWmiActivityPayload_100(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+
+        return new WmiActivityEventInfo_100
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            ComponentName = GetRawPropertyString(eventRecordPtr, "ComponentName", schema),
+            MessageDetail = GetRawPropertyString(eventRecordPtr, "MessageDetail", schema),
+            FileName = GetRawPropertyString(eventRecordPtr, "FileName", schema),
+        };
+    }
+
+    private unsafe WmiActivityEventInfo_13? ParseWmiActivityPayload_13(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+
+        return new WmiActivityEventInfo_13
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            OperationId = GetRawProperty<uint>(eventRecordPtr, "OperationId", schema),
+            ResultCode = GetRawProperty<uint>(eventRecordPtr, "ResultCode", schema),
+        };
+    }
+
     private unsafe WmiActivityEventInfo_11? ParseWmiActivityPayload_11(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
         if (eventRecordPtr == null)
@@ -1546,7 +1887,28 @@ public sealed class EtlFileReader
         };
     }
 
-
+    private unsafe WmiActivityEventInfo_12? ParseWmiActivityPayload_12(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+        return new WmiActivityEventInfo_12
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            GroupOperationId = GetRawProperty<uint>(eventRecordPtr, "GroupOperationId", schema),
+            Operation = GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            HostId = GetRawProperty<uint>(eventRecordPtr, "HostId", schema),
+            ProviderName = GetRawPropertyString(eventRecordPtr, "ProviderName", schema),
+            ProviderGuid = GetRawPropertyString(eventRecordPtr, "ProviderGuid", schema),
+            Path = GetRawPropertyString(eventRecordPtr, "Path", schema),
+        };
+    }
     private static unsafe T GetRawProperty<T>(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, T defaultvalue = default) where T : unmanaged
     {
         if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
@@ -1555,7 +1917,7 @@ public sealed class EtlFileReader
         }
 
         TdhInType expectedInType = GetExpectedInType<T>();
-        if (expectedInType != TdhInType.Null && property.InType != expectedInType)
+        if (expectedInType != TdhInType.Null && !IsCompatibleInType(property.InType, expectedInType))
         {
             return defaultvalue;
         }
@@ -1646,6 +2008,30 @@ public sealed class EtlFileReader
         return TdhInType.Null;
     }
 
+    /// <summary>
+    /// HexInt32/HexInt64 只是顯示格式（十六進位），二進位配置與 Int32/UInt32、Int64/UInt64 相同，
+    /// 因此讀取原始值時視為相容型別。
+    /// </summary>
+    private static bool IsCompatibleInType(TdhInType actual, TdhInType expected)
+    {
+        if (actual == expected)
+        {
+            return true;
+        }
+
+        if (actual == TdhInType.HexInt32)
+        {
+            return expected is TdhInType.Int32 or TdhInType.UInt32;
+        }
+
+        if (actual == TdhInType.HexInt64)
+        {
+            return expected is TdhInType.Int64 or TdhInType.UInt64;
+        }
+
+        return false;
+    }
+
     private static unsafe string GetRawPropertyString(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, string defaultvalue = "")
     {
         if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
@@ -1706,6 +2092,91 @@ public sealed class EtlFileReader
 
                 default:
                     return defaultvalue;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 讀取 InType 為 Sid(19) 或 WBEMSID(310) 的屬性,轉換為標準 SID 字串(例如 "S-1-5-21-...")。
+    /// WBEMSID 是 MOF-based(classic WMI)provider 使用的格式:一段依指標大小而定長度的
+    /// TOKEN_USER 前置資料(SID_AND_ATTRIBUTES),之後才是實際的 SID 結構,因此需先跳過前置資料。
+    /// </summary>
+    private static unsafe string GetRawPropertySidString(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, uint pointerSize, string defaultvalue = "")
+    {
+        if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
+        {
+            return defaultvalue;
+        }
+        if (property.InType != TdhInType.Sid && property.InType != TdhInType.WBEMSID)
+        {
+            return defaultvalue;
+        }
+
+        fixed (char* propertyNamePtr = propertyName)
+        {
+            PROPERTY_DATA_DESCRIPTOR descriptor = new()
+            {
+                PropertyName = (ulong)propertyNamePtr,
+                ArrayIndex = uint.MaxValue,
+            };
+
+            uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
+            if (status != EtwNativeConstants.ERROR_SUCCESS || propertySize == 0)
+            {
+                return defaultvalue;
+            }
+
+            byte* rawValue = stackalloc byte[checked((int)propertySize)];
+            status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, rawValue);
+            if (status != EtwNativeConstants.ERROR_SUCCESS)
+            {
+                return defaultvalue;
+            }
+
+            byte* sidPtr = rawValue;
+            uint sidByteCount = propertySize;
+
+            if (property.InType == TdhInType.WBEMSID)
+            {
+                if (propertySize < sizeof(int))
+                {
+                    return defaultvalue;
+                }
+
+                // 前 4 bytes 是 SID 指標欄位;0 表示沒有附帶 SID。
+                if (*(int*)rawValue == 0)
+                {
+                    return defaultvalue;
+                }
+
+                // TOKEN_USER(SID_AND_ATTRIBUTES)在 32 位元為 8 bytes,64 位元為 16 bytes。
+                uint tokenSize = pointerSize == 4 ? 8u : 16u;
+                if (propertySize < tokenSize + 8)
+                {
+                    return defaultvalue;
+                }
+
+                sidPtr = rawValue + tokenSize;
+                sidByteCount = propertySize - tokenSize;
+            }
+
+            if (sidByteCount < 8)
+            {
+                return defaultvalue;
+            }
+
+            if (!NativeMethods.ConvertSidToStringSid((nint)sidPtr, out nint stringSidPtr))
+            {
+                return defaultvalue;
+            }
+
+            try
+            {
+                return Marshal.PtrToStringUni(stringSidPtr) ?? defaultvalue;
+            }
+            finally
+            {
+                NativeMethods.LocalFree(stringSidPtr);
             }
         }
     }
@@ -1784,28 +2255,48 @@ public sealed class EtlFileReader
 
     private unsafe void ProcessProcessEvent(byte opcode, DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
-        var processId = GetRawProperty<uint>(eventRecordPtr, "ProcessId", cache, eventRecordPtr->EventHeader.ProcessId);
-        if (opcode is 1 or 3)
+        if (opcode == 11)
+        {
+            var terminateInfo = new ProcessTerminateInfo
+            {
+                ProcessId = GetRawProperty<uint>(eventRecordPtr, "ProcessId", cache, 0),
+                TimeStamp = timestamp
+            };
+            ProcessTerminate?.Invoke(in terminateInfo);
+            return;
+        }
+
+        if (opcode is 1 or 3 or 2 or 4)
         {
             var process = new ProcessInfo
             {
-                ProcessId = processId,
-                ParentProcessId = GetRawProperty<uint>(eventRecordPtr, "ParentId", cache, 0),
-                StartTime = timestamp,
+                UniqueProcessKey = GetRawProperty<UIntPtr>(eventRecordPtr, "UniqueProcessKey", cache, 0),
+                ProcessId = GetRawProperty<uint>(eventRecordPtr, "ProcessId", cache, 0),
+                ParentId = GetRawProperty<uint>(eventRecordPtr, "ParentId", cache, 0),
+                SessionId = GetRawProperty<uint>(eventRecordPtr, "SessionId", cache, 0),
+                ExitStatus = GetRawProperty<int>(eventRecordPtr, "ExitStatus", cache, 0),
+                DirectoryTableBase = GetRawProperty<UIntPtr>(eventRecordPtr, "DirectoryTableBase", cache, 0),
+                Flags = GetRawProperty<uint>(eventRecordPtr, "Flags", cache, 0),
+                UserSID = GetRawPropertySidString(eventRecordPtr, "UserSID", cache, GetPointerSize(in eventRecordPtr->EventHeader)),
                 ImageFileName = GetRawPropertyString(eventRecordPtr, "ImageFileName", cache),
                 CommandLine = GetRawPropertyString(eventRecordPtr, "CommandLine", cache),
+                PackageFullName = GetRawPropertyString(eventRecordPtr, "PackageFullName", cache),
+                ApplicationId = GetRawPropertyString(eventRecordPtr, "ApplicationId", cache),
+                TimeStamp = timestamp
             };
+            switch (opcode)
+            {
+                case 1 or 3:
+                    ProcessStart?.Invoke(process);
+                    break;
+                case 2 or 4:
+                    ProcessStop?.Invoke(process);
+                    break;
+            }
+        }
 
-            s_activeProcesses[processId] = process;
-            ProcessStart?.Invoke(process);
-        }
-        else if (opcode is 2 or 4 && s_activeProcesses.TryGetValue(processId, out ProcessInfo? process))
-        {
-            process.EndTime = timestamp;
-            ProcessStop?.Invoke(process);
-            s_activeProcesses.Remove(processId);
-        }
     }
+
 
     private void ProcessDiskIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
@@ -1830,33 +2321,64 @@ public sealed class EtlFileReader
         }
     }
 
-    private void ProcessFileIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
+    unsafe private FileIoEventInfo? ProcessFileIoEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        _readResult!.DiskFileIoEvents.Add(new FileIoEventInfo
+        return new FileIoEventInfo
         {
             Timestamp = timestamp,
-            EventId = header.EventDescriptor.Id,
-            Version = header.EventDescriptor.Version,
-            Opcode = header.EventDescriptor.Opcode,
-            ProcessId = header.ProcessId,
-            ThreadId = header.ThreadId,
-            Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
-        });
-    }
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
 
-
-    private KernelAcpiEventInfo ProcessKernelAcpiEvent(DateTime timestamp, in EVENT_HEADER header)
-    {
-        return new KernelAcpiEventInfo
-        {
-            Timestamp = timestamp,
-            EventId = header.EventDescriptor.Id,
-            Version = header.EventDescriptor.Version,
-            Opcode = header.EventDescriptor.Opcode,
-            ProcessId = header.ProcessId,
-            ThreadId = header.ThreadId,
         };
     }
+
+    private unsafe KernelAcpiEventInfo_7? ProcessKernelAcpiEvent_7(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+        return new KernelAcpiEventInfo_7
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            AmlMethodNameLength = GetRawProperty<ushort>(eventRecordPtr, "AmlMethodNameLength", schema),
+            AmlMethodName = GetRawPropertyString(eventRecordPtr, "AmlMethodName", schema),
+            AmlMethodState = GetRawProperty<ushort>(eventRecordPtr, "AmlMethodState", schema),
+            AmlElapsedTime = GetRawProperty<ulong>(eventRecordPtr, "AmlElapsedTime", schema),
+        };
+    }
+
+
+    private unsafe KernelAcpiEventInfo_23? ProcessKernelAcpiEvent_23(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+        return new KernelAcpiEventInfo_23
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            AmlMethodNameLength = GetRawProperty<ushort>(eventRecordPtr, "AmlMethodNameLength", schema),
+            AmlMethodName = GetRawPropertyString(eventRecordPtr, "AmlMethodName", schema),
+            Frequency = GetRawProperty<ulong>(eventRecordPtr, "Frequency", schema),
+        };
+    }
+
+
+
 
     private KernelPowerEventInfo ProcessKernelPowerEvent(DateTime timestamp, in EVENT_HEADER header)
     {
@@ -1883,6 +2405,19 @@ public sealed class EtlFileReader
             MeterId = GetRawPointerProperty(eventRecordPtr, "MeterId", cache),
             AbsoluteEnergy = GetRawProperty<ulong>(eventRecordPtr, "AbsoluteEnergy", cache),
             AbsoluteTime = GetRawProperty<ulong>(eventRecordPtr, "AbsoluteTime", cache),
+        };
+    }
+
+    private unsafe PowerMeterPollingEventInfo_3 ProcessPowerMeterPollingEvent_3(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        return new PowerMeterPollingEventInfo_3
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            MeterId = GetRawPointerProperty(eventRecordPtr, "MeterId", cache),
+            Value = GetRawProperty<uint>(eventRecordPtr, "Value", cache),
         };
     }
 
@@ -2184,177 +2719,42 @@ public sealed class EtlFileReader
 
     private readonly record struct RunningThread(uint ThreadId, uint ProcessId, DateTime StartTime);
 
-    private void AnalyzeCSwitchEvents(EtlReadResult result, EtlAnalysisResult analysis)
+
+
+    private void EmitDiskIoOperation(
+        DiskIoEventInfo eventInfo,
+        DiskIoEventInfo? startedEvent,
+        string? correlationId,
+        string matchStatus)
     {
-        Dictionary<uint, ProcessCpuSummary> summaries = [];
-        Dictionary<byte, RunningThread> runningThreads = [];
-
-        ProcessCpuSummary GetSummary(uint processId, DateTime timestamp)
+        ulong? transferSize = GetUInt64(eventInfo.Properties, "TransferSize", "IoSize", "Size", "ByteCount", "DataSize")
+            ?? (startedEvent is null
+                ? null
+                : GetUInt64(startedEvent.Properties, "TransferSize", "IoSize", "Size", "ByteCount", "DataSize"));
+        string operation = GetString(eventInfo.Properties, "Operation", "IoOperation", "IrpFlags");
+        if (string.IsNullOrWhiteSpace(operation))
         {
-            if (!summaries.TryGetValue(processId, out ProcessCpuSummary? summary))
-            {
-                summary = new ProcessCpuSummary
-                {
-                    ProcessId = processId,
-                    ImageFileName = FindProcessAtTime(result.Processes, processId, timestamp)?.ImageFileName ?? "<未關聯程序>",
-                };
-                summaries.Add(processId, summary);
-            }
-
-            return summary;
+            operation = $"Opcode {eventInfo.Opcode}";
         }
 
-        foreach (CSwitchEventInfo switchEvent in result.CSwitchEvents.OrderBy(switchEvent => switchEvent.Timestamp))
+        DiskIoOperationCompleted?.Invoke(new DiskIoOperation
         {
-            if (runningThreads.Remove(switchEvent.ProcessorNumber, out RunningThread runningThread))
-            {
-                if (switchEvent.OldThreadId == runningThread.ThreadId && switchEvent.OldProcessId == runningThread.ProcessId)
-                {
-                    TimeSpan duration = switchEvent.Timestamp - runningThread.StartTime;
-                    if (duration >= TimeSpan.Zero)
-                    {
-                        ProcessCpuSummary summary = GetSummary(runningThread.ProcessId, switchEvent.Timestamp);
-                        summary.EstimatedExecutionTime += duration;
-                        summary.DescheduledCount++;
-                        summary.ExecutionTimeByProcessor[switchEvent.ProcessorNumber] =
-                            summary.ExecutionTimeByProcessor.GetValueOrDefault(switchEvent.ProcessorNumber) + duration;
-                        summary.Samples.Add(new TimedSample(runningThread.StartTime, duration.TotalMilliseconds));
-
-                        if (switchEvent.OldThreadWaitReason is int waitReason)
-                        {
-                            summary.WaitReasonCounts[waitReason] = summary.WaitReasonCounts.GetValueOrDefault(waitReason) + 1;
-                        }
-                    }
-                    else
-                    {
-                        analysis.UnmatchedCpuIntervals++;
-                    }
-                }
-                else
-                {
-                    analysis.UnmatchedCpuIntervals++;
-                }
-            }
-
-            if (switchEvent.NewThreadId is uint newThreadId && switchEvent.NewProcessId is uint newProcessId)
-            {
-                ProcessCpuSummary summary = GetSummary(newProcessId, switchEvent.Timestamp);
-                summary.ScheduledCount++;
-                runningThreads[switchEvent.ProcessorNumber] = new RunningThread(newThreadId, newProcessId, switchEvent.Timestamp);
-            }
-        }
-
-        analysis.UnmatchedCpuIntervals += runningThreads.Count;
-        analysis.ProcessCpuSummaries.AddRange(summaries.Values.OrderByDescending(summary => summary.EstimatedExecutionTime));
-    }
-
-    private void AnalyzeDiskIoEvents(EtlReadResult result, EtlAnalysisResult analysis)
-    {
-        const double SlowIoThresholdMilliseconds = 50;
-        Dictionary<string, Queue<DiskIoEventInfo>> pendingRequests = new(StringComparer.OrdinalIgnoreCase);
-        Dictionary<uint, ProcessIoSummary> summaries = [];
-
-        ProcessIoSummary GetSummary(uint processId, DateTime timestamp)
-        {
-            if (!summaries.TryGetValue(processId, out ProcessIoSummary? summary))
-            {
-                summary = new ProcessIoSummary
-                {
-                    ProcessId = processId,
-                    ImageFileName = FindProcessAtTime(result.Processes, processId, timestamp)?.ImageFileName ?? "<未關聯程序>",
-                };
-                summaries.Add(processId, summary);
-            }
-
-            return summary;
-        }
-
-        foreach (DiskIoEventInfo initEvent in result.DiskIoInitEvents.OrderBy(ioEvent => ioEvent.Timestamp))
-        {
-            string? correlationId = GetIoCorrelationId(initEvent.Properties);
-            if (correlationId is null)
-            {
-                analysis.UnmatchedDiskIoEvents++;
-                GetSummary(initEvent.ProcessId, initEvent.Timestamp).UnmatchedOperationCount++;
-                continue;
-            }
-
-            if (!pendingRequests.TryGetValue(correlationId, out Queue<DiskIoEventInfo>? queue))
-            {
-                queue = [];
-                pendingRequests.Add(correlationId, queue);
-            }
-
-            queue.Enqueue(initEvent);
-        }
-
-        foreach (DiskIoEventInfo completedEvent in result.DiskIoEvents.OrderBy(ioEvent => ioEvent.Timestamp))
-        {
-            ProcessIoSummary summary = GetSummary(completedEvent.ProcessId, completedEvent.Timestamp);
-            summary.OperationCount++;
-
-            string operation = GetString(completedEvent.Properties, "Operation", "IoOperation", "IrpFlags");
-            if (string.IsNullOrWhiteSpace(operation))
-            {
-                operation = $"Opcode {completedEvent.Opcode}";
-            }
-            summary.OperationCounts[operation] = summary.OperationCounts.GetValueOrDefault(operation) + 1;
-
-            if (GetUInt64(completedEvent.Properties, "TransferSize", "IoSize", "Size", "ByteCount", "DataSize") is ulong byteCount)
-            {
-                long bytes = checked((long)Math.Min(byteCount, long.MaxValue));
-                summary.TotalBytes = (summary.TotalBytes ?? 0) + bytes;
-
-                // DiskIo Provider Opcode：10=Read，11=Write，其餘（如 14=Flush）不計入讀寫分項。
-                if (completedEvent.Opcode == 10)
-                {
-                    summary.TotalReadBytes = (summary.TotalReadBytes ?? 0) + bytes;
-                }
-                else if (completedEvent.Opcode == 11)
-                {
-                    summary.TotalWriteBytes = (summary.TotalWriteBytes ?? 0) + bytes;
-                }
-            }
-
-            string? correlationId = GetIoCorrelationId(completedEvent.Properties);
-            if (correlationId is null || !pendingRequests.Remove(correlationId, out Queue<DiskIoEventInfo>? starts) || starts.Count == 0)
-            {
-                analysis.UnmatchedDiskIoEvents++;
-                summary.UnmatchedOperationCount++;
-                continue;
-            }
-
-            DiskIoEventInfo startEvent = starts.Dequeue();
-            if (starts.Count > 0)
-            {
-                pendingRequests[correlationId] = starts;
-            }
-
-            TimeSpan latency = completedEvent.Timestamp - startEvent.Timestamp;
-            if (latency < TimeSpan.Zero)
-            {
-                analysis.UnmatchedDiskIoEvents++;
-                summary.UnmatchedOperationCount++;
-                continue;
-            }
-
-            summary.Latencies.Add(latency);
-            if (latency.TotalMilliseconds >= SlowIoThresholdMilliseconds)
-            {
-                summary.SlowOperationCount++;
-            }
-        }
-
-        foreach (Queue<DiskIoEventInfo> starts in pendingRequests.Values)
-        {
-            foreach (DiskIoEventInfo startEvent in starts)
-            {
-                analysis.UnmatchedDiskIoEvents++;
-                GetSummary(startEvent.ProcessId, startEvent.Timestamp).UnmatchedOperationCount++;
-            }
-        }
-
-        analysis.ProcessIoSummaries.AddRange(summaries.Values.OrderByDescending(summary => summary.TotalBytes ?? 0).ThenByDescending(summary => summary.OperationCount));
+            Timestamp = eventInfo.Timestamp,
+            StartedAt = startedEvent?.Timestamp,
+            CompletedAt = eventInfo.Opcode is 12 or 13 or 15 or 16 ? null : eventInfo.Timestamp,
+            EventId = eventInfo.EventId,
+            Version = eventInfo.Version,
+            Opcode = eventInfo.Opcode,
+            ProcessId = eventInfo.ProcessId,
+            ThreadId = eventInfo.ThreadId,
+            CorrelationId = correlationId,
+            TransferSize = transferSize,
+            Operation = operation,
+            LatencyMilliseconds = startedEvent is null || matchStatus != "Matched"
+                ? null
+                : (eventInfo.Timestamp - startedEvent.Timestamp).TotalMilliseconds,
+            MatchStatus = matchStatus,
+        });
     }
 
     private string? GetIoCorrelationId(IReadOnlyDictionary<string, string> properties)
@@ -2482,36 +2882,6 @@ public sealed class EtlFileReader
         return metric;
     }
 
-    private void AnalyzeProfileEvents(EtlReadResult result, EtlAnalysisResult analysis)
-    {
-        Dictionary<ulong, AddressSampleSummary> summaries = [];
-        foreach (ProfileEventInfo profileEvent in result.ProfileEvents)
-        {
-            if (profileEvent.InstructionPointer is not ulong address)
-            {
-                continue;
-            }
-
-            if (!summaries.TryGetValue(address, out AddressSampleSummary? summary))
-            {
-                summary = new AddressSampleSummary { Address = address };
-                uint? processId = FindScheduledProcessAtTime(result.CSwitchEvents, profileEvent.ProcessorNumber, profileEvent.Timestamp);
-                if (processId is uint id && TryMapAddressToModule(result, id, profileEvent.Timestamp, address, out ModuleInfo? module, out ulong relativeAddress))
-                {
-                    summary.ModuleName = module.FileName;
-                    summary.ModuleRelativeAddress = relativeAddress;
-                }
-
-                summaries.Add(address, summary);
-            }
-
-            summary.SampleCount++;
-            summary.SamplesByProcessor[profileEvent.ProcessorNumber] = summary.SamplesByProcessor.GetValueOrDefault(profileEvent.ProcessorNumber) + 1;
-        }
-
-        analysis.ProfileHotspots.AddRange(summaries.Values.OrderByDescending(summary => summary.SampleCount));
-    }
-
     private uint? FindScheduledProcessAtTime(IEnumerable<CSwitchEventInfo> events, byte processorNumber, DateTime timestamp)
     {
         return events
@@ -2521,26 +2891,6 @@ public sealed class EtlFileReader
             .FirstOrDefault(processId => processId is not null);
     }
 
-    private bool TryMapAddressToModule(EtlReadResult result, uint processId, DateTime timestamp, ulong address, out ModuleInfo? matchedModule, out ulong relativeAddress)
-    {
-        matchedModule = result.Processes
-            .Where(process => process.ProcessId == processId)
-            .SelectMany(process => process.Modules)
-            .Where(module => module.LoadTime <= timestamp)
-            .FirstOrDefault(module =>
-                TryParseAddress(module.ImageBase, out ulong imageBase) &&
-                TryParseAddress(module.ImageSize, out ulong imageSize) &&
-                address >= imageBase && address - imageBase < imageSize);
-
-        if (matchedModule is null || !TryParseAddress(matchedModule.ImageBase, out ulong baseAddress))
-        {
-            relativeAddress = 0;
-            return false;
-        }
-
-        relativeAddress = address - baseAddress;
-        return true;
-    }
 
     private bool TryParseAddress(string value, out ulong address)
     {
@@ -2553,65 +2903,6 @@ public sealed class EtlFileReader
         }
 
         return ulong.TryParse(value, styles, CultureInfo.InvariantCulture, out address);
-    }
-
-    private void AnalyzeRoutineEvents(EtlReadResult result, EtlAnalysisResult analysis)
-    {
-        AnalyzeRoutineEvents(result, result.DpcEvents, dpcEvent => dpcEvent.Routine, dpcEvent => dpcEvent.ProcessorNumber, dpcEvent => dpcEvent.Timestamp, analysis.DpcHotspots);
-        AnalyzeRoutineEvents(result, result.InterruptEvents, interruptEvent => interruptEvent.Routine, interruptEvent => interruptEvent.ProcessorNumber, interruptEvent => interruptEvent.Timestamp, analysis.InterruptHotspots);
-    }
-
-    private void AnalyzeRoutineEvents<T>(
-        EtlReadResult result,
-        IEnumerable<T> events,
-        Func<T, ulong?> getRoutine,
-        Func<T, byte> getProcessorNumber,
-        Func<T, DateTime> getTimestamp,
-        List<RoutineEventSummary> destination)
-    {
-        Dictionary<ulong?, RoutineEventSummary> summaries = [];
-        foreach (T eventInfo in events)
-        {
-            ulong? routine = getRoutine(eventInfo);
-            if (!summaries.TryGetValue(routine, out RoutineEventSummary? summary))
-            {
-                summary = new RoutineEventSummary { Routine = routine };
-                if (routine is ulong address && TryMapAddressToAnyModule(result, getTimestamp(eventInfo), address, out ModuleInfo? module, out ulong relativeAddress))
-                {
-                    summary.ModuleName = module.FileName;
-                    summary.ModuleRelativeAddress = relativeAddress;
-                }
-
-                summaries.Add(routine, summary);
-            }
-
-            summary.EventCount++;
-            byte processorNumber = getProcessorNumber(eventInfo);
-            summary.EventsByProcessor[processorNumber] = summary.EventsByProcessor.GetValueOrDefault(processorNumber) + 1;
-            summary.Samples.Add(new TimedSample(getTimestamp(eventInfo), summary.EventCount));
-        }
-
-        destination.AddRange(summaries.Values.OrderByDescending(summary => summary.EventCount));
-    }
-
-    private bool TryMapAddressToAnyModule(EtlReadResult result, DateTime timestamp, ulong address, out ModuleInfo? matchedModule, out ulong relativeAddress)
-    {
-        matchedModule = result.Processes
-            .SelectMany(process => process.Modules)
-            .Where(module => module.LoadTime <= timestamp)
-            .FirstOrDefault(module =>
-                TryParseAddress(module.ImageBase, out ulong imageBase) &&
-                TryParseAddress(module.ImageSize, out ulong imageSize) &&
-                address >= imageBase && address - imageBase < imageSize);
-
-        if (matchedModule is null || !TryParseAddress(matchedModule.ImageBase, out ulong baseAddress))
-        {
-            relativeAddress = 0;
-            return false;
-        }
-
-        relativeAddress = address - baseAddress;
-        return true;
     }
 
     private EtlAnalysisResult Analyze(EtlReadResult result)
@@ -2627,10 +2918,6 @@ public sealed class EtlFileReader
             analysis.DataQualityWarnings.Add($"讀取 ETL 時回報遺失 {result.EventsLost} 筆事件，統計結果可能不完整。");
         }
 
-        AnalyzeCSwitchEvents(result, analysis);
-        AnalyzeDiskIoEvents(result, analysis);
-        AnalyzeProfileEvents(result, analysis);
-        AnalyzeRoutineEvents(result, analysis);
 
         if (analysis.UnmatchedCpuIntervals > 0)
         {
@@ -2714,78 +3001,10 @@ public sealed class EtlFileReader
 
 
 
-    private void PrintCSwitchSummary(EtlReadResult result)
-    {
-        Console.WriteLine();
-        Console.WriteLine($"=== CSwitch ({result.CSwitchEvents.Count}) ===");
-
-        if (result.CSwitchEvents.Count == 0)
-        {
-            Console.WriteLine("未取得 CSwitch 事件；請確認已啟用 EVENT_TRACE_FLAG_CSWITCH 且以系統管理員身分執行。");
-            return;
-        }
-
-        var scheduledCounts = result.CSwitchEvents
-            .Where(cswitchEvent => cswitchEvent.NewProcessId is not null)
-            .GroupBy(cswitchEvent => cswitchEvent.NewProcessId!.Value)
-            .ToDictionary(group => group.Key, group => group.Count());
-        var descheduledEvents = result.CSwitchEvents
-            .Where(cswitchEvent => cswitchEvent.OldProcessId is not null)
-            .GroupBy(cswitchEvent => cswitchEvent.OldProcessId!.Value)
-            .ToDictionary(group => group.Key, group => group.ToList());
-
-        Console.WriteLine("每程序排程摘要（依被換出次數排序）:");
-        foreach (uint processId in scheduledCounts.Keys.Union(descheduledEvents.Keys)
-            .OrderByDescending(processId => descheduledEvents.GetValueOrDefault(processId)?.Count ?? 0)
-            .ThenByDescending(processId => scheduledCounts.GetValueOrDefault(processId))
-            .Take(10))
-        {
-            List<CSwitchEventInfo> events = descheduledEvents.GetValueOrDefault(processId) ?? [];
-            string imageFileName = result.Processes.LastOrDefault(process => process.ProcessId == processId)?.ImageFileName ?? "<未關聯程序>";
-            Console.WriteLine($"  PID={processId} {imageFileName}: 排入={scheduledCounts.GetValueOrDefault(processId)}, 換出={events.Count}");
-
-            foreach (var waitReason in events
-                .GroupBy(cswitchEvent => cswitchEvent.OldThreadWaitReason)
-                .OrderByDescending(group => group.Count())
-                .Take(3))
-            {
-                Console.WriteLine($"    等待原因={waitReason.Key}: {waitReason.Count()} 次");
-            }
-        }
-
-        int unassociatedCount = result.CSwitchEvents.Count(cswitchEvent =>
-            cswitchEvent.NewProcessId is null && cswitchEvent.OldProcessId is null);
-        if (unassociatedCount > 0)
-        {
-            Console.WriteLine($"  無法關聯程序的切換事件: {unassociatedCount}");
-        }
-
-        foreach (CSwitchEventInfo cswitchEvent in result.CSwitchEvents.OrderBy(cswitchEvent => cswitchEvent.Timestamp).Take(20))
-        {
-            Console.WriteLine(
-                $"時間={cswitchEvent.Timestamp:O} CPU={cswitchEvent.ProcessorNumber} " +
-                $"NewTID={cswitchEvent.NewThreadId} NewPID={cswitchEvent.NewProcessId} " +
-                $"OldTID={cswitchEvent.OldThreadId} OldPID={cswitchEvent.OldProcessId} " +
-                $"NewPri={cswitchEvent.NewThreadPriority} OldPri={cswitchEvent.OldThreadPriority} " +
-                $"OldWaitReason={cswitchEvent.OldThreadWaitReason} OldWaitMode={cswitchEvent.OldThreadWaitMode} OldState={cswitchEvent.OldThreadState}");
-        }
-
-        if (result.CSwitchEvents.Count > 20)
-        {
-            Console.WriteLine($"...(僅顯示前 20 筆，共 {result.CSwitchEvents.Count} 筆)");
-        }
-    }
 
     private string FormatAddress(ulong? address)
     {
         return address is ulong value ? $"0x{value:X}" : "<無法解析>";
     }
 
-    private ProcessInfo? FindProcessAtTime(IEnumerable<ProcessInfo> processes, uint processId, DateTime timestamp)
-    {
-        return processes.FirstOrDefault(process =>
-            process.ProcessId == processId &&
-            process.StartTime <= timestamp &&
-            (process.EndTime is null || timestamp <= process.EndTime));
-    }
 }

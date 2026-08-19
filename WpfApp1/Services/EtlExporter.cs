@@ -43,6 +43,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         m_ThreadStartedAts.Clear();
         m_ThreadProcessIds.Clear();
         m_ProcessThreadCpuSummaries.Clear();
+        m_ProcessStartedAts.Clear();
         m_LastEventTimestamp = null;
         UnmatchedCpuIntervalCount = 0;
         IncompleteCpuIntervalCount = 0;
@@ -77,6 +78,7 @@ internal class SQLiteExport(DataBase_SQLite db)
     private readonly Dictionary<uint, DateTime> m_ThreadStartedAts = [];
     private readonly Dictionary<uint, uint> m_ThreadProcessIds = [];
     private readonly Dictionary<uint, List<ThreadCpuSummary>> m_ProcessThreadCpuSummaries = [];
+    private readonly Dictionary<uint, DateTime> m_ProcessStartedAts = [];
     private StreamWriter? m_CSwitchCsvWriter;
     private string? m_CSwitchCsvPath;
     private DateTime? m_LastEventTimestamp;
@@ -202,14 +204,22 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     protected virtual void OnProcessStart(ProcessInfo process)
     {
-        TrackEventTimestamp(process.StartTime);
+        TrackEventTimestamp(process.TimeStamp);
+        m_ProcessStartedAts[process.ProcessId] = process.TimeStamp;
         db.WriteProcessStart(process);
     }
 
     protected virtual void OnProcessStop(ProcessInfo process)
     {
-        DateTime processStoppedAt = process.EndTime ?? throw new InvalidOperationException("程序結束事件未提供結束時間。");
+        DateTime processStoppedAt = process.TimeStamp;
         TrackEventTimestamp(processStoppedAt);
+
+        bool hasProcessStartedAt = m_ProcessStartedAts.Remove(process.ProcessId, out DateTime processStartedAt);
+        if (!hasProcessStartedAt)
+        {
+            processStartedAt = processStoppedAt;
+        }
+
         List<uint> activeThreadIds = [];
         foreach ((uint threadId, uint processId) in m_ThreadProcessIds)
         {
@@ -252,8 +262,22 @@ internal class SQLiteExport(DataBase_SQLite db)
         }
 
         m_ProcessThreadCpuSummaries.Remove(process.ProcessId, out List<ThreadCpuSummary>? threadCpuSummaries);
-        ProcessCpuSummary? cpuSummary = CreateProcessCpuSummary(process, threadCpuSummaries);
-        db.WriteProcessStop(process, cpuSummary?.DurationTicks, cpuSummary?.CpuUsagePercent);
+        ProcessCpuSummary? cpuSummary = CreateProcessCpuSummary(processStartedAt, processStoppedAt, threadCpuSummaries);
+        db.WriteProcessStop(process, processStartedAt, cpuSummary?.DurationTicks, cpuSummary?.CpuUsagePercent);
+    }
+
+    /// <summary>
+    /// 對應 Process provider 的 Opcode 11(Terminate),schema 只提供 ProcessId,沒有 ImageFileName/
+    /// CommandLine/UserSID 等資訊。仍視為程序真正結束的訊號,沿用與 OnProcessStop 相同的收尾邏輯
+    /// (結算尚未收到 ThreadStop 的執行緒、寫入 CPU 統計),但寫入 SQLite 時其餘欄位保持預設值。
+    /// </summary>
+    protected virtual void OnProcessTerminate(in ProcessTerminateInfo data)
+    {
+        OnProcessStop(new ProcessInfo
+        {
+            ProcessId = data.ProcessId,
+            TimeStamp = data.TimeStamp,
+        });
     }
 
     protected virtual void OnImageLoad(in ImageLoadEventInfo data)
@@ -281,12 +305,6 @@ internal class SQLiteExport(DataBase_SQLite db)
     }
 
 
-    protected virtual void OnKernelAcpi(KernelAcpiEventInfo data)
-    {
-        TrackEventTimestamp(data.Timestamp);
-        db.WriteKernelAcpi(data);
-    }
-
     protected virtual void OnProfile(ProfileEventInfo data)
     {
         TrackEventTimestamp(data.Timestamp);
@@ -312,23 +330,31 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ThreadDCStop += OnThreadStop;
         reader.ProcessStart += OnProcessStart;
         reader.ProcessStop += OnProcessStop;
+        reader.ProcessTerminate += OnProcessTerminate;
         reader.ImageLoad += OnImageLoad;
         reader.ImageUnload += OnImageUnload;
+        reader.ImageDCStart += OnImageLoad;
         reader.WmiActivity_24 += OnWmiActivity_24;
         reader.WmiActivity_11 += OnWmiActivity_11;
         reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
         reader.EnergyEstimationEngine_14 += OnEnergyEstimationEngine_14;
         reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
         reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
-        reader.KernelAcpi += OnKernelAcpi;
         reader.PerfInfoProfile += OnProfile;
         reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
+        reader.DiskIoOperationCompleted += OnDiskIoOperationCompleted;
     }
 
     private void OnEnergyEstimationEngine_33(in EnergyEstimationEngineEventInfo_33 data)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteEnergyEstimationEngineQueryStats(in data);
+    }
+
+    private void OnDiskIoOperationCompleted(DiskIoOperation operation)
+    {
+        TrackEventTimestamp(operation.Timestamp);
+        db.WriteDiskIoOperation(operation);
     }
 
     private void OnEnergyEstimationEngine_18(in EnergyEstimationEngineEventInfo_18 data)
@@ -362,6 +388,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ThreadDCStop -= OnThreadStop;
         reader.ProcessStart -= OnProcessStart;
         reader.ProcessStop -= OnProcessStop;
+        reader.ProcessTerminate -= OnProcessTerminate;
         reader.ImageLoad -= OnImageLoad;
         reader.ImageUnload -= OnImageUnload;
         reader.WmiActivity_24 -= OnWmiActivity_24;
@@ -370,11 +397,10 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.EnergyEstimationEngine_14 -= OnEnergyEstimationEngine_14;
         reader.EnergyEstimationEngine_18 -= OnEnergyEstimationEngine_18;
         reader.EnergyEstimationEngine_33 -= OnEnergyEstimationEngine_33;
-        reader.KernelAcpi -= OnKernelAcpi;
         reader.ImageDCStart -= OnImageLoad;
-        reader.ImageDCStop -= OnImageUnload;
         reader.PerfInfoProfile -= OnProfile;
         reader.PowerMeterPollingEventInfo_4 -= OnPowerMeterPollingEvent_4;
+        reader.DiskIoOperationCompleted -= OnDiskIoOperationCompleted;
     }
 
     private void WriteIncompleteThreadLifetimes()
@@ -534,22 +560,24 @@ internal class SQLiteExport(DataBase_SQLite db)
         summaries.Add(summary);
     }
 
+
     private static ProcessCpuSummary? CreateProcessCpuSummary(
-        ProcessInfo process,
+        DateTime processStartedAt,
+        DateTime processStoppedAt,
         List<ThreadCpuSummary>? threadCpuSummaries)
     {
-        if (threadCpuSummaries is null || threadCpuSummaries.Count == 0 || process.EndTime is not DateTime endedAt)
+        if (threadCpuSummaries is null || threadCpuSummaries.Count == 0)
         {
             return null;
         }
 
         long durationTicks = 0;
-        foreach (ThreadCpuSummary threadCpuSummary in threadCpuSummaries)
+        foreach (ThreadCpuSummary summary in threadCpuSummaries)
         {
-            durationTicks = checked(durationTicks + threadCpuSummary.DurationTicks);
+            durationTicks = checked(durationTicks + summary.DurationTicks);
         }
 
-        long lifetimeTicks = (endedAt - process.StartTime).Ticks;
+        long lifetimeTicks = (processStoppedAt - processStartedAt).Ticks;
         double cpuUsagePercent = lifetimeTicks > 0
             ? durationTicks * 100.0 / lifetimeTicks
             : 0;
