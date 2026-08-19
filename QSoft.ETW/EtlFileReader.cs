@@ -231,6 +231,28 @@ internal struct EVENT_PROPERTY_INFO
 
 internal readonly record struct SchemaKey(Guid ProviderId, ushort Id, byte Version, byte Opcode);
 
+public enum FileIoOpcode : byte
+{
+    Name = 0,
+    NameCreate = 32,
+    NameDelete = 35,
+    NameRundown = 36,
+    Create = 64,
+    Cleanup = 65,
+    Close = 66,
+    Read = 67,
+    Write = 68,
+    SetInfo = 69,
+    Delete = 70,
+    Rename = 71,
+    DirectoryEnumeration = 72,
+    Flush = 73,
+    QueryInfo = 74,
+    FileSystemControl = 75,
+    OperationEnd = 76,
+    DirectoryNotification = 77,
+}
+
 /// <summary>
 /// 對應 TDH (Trace Data Helper) 的 TDH_IN_TYPE,描述屬性原始資料的二進位格式/大小。
 /// </summary>
@@ -530,6 +552,19 @@ internal sealed class ThreadInfo
     public DateTime? EndTime { get; set; }
     public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
+
+public readonly record struct FileIOEventInfo
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public UIntPtr FileObject { get; init; }
+    public string FileName { get; init; }
+}
+
 
 public readonly record struct PowerMeterPollingEventInfo_4
 {
@@ -1548,26 +1583,53 @@ public sealed class EtlFileReader
 
             //ProcessThreadEvent(opcode, timestamp, properties);
         }
-        //else if (eventRecordPtr->EventHeader.ProviderId == s_diskIoProviderId)
-        //{
-        //    Dictionary<string, string>? properties = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
-        //    if (properties is not null)
-        //    {
-        //        ProcessDiskIoEvent(timestamp, in eventRecordPtr->EventHeader, properties);
-        //    }
-        //}
-        //else if (eventRecordPtr->EventHeader.ProviderId == s_fileIoProviderId)
-        //{
-        //    var strb = new StringBuilder();
-        //    strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
-        //    foreach(var oo in cache.Properties)
-        //    {
-        //        strb.Append($"{oo.Key}:{oo.Value.InType}");
-        //    }
-        //    strb.AppendLine();
-        //    System.Diagnostics.Trace.WriteLine(strb.ToString());
-        //    ProcessFileIoEvent(timestamp, eventRecordPtr, cache);
-        //}
+        else if (eventRecordPtr->EventHeader.ProviderId == s_diskIoProviderId)
+        {
+            //Dictionary<string, string>? properties = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+            //if (properties is not null)
+            //{
+            //    ProcessDiskIoEvent(timestamp, in eventRecordPtr->EventHeader, properties);
+            //}
+            var pps = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+            System.Diagnostics.Trace.Write($"disk ");
+            foreach (var oo in pps)
+            {
+                System.Diagnostics.Trace.Write($"{oo.Key}:{oo.Value} ");
+            }
+            System.Diagnostics.Trace.WriteLine("");
+        }
+        else if (eventRecordPtr->EventHeader.ProviderId == s_fileIoProviderId)
+        {
+            var pps = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+            System.Diagnostics.Trace.Write($"file ");
+            foreach (var oo in pps)
+            {
+                System.Diagnostics.Trace.Write($"{oo.Key}:{oo.Value} ");
+            }
+            System.Diagnostics.Trace.WriteLine("");
+            //byte rawOpcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
+            //FileIoOpcode fileIoOpcode = (FileIoOpcode)rawOpcode;
+            //FileIOEventInfo ff = new FileIOEventInfo()
+            //{
+            //    Timestamp = timestamp,
+            //    EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            //    Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            //    Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            //    ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            //    ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            //    FileObject = GetRawProperty<uint>(eventRecordPtr, "FileObject", cache),
+            //    FileName = GetRawPropertyString(eventRecordPtr, "FileName", cache),
+            //};
+            //var strb = new StringBuilder();
+            //strb.Append($"fileio {eventRecordPtr->EventHeader.EventDescriptor.Id} {fileIoOpcode} ({rawOpcode})");
+            //foreach (var oo in cache.Properties)
+            //{
+            //    strb.Append($"{oo.Key}:{oo.Value.InType}");
+            //}
+            //strb.AppendLine();
+            //System.Diagnostics.Trace.WriteLine(strb.ToString());
+            //ProcessFileIoEvent(timestamp, eventRecordPtr, cache);
+        }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.WmiActivityProviderGuid)
         {
             var wmiEventId = eventRecordPtr->EventHeader.EventDescriptor.Id;
@@ -1764,9 +1826,16 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
         {
-            
-            KernelPowerEventInfo kernelPowerEvent = ProcessKernelPowerEvent(timestamp, in eventRecordPtr->EventHeader);
-            KernelPower?.Invoke(kernelPowerEvent);
+            //var strb = new StringBuilder();
+            //strb.Append($"kernel power {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+            //foreach (var oo in cache.Properties)
+            //{
+            //    strb.Append($"{oo.Key}:{oo.Value.InType} ");
+            //}
+            //strb.AppendLine();
+            //System.Diagnostics.Trace.WriteLine(strb.ToString());
+            //KernelPowerEventInfo kernelPowerEvent = ProcessKernelPowerEvent(timestamp, in eventRecordPtr->EventHeader);
+            //KernelPower?.Invoke(kernelPowerEvent);
 
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.PowerMeterPollingProviderGuid)
@@ -1979,10 +2048,7 @@ public sealed class EtlFileReader
 
     private unsafe WmiActivityEventInfo_24? ParseWmiActivityPayload_24(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
 
         return new WmiActivityEventInfo_24
         {
@@ -2002,10 +2068,7 @@ public sealed class EtlFileReader
 
     private unsafe WmiActivityEventInfo_5857? ParseWmiActivityPayload_5857(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
 
         return new WmiActivityEventInfo_5857
         {
@@ -2025,11 +2088,7 @@ public sealed class EtlFileReader
 
     private unsafe WmiActivityEventInfo_16? ParseWmiActivityPayload_16(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
-
+        if (eventRecordPtr == null) return null;
         return new WmiActivityEventInfo_16
         {
             Timestamp = timestamp,
@@ -2047,10 +2106,7 @@ public sealed class EtlFileReader
 
     private unsafe WmiActivityEventInfo_100? ParseWmiActivityPayload_100(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
 
         return new WmiActivityEventInfo_100
         {
@@ -2068,10 +2124,7 @@ public sealed class EtlFileReader
 
     private unsafe WmiActivityEventInfo_101? ParseWmiActivityPayload_101(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
 
         return new WmiActivityEventInfo_101
         {
@@ -2090,10 +2143,7 @@ public sealed class EtlFileReader
 
     private unsafe WmiActivityEventInfo_13? ParseWmiActivityPayload_13(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
 
         return new WmiActivityEventInfo_13
         {
@@ -2110,10 +2160,8 @@ public sealed class EtlFileReader
 
     private unsafe WmiActivityEventInfo_11? ParseWmiActivityPayload_11(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
+
         return new WmiActivityEventInfo_11
         {
             Timestamp = timestamp,
@@ -2138,10 +2186,7 @@ public sealed class EtlFileReader
 
     private unsafe WmiActivityEventInfo_12? ParseWmiActivityPayload_12(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
         return new WmiActivityEventInfo_12
         {
             Timestamp = timestamp,
@@ -2674,7 +2719,6 @@ public sealed class EtlFileReader
             Opcode = header.EventDescriptor.Opcode,
             ProcessId = header.ProcessId,
             ThreadId = header.ThreadId,
-            //Properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase),
         };
     }
 
@@ -2902,11 +2946,6 @@ public sealed class EtlFileReader
             : unchecked((ulong)Marshal.ReadInt64(address, offset));
     }
 
-    /// <summary>
-    /// 手動解析 Image Load/Unload/DCStart/DCStop 事件的固定版面(Image_Load MOF 結構)，不透過 TDH。
-    /// 版面(小端序): ImageBase(ptr) ImageSize(ptr) ProcessId(u32) ImageCheckSum(u32) TimeDateStamp(u32)
-    /// Reserved0(u32) DefaultBase(ptr) Reserved1(u32) Reserved2(u32) Reserved3(u32) Reserved4(u32) FileName(wchar_t*，以 Null 結尾，佔用剩餘空間)。
-    /// </summary>
     private ImageLoadEventInfo? ParseImageLoadPayload(DateTime timestamp, byte opcode, in EVENT_HEADER header, nint userData, int userDataLength)
     {
         var pointerSize = GetPointerSize(in header);
@@ -2943,250 +2982,6 @@ public sealed class EtlFileReader
                 ? Marshal.PtrToStringUni(userData + fileNameOffset) ?? string.Empty
                 : string.Empty,
         };
-    }
-
-    private string GetString(IReadOnlyDictionary<string, string> properties, params string[] names)
-    {
-        foreach (string name in names)
-        {
-            if (properties.TryGetValue(name, out string? value))
-            {
-                return value;
-            }
-        }
-
-        return string.Empty;
-    }
-
-    private uint? GetUInt32(IReadOnlyDictionary<string, string> properties, params string[] names)
-    {
-        string? value = null;
-        foreach (string name in names)
-        {
-            if (properties.TryGetValue(name, out value))
-            {
-                break;
-            }
-        }
-
-        if (value is null)
-        {
-            return null;
-        }
-
-        NumberStyles styles = NumberStyles.Integer;
-        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-        {
-            value = value[2..];
-            styles = NumberStyles.AllowHexSpecifier;
-        }
-
-        return uint.TryParse(value, styles, CultureInfo.InvariantCulture, out uint result) ? result : null;
-    }
-
-    private int? GetInt32(IReadOnlyDictionary<string, string> properties, string name)
-    {
-        if (!properties.TryGetValue(name, out string? value))
-        {
-            return null;
-        }
-
-        NumberStyles styles = NumberStyles.Integer;
-        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-        {
-            value = value[2..];
-            styles = NumberStyles.AllowHexSpecifier;
-        }
-
-        return int.TryParse(value, styles, CultureInfo.InvariantCulture, out int result) ? result : null;
-    }
-
-    private readonly record struct RunningThread(uint ThreadId, uint ProcessId, DateTime StartTime);
-
-
-
-    private void EmitDiskIoOperation(
-        DiskIoEventInfo eventInfo,
-        DiskIoEventInfo? startedEvent,
-        string? correlationId,
-        string matchStatus)
-    {
-        ulong? transferSize = GetUInt64(eventInfo.Properties, "TransferSize", "IoSize", "Size", "ByteCount", "DataSize")
-            ?? (startedEvent is null
-                ? null
-                : GetUInt64(startedEvent.Properties, "TransferSize", "IoSize", "Size", "ByteCount", "DataSize"));
-        string operation = GetString(eventInfo.Properties, "Operation", "IoOperation", "IrpFlags");
-        if (string.IsNullOrWhiteSpace(operation))
-        {
-            operation = $"Opcode {eventInfo.Opcode}";
-        }
-
-        DiskIoOperationCompleted?.Invoke(new DiskIoOperation
-        {
-            Timestamp = eventInfo.Timestamp,
-            StartedAt = startedEvent?.Timestamp,
-            CompletedAt = eventInfo.Opcode is 12 or 13 or 15 or 16 ? null : eventInfo.Timestamp,
-            EventId = eventInfo.EventId,
-            Version = eventInfo.Version,
-            Opcode = eventInfo.Opcode,
-            ProcessId = eventInfo.ProcessId,
-            ThreadId = eventInfo.ThreadId,
-            CorrelationId = correlationId,
-            TransferSize = transferSize,
-            Operation = operation,
-            LatencyMilliseconds = startedEvent is null || matchStatus != "Matched"
-                ? null
-                : (eventInfo.Timestamp - startedEvent.Timestamp).TotalMilliseconds,
-            MatchStatus = matchStatus,
-        });
-    }
-
-    private string? GetIoCorrelationId(IReadOnlyDictionary<string, string> properties)
-    {
-        foreach (string name in new[] { "IrpPtr", "Irp", "RequestId", "RequestID", "IoRequestId" })
-        {
-            if (properties.TryGetValue(name, out string? value) && !string.IsNullOrWhiteSpace(value))
-            {
-                return $"{name}:{value.Trim()}";
-            }
-        }
-
-        return null;
-    }
-
-    private ulong? GetUInt64(IReadOnlyDictionary<string, string> properties, params string[] names)
-    {
-        string? value = GetString(properties, names);
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        NumberStyles styles = NumberStyles.Integer;
-        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-        {
-            value = value[2..];
-            styles = NumberStyles.AllowHexSpecifier;
-        }
-
-        return ulong.TryParse(value, styles, CultureInfo.InvariantCulture, out ulong result) ? result : null;
-    }
-
-    private bool TryGetPowerMetric(IReadOnlyDictionary<string, string> properties, string fieldName, out PowerMetricKind kind, out double value)
-    {
-        kind = ClassifyPowerMetric(fieldName);
-        value = 0;
-        if (kind == PowerMetricKind.Other && !fieldName.Contains("meter", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return properties.TryGetValue(fieldName, out string? rawValue) && TryParseEtwNumericValue(rawValue, out value);
-    }
-
-    private PowerMetricKind ClassifyPowerMetric(string fieldName)
-    {
-        if (fieldName.Contains("energy", StringComparison.OrdinalIgnoreCase))
-        {
-            return PowerMetricKind.Energy;
-        }
-
-        if (fieldName.Contains("power", StringComparison.OrdinalIgnoreCase))
-        {
-            return PowerMetricKind.Power;
-        }
-
-        if (fieldName.Contains("charge", StringComparison.OrdinalIgnoreCase))
-        {
-            return PowerMetricKind.Charge;
-        }
-
-        if (fieldName.Contains("rate", StringComparison.OrdinalIgnoreCase))
-        {
-            return PowerMetricKind.Rate;
-        }
-
-        if (fieldName.Contains("capacity", StringComparison.OrdinalIgnoreCase))
-        {
-            return PowerMetricKind.Capacity;
-        }
-
-        if (fieldName.Contains("voltage", StringComparison.OrdinalIgnoreCase))
-        {
-            return PowerMetricKind.Voltage;
-        }
-
-        if (fieldName.Contains("current", StringComparison.OrdinalIgnoreCase))
-        {
-            return PowerMetricKind.Current;
-        }
-
-        return PowerMetricKind.Other;
-    }
-
-    private bool TryParseEtwNumericValue(string value, out double result)
-    {
-        result = 0;
-        value = value.Trim();
-        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-        {
-            int hexLength = 2;
-            while (hexLength < value.Length && Uri.IsHexDigit(value[hexLength]))
-            {
-                hexLength++;
-            }
-
-            return hexLength > 2 && ulong.TryParse(value[2..hexLength], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out ulong hexValue)
-                && TryConvertToFiniteDouble(hexValue, out result);
-        }
-
-        string numericToken = value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
-        return double.TryParse(numericToken, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out result)
-            && double.IsFinite(result);
-    }
-
-    private bool TryConvertToFiniteDouble(ulong value, out double result)
-    {
-        result = value;
-        return double.IsFinite(result);
-    }
-
-    private NumericMetricSummary GetOrAddMetric(Dictionary<string, NumericMetricSummary> metrics, string fieldName, PowerMetricKind kind)
-    {
-        if (!metrics.TryGetValue(fieldName, out NumericMetricSummary? metric))
-        {
-            metric = new NumericMetricSummary
-            {
-                FieldName = fieldName,
-                Kind = kind,
-            };
-            metrics.Add(fieldName, metric);
-        }
-
-        return metric;
-    }
-
-    private uint? FindScheduledProcessAtTime(IEnumerable<CSwitchEventInfo> events, byte processorNumber, DateTime timestamp)
-    {
-        return events
-            .Where(switchEvent => switchEvent.ProcessorNumber == processorNumber && switchEvent.Timestamp <= timestamp)
-            .OrderByDescending(switchEvent => switchEvent.Timestamp)
-            .Select(switchEvent => switchEvent.NewProcessId)
-            .FirstOrDefault(processId => processId is not null);
-    }
-
-
-    private bool TryParseAddress(string value, out ulong address)
-    {
-        value = value.Trim();
-        NumberStyles styles = NumberStyles.Integer;
-        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-        {
-            value = value[2..];
-            styles = NumberStyles.AllowHexSpecifier;
-        }
-
-        return ulong.TryParse(value, styles, CultureInfo.InvariantCulture, out address);
     }
 
     private EtlAnalysisResult Analyze(EtlReadResult result)
@@ -3230,65 +3025,4 @@ public sealed class EtlFileReader
 
         return analysis;
     }
-
-
-    private string FormatMetricSummary(NumericMetricSummary metric)
-    {
-        return $"{metric.FieldName}: 樣本={metric.SampleCount}，最小={metric.Minimum:G6}，最大={metric.Maximum:G6}，平均={metric.Average:G6}，首末={metric.FirstValue:G6}→{metric.LastValue:G6}，期間={metric.FirstTimestamp:O}→{metric.LastTimestamp:O}";
-    }
-
-    private void PrintAddressHotspots(string title, IEnumerable<(ulong Address, int Count, string ModuleName, ulong? RelativeAddress)> hotspots)
-    {
-        Console.WriteLine($"{title}（前 10 名）:");
-        foreach ((ulong address, int count, string moduleName, ulong? relativeAddress) in hotspots.Take(10))
-        {
-            string relative = relativeAddress is ulong value ? $"+0x{value:X}" : string.Empty;
-            Console.WriteLine($"  {FormatAddress(address)} {moduleName}{relative}: {count} 個取樣");
-        }
-    }
-
-    private void PrintRoutineHotspots(string title, IEnumerable<RoutineEventSummary> hotspots)
-    {
-        Console.WriteLine($"{title}（前 10 名）:");
-        foreach (RoutineEventSummary summary in hotspots.Take(10))
-        {
-            string relative = summary.ModuleRelativeAddress is ulong value ? $"+0x{value:X}" : string.Empty;
-            Console.WriteLine($"  {FormatAddress(summary.Routine)} {summary.ModuleName}{relative}: {summary.EventCount} 筆事件");
-        }
-    }
-
-    private TimeSpan GetTraceDuration(EtlReadResult result)
-    {
-        if (result.TraceStartTime is DateTime start && result.TraceEndTime is DateTime end && end >= start)
-        {
-            return end - start;
-        }
-
-        IEnumerable<DateTime> timestamps = result.CSwitchEvents.Select(item => item.Timestamp)
-            .Concat(result.DiskIoEvents.Select(item => item.Timestamp))
-            .Concat(result.ProfileEvents.Select(item => item.Timestamp));
-        DateTime[] timestampArray = timestamps.ToArray();
-        return timestampArray.Length < 2 ? TimeSpan.Zero : timestampArray.Max() - timestampArray.Min();
-    }
-
-    private double? GetPercentileMilliseconds(IReadOnlyCollection<TimeSpan> values, double percentile)
-    {
-        if (values.Count == 0)
-        {
-            return null;
-        }
-
-        double[] sorted = values.Select(value => value.TotalMilliseconds).OrderBy(value => value).ToArray();
-        int index = (int)Math.Ceiling(percentile * sorted.Length) - 1;
-        return sorted[Math.Clamp(index, 0, sorted.Length - 1)];
-    }
-
-
-
-
-    private string FormatAddress(ulong? address)
-    {
-        return address is ulong value ? $"0x{value:X}" : "<無法解析>";
-    }
-
 }

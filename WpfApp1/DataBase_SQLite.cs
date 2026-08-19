@@ -35,7 +35,6 @@ namespace WpfApp1
         private SqliteCommand? _writeKernelAcpiAmlMethodTraceCommand;
         private SqliteCommand? _writeKernelAcpiTemperatureChangeCommand;
         private SqliteCommand? _writeKernelAcpiFrequentAmlMethodCommand;
-        private SqliteCommand? _writeDiskIoOperationCommand;
 
         public void Open(string filename)
         {
@@ -435,31 +434,6 @@ namespace WpfApp1
                                CREATE INDEX IF NOT EXISTS IX_InterruptEvents_ProcessorTimestamp
                               ON InterruptEvents (ProcessorNumber, TimestampUtc);
 
-                              CREATE TABLE IF NOT EXISTS DiskIoOperations
-                              (
-                                  DiskIoOperationId INTEGER PRIMARY KEY,
-                                  ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
-                                  TimestampUtc TEXT NOT NULL,
-                                  StartedAtUtc TEXT NULL,
-                                  CompletedAtUtc TEXT NULL,
-                                  EventId INTEGER NOT NULL,
-                                  Version INTEGER NOT NULL,
-                                  Opcode INTEGER NOT NULL,
-                                  ProcessId INTEGER NOT NULL,
-                                  ThreadId INTEGER NOT NULL,
-                                  CorrelationId TEXT NULL,
-                                  TransferSize INTEGER NULL,
-                                  Operation TEXT NULL,
-                                  LatencyMilliseconds REAL NULL,
-                                  MatchStatus TEXT NOT NULL
-                              );
-
-                              CREATE INDEX IF NOT EXISTS IX_DiskIoOperations_ProcessRecordTimestamp
-                              ON DiskIoOperations (ProcessRecordId, TimestampUtc);
-
-                              CREATE INDEX IF NOT EXISTS IX_DiskIoOperations_MatchStatusTimestamp
-                              ON DiskIoOperations (MatchStatus, TimestampUtc);
-
                               CREATE TABLE IF NOT EXISTS PowerMeterPollingEvents_4
                               (
                                   PowerMeterPollingEvent4Id INTEGER PRIMARY KEY,
@@ -477,9 +451,9 @@ namespace WpfApp1
                        command.ExecuteNonQuery();
             }
 
+            RemoveDiskIoOperationsTable(connection);
             RemoveLegacyPowerMeterPollingTables(connection);
             EnsurePowerMeterPollingEvent4EnergyIsInteger(connection);
-            EnsureEnergyEstimationEngineColumns(connection);
             EnsureEnergyEstimationEngineEnergyColumnsAreIntegers(connection);
             EnsureEnergyEstimationEngineTablesWithoutProcessColumns(connection);
             EnsureThreadEventColumns(connection);
@@ -507,7 +481,6 @@ namespace WpfApp1
             _writeKernelAcpiAmlMethodTraceCommand = CreateWriteKernelAcpiAmlMethodTraceCommand(connection, transaction);
             _writeKernelAcpiTemperatureChangeCommand = CreateWriteKernelAcpiTemperatureChangeCommand(connection, transaction);
             _writeKernelAcpiFrequentAmlMethodCommand = CreateWriteKernelAcpiFrequentAmlMethodCommand(connection, transaction);
-            _writeDiskIoOperationCommand = CreateWriteDiskIoOperationCommand(connection, transaction);
             _connection = connection;
             _transaction = transaction;
             _batchedWriteCount = 0;
@@ -796,33 +769,6 @@ namespace WpfApp1
             CommitWriteBatchIfNeeded();
         }
 
-        public void WriteDiskIoOperation(DiskIoOperation operation)
-        {
-            SqliteCommand command = _writeDiskIoOperationCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
-            string timestampUtc = ToUtcTimestamp(operation.Timestamp);
-            string attributionTimestampUtc = operation.StartedAt is DateTime startedAt
-                ? ToUtcTimestamp(startedAt)
-                : timestampUtc;
-            command.Parameters["$timestampUtc"].Value = timestampUtc;
-            command.Parameters["$processAttributionTimestampUtc"].Value = attributionTimestampUtc;
-            command.Parameters["$startedAtUtc"].Value = operation.StartedAt is DateTime operationStartedAt ? ToUtcTimestamp(operationStartedAt) : DBNull.Value;
-            command.Parameters["$completedAtUtc"].Value = operation.CompletedAt is DateTime completedAt ? ToUtcTimestamp(completedAt) : DBNull.Value;
-            command.Parameters["$eventId"].Value = operation.EventId;
-            command.Parameters["$version"].Value = operation.Version;
-            command.Parameters["$opcode"].Value = operation.Opcode;
-            command.Parameters["$processId"].Value = Convert.ToInt64(operation.ProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$threadId"].Value = Convert.ToInt64(operation.ThreadId, CultureInfo.InvariantCulture);
-            command.Parameters["$correlationId"].Value = ToDbValue(operation.CorrelationId);
-            command.Parameters["$transferSize"].Value = operation.TransferSize is ulong transferSize
-                ? checked((long)Math.Min(transferSize, long.MaxValue))
-                : DBNull.Value;
-            command.Parameters["$operation"].Value = ToDbValue(operation.Operation);
-            command.Parameters["$latencyMilliseconds"].Value = ToDbValue(operation.LatencyMilliseconds);
-            command.Parameters["$matchStatus"].Value = operation.MatchStatus;
-            command.ExecuteNonQuery();
-            CommitWriteBatchIfNeeded();
-        }
-
         public void WriteImageUnLoad(in ImageLoadEventInfo data)
         {
             SqliteCommand command = _writeImageUnloadCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
@@ -971,8 +917,6 @@ namespace WpfApp1
             _writeKernelAcpiTemperatureChangeCommand = null;
             _writeKernelAcpiFrequentAmlMethodCommand?.Dispose();
             _writeKernelAcpiFrequentAmlMethodCommand = null;
-            _writeDiskIoOperationCommand?.Dispose();
-            _writeDiskIoOperationCommand = null;
             _transaction?.Dispose();
             _transaction = null;
             _connection?.Dispose();
@@ -1022,7 +966,6 @@ namespace WpfApp1
                 _writeKernelAcpiAmlMethodTraceCommand,
                 _writeKernelAcpiTemperatureChangeCommand,
                 _writeKernelAcpiFrequentAmlMethodCommand,
-                _writeDiskIoOperationCommand,
             })
             {
                 if (command is not null)
@@ -1428,44 +1371,6 @@ namespace WpfApp1
             return command;
         }
 
-        private static SqliteCommand CreateWriteDiskIoOperationCommand(SqliteConnection connection, SqliteTransaction transaction)
-        {
-            SqliteCommand command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                @"INSERT INTO DiskIoOperations
-                    (ProcessRecordId, TimestampUtc, StartedAtUtc, CompletedAtUtc, EventId, Version, Opcode, ProcessId, ThreadId, CorrelationId, TransferSize, Operation, LatencyMilliseconds, MatchStatus)
-                  VALUES
-                    (
-                        (
-                            SELECT ProcessRecordId
-                            FROM Processes
-                            WHERE ProcessId = $processId
-                              AND StartedAtUtc <= $processAttributionTimestampUtc
-                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $processAttributionTimestampUtc)
-                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
-                            LIMIT 1
-                        ),
-                        $timestampUtc, $startedAtUtc, $completedAtUtc, $eventId, $version, $opcode, $processId, $threadId, $correlationId, $transferSize, $operation, $latencyMilliseconds, $matchStatus
-                    );";
-            command.Parameters.Add("$timestampUtc", SqliteType.Text);
-            command.Parameters.Add("$processAttributionTimestampUtc", SqliteType.Text);
-            command.Parameters.Add("$startedAtUtc", SqliteType.Text);
-            command.Parameters.Add("$completedAtUtc", SqliteType.Text);
-            command.Parameters.Add("$eventId", SqliteType.Integer);
-            command.Parameters.Add("$version", SqliteType.Integer);
-            command.Parameters.Add("$opcode", SqliteType.Integer);
-            command.Parameters.Add("$processId", SqliteType.Integer);
-            command.Parameters.Add("$threadId", SqliteType.Integer);
-            command.Parameters.Add("$correlationId", SqliteType.Text);
-            command.Parameters.Add("$transferSize", SqliteType.Integer);
-            command.Parameters.Add("$operation", SqliteType.Text);
-            command.Parameters.Add("$latencyMilliseconds", SqliteType.Real);
-            command.Parameters.Add("$matchStatus", SqliteType.Text);
-            command.Prepare();
-            return command;
-        }
-
         private static SqliteCommand CreateWriteEnergyEstimationEngineCommand(SqliteConnection connection, SqliteTransaction transaction)
         {
             SqliteCommand command = connection.CreateCommand();
@@ -1819,40 +1724,11 @@ namespace WpfApp1
             return command;
         }
 
-        private static void EnsureEnergyEstimationEngineColumns(SqliteConnection connection)
+        private static void RemoveDiskIoOperationsTable(SqliteConnection connection)
         {
-            (string Name, string Definition)[] columns =
-            {
-                ("AppName", "TEXT NOT NULL DEFAULT ''"),
-                ("UserId", "INTEGER NOT NULL DEFAULT 0"),
-                ("CpuEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("GpuEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("DisplayEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("DiskEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("NetworkEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("MbbEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("LossEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("OtherEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("EmiEnergy", "INTEGER NOT NULL DEFAULT 0"),
-                ("TimeInMSec", "INTEGER NOT NULL DEFAULT 0"),
-                ("NpuEnergy", "INTEGER NOT NULL DEFAULT 0"),
-            };
-
-            foreach ((string name, string definition) in columns)
-            {
-                using SqliteCommand columnExistsCommand = connection.CreateCommand();
-                columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('EnergyEstimationEngineEvents') WHERE name = $name;";
-                columnExistsCommand.Parameters.AddWithValue("$name", name);
-
-                if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-                {
-                    continue;
-                }
-
-                using SqliteCommand addColumnCommand = connection.CreateCommand();
-                addColumnCommand.CommandText = $"ALTER TABLE EnergyEstimationEngineEvents ADD COLUMN {name} {definition};";
-                addColumnCommand.ExecuteNonQuery();
-            }
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "DROP TABLE IF EXISTS DiskIoOperations;";
+            command.ExecuteNonQuery();
         }
 
         private static void RemoveLegacyPowerMeterPollingTables(SqliteConnection connection)

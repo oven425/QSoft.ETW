@@ -371,19 +371,12 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.KernelAcpiAmlMethodTrace += OnKernelAcpiAmlMethodTrace;
         reader.KernelAcpiTemperatureChange += OnKernelAcpiTemperatureChange;
         reader.KernelAcpiFrequentAmlMethod += OnKernelAcpiFrequentAmlMethod;
-        reader.DiskIoOperationCompleted += OnDiskIoOperationCompleted;
     }
 
     private void OnEnergyEstimationEngine_33(in EnergyEstimationEngineEventInfo_33 data)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteEnergyEstimationEngineQueryStats(in data);
-    }
-
-    private void OnDiskIoOperationCompleted(DiskIoOperation operation)
-    {
-        TrackEventTimestamp(operation.Timestamp);
-        db.WriteDiskIoOperation(operation);
     }
 
     private void OnEnergyEstimationEngine_18(in EnergyEstimationEngineEventInfo_18 data)
@@ -433,7 +426,6 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.KernelAcpiAmlMethodTrace -= OnKernelAcpiAmlMethodTrace;
         reader.KernelAcpiTemperatureChange -= OnKernelAcpiTemperatureChange;
         reader.KernelAcpiFrequentAmlMethod -= OnKernelAcpiFrequentAmlMethod;
-        reader.DiskIoOperationCompleted -= OnDiskIoOperationCompleted;
     }
 
     private void WriteIncompleteThreadLifetimes()
