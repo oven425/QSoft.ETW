@@ -31,6 +31,10 @@ namespace WpfApp1
         private SqliteCommand? _writeInterruptCommand;
         private SqliteCommand? _writeThreadLifetimeCommand;
         private SqliteCommand? _writePowerMeterPollingEvent4Command;
+        private SqliteCommand? _writeKernelAcpiTemperatureNotificationCommand;
+        private SqliteCommand? _writeKernelAcpiAmlMethodTraceCommand;
+        private SqliteCommand? _writeKernelAcpiTemperatureChangeCommand;
+        private SqliteCommand? _writeKernelAcpiFrequentAmlMethodCommand;
         private SqliteCommand? _writeDiskIoOperationCommand;
 
         public void Open(string filename)
@@ -229,19 +233,87 @@ namespace WpfApp1
                        CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_14_Timestamp
                        ON EnergyEstimationEngine_14 (TimestampUtc);
 
-                       CREATE TABLE IF NOT EXISTS KernelAcpiEvents
+                       CREATE TABLE IF NOT EXISTS KernelAcpiTemperatureNotifications
                        (
-                           KernelAcpiEventId INTEGER PRIMARY KEY,
+                           KernelAcpiTemperatureNotificationId INTEGER PRIMARY KEY,
                            TimestampUtc TEXT NOT NULL,
                            EventId INTEGER NOT NULL,
                            Version INTEGER NOT NULL,
                            Opcode INTEGER NOT NULL,
                            ProcessId INTEGER NOT NULL,
-                           ThreadId INTEGER NOT NULL
+                           ThreadId INTEGER NOT NULL,
+                           ThermalZoneDeviceInstanceLength INTEGER NOT NULL,
+                           ThermalZoneDeviceInstance TEXT NOT NULL,
+                           _TMP INTEGER NOT NULL,
+                           _PSV INTEGER NOT NULL,
+                           _AC0 INTEGER NOT NULL,
+                           _AC1 INTEGER NOT NULL,
+                           _AC2 INTEGER NOT NULL,
+                           _AC3 INTEGER NOT NULL,
+                           _AC4 INTEGER NOT NULL,
+                           _AC5 INTEGER NOT NULL,
+                           _AC6 INTEGER NOT NULL,
+                           _AC7 INTEGER NOT NULL,
+                           _AC8 INTEGER NOT NULL,
+                           _AC9 INTEGER NOT NULL,
+                           _HOT INTEGER NOT NULL,
+                           _CRT INTEGER NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiEvents_ProcessTimestamp
-                       ON KernelAcpiEvents (ProcessId, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiTemperatureNotifications_ProcessTimestamp
+                       ON KernelAcpiTemperatureNotifications (ProcessId, TimestampUtc);
+
+                       CREATE TABLE IF NOT EXISTS KernelAcpiAmlMethodTraces
+                       (
+                           KernelAcpiAmlMethodTraceId INTEGER PRIMARY KEY,
+                           TimestampUtc TEXT NOT NULL,
+                           EventId INTEGER NOT NULL,
+                           Version INTEGER NOT NULL,
+                           Opcode INTEGER NOT NULL,
+                           ProcessId INTEGER NOT NULL,
+                           ThreadId INTEGER NOT NULL,
+                           AmlMethodNameLength INTEGER NOT NULL,
+                           AmlMethodName TEXT NOT NULL,
+                           AmlMethodState INTEGER NOT NULL,
+                           AmlElapsedTime TEXT NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiAmlMethodTraces_ProcessTimestamp
+                       ON KernelAcpiAmlMethodTraces (ProcessId, TimestampUtc);
+
+                       CREATE TABLE IF NOT EXISTS KernelAcpiTemperatureChanges
+                       (
+                           KernelAcpiTemperatureChangeId INTEGER PRIMARY KEY,
+                           TimestampUtc TEXT NOT NULL,
+                           EventId INTEGER NOT NULL,
+                           Version INTEGER NOT NULL,
+                           Opcode INTEGER NOT NULL,
+                           ProcessId INTEGER NOT NULL,
+                           ThreadId INTEGER NOT NULL,
+                           ThermalZoneDeviceInstanceLength INTEGER NOT NULL,
+                           ThermalZoneDeviceInstance TEXT NOT NULL,
+                           Temperature INTEGER NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiTemperatureChanges_ProcessTimestamp
+                       ON KernelAcpiTemperatureChanges (ProcessId, TimestampUtc);
+
+                       CREATE TABLE IF NOT EXISTS KernelAcpiFrequentAmlMethods
+                       (
+                           KernelAcpiFrequentAmlMethodId INTEGER PRIMARY KEY,
+                           TimestampUtc TEXT NOT NULL,
+                           EventId INTEGER NOT NULL,
+                           Version INTEGER NOT NULL,
+                           Opcode INTEGER NOT NULL,
+                           ProcessId INTEGER NOT NULL,
+                           ThreadId INTEGER NOT NULL,
+                           AmlMethodNameLength INTEGER NOT NULL,
+                           AmlMethodName TEXT NOT NULL,
+                           Frequency TEXT NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiFrequentAmlMethods_ProcessTimestamp
+                       ON KernelAcpiFrequentAmlMethods (ProcessId, TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS ThreadEvents
                        (
@@ -431,6 +503,10 @@ namespace WpfApp1
             _writeInterruptCommand = CreateWriteInterruptCommand(connection, transaction);
             _writeThreadLifetimeCommand = CreateWriteThreadLifetimeCommand(connection, transaction);
             _writePowerMeterPollingEvent4Command = CreateWritePowerMeterPollingEvent4Command(connection, transaction);
+            _writeKernelAcpiTemperatureNotificationCommand = CreateWriteKernelAcpiTemperatureNotificationCommand(connection, transaction);
+            _writeKernelAcpiAmlMethodTraceCommand = CreateWriteKernelAcpiAmlMethodTraceCommand(connection, transaction);
+            _writeKernelAcpiTemperatureChangeCommand = CreateWriteKernelAcpiTemperatureChangeCommand(connection, transaction);
+            _writeKernelAcpiFrequentAmlMethodCommand = CreateWriteKernelAcpiFrequentAmlMethodCommand(connection, transaction);
             _writeDiskIoOperationCommand = CreateWriteDiskIoOperationCommand(connection, transaction);
             _connection = connection;
             _transaction = transaction;
@@ -582,6 +658,84 @@ namespace WpfApp1
             command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
             command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
             command.Parameters["$instructionPointer"].Value = ToDbValue(ToHex(data.InstructionPointer));
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteKernelAcpiTemperatureNotification(in KernelAcpiEventInfo_TemperatureNotification data)
+        {
+            SqliteCommand command = _writeKernelAcpiTemperatureNotificationCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$thermalZoneDeviceInstanceLength"].Value = data.ThermalZoneDeviceInstanceLength;
+            command.Parameters["$thermalZoneDeviceInstance"].Value = data.ThermalZoneDeviceInstance ?? string.Empty;
+            command.Parameters["$tmp"].Value = Convert.ToInt64(data._TMP, CultureInfo.InvariantCulture);
+            command.Parameters["$psv"].Value = Convert.ToInt64(data._PSV, CultureInfo.InvariantCulture);
+            command.Parameters["$ac0"].Value = Convert.ToInt64(data._AC0, CultureInfo.InvariantCulture);
+            command.Parameters["$ac1"].Value = Convert.ToInt64(data._AC1, CultureInfo.InvariantCulture);
+            command.Parameters["$ac2"].Value = Convert.ToInt64(data._AC2, CultureInfo.InvariantCulture);
+            command.Parameters["$ac3"].Value = Convert.ToInt64(data._AC3, CultureInfo.InvariantCulture);
+            command.Parameters["$ac4"].Value = Convert.ToInt64(data._AC4, CultureInfo.InvariantCulture);
+            command.Parameters["$ac5"].Value = Convert.ToInt64(data._AC5, CultureInfo.InvariantCulture);
+            command.Parameters["$ac6"].Value = Convert.ToInt64(data._AC6, CultureInfo.InvariantCulture);
+            command.Parameters["$ac7"].Value = Convert.ToInt64(data._AC7, CultureInfo.InvariantCulture);
+            command.Parameters["$ac8"].Value = Convert.ToInt64(data._AC8, CultureInfo.InvariantCulture);
+            command.Parameters["$ac9"].Value = Convert.ToInt64(data._AC9, CultureInfo.InvariantCulture);
+            command.Parameters["$hot"].Value = Convert.ToInt64(data._HOT, CultureInfo.InvariantCulture);
+            command.Parameters["$crt"].Value = Convert.ToInt64(data._CRT, CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteKernelAcpiAmlMethodTrace(in KernelAcpiEventInfo_AmlMethodTrace data)
+        {
+            SqliteCommand command = _writeKernelAcpiAmlMethodTraceCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$amlMethodNameLength"].Value = data.AmlMethodNameLength;
+            command.Parameters["$amlMethodName"].Value = data.AmlMethodName ?? string.Empty;
+            command.Parameters["$amlMethodState"].Value = data.AmlMethodState;
+            command.Parameters["$amlElapsedTime"].Value = data.AmlElapsedTime.ToString(CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteKernelAcpiTemperatureChange(in KernelAcpiEventInfo_TemperatureChange data)
+        {
+            SqliteCommand command = _writeKernelAcpiTemperatureChangeCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$thermalZoneDeviceInstanceLength"].Value = data.ThermalZoneDeviceInstanceLength;
+            command.Parameters["$thermalZoneDeviceInstance"].Value = data.ThermalZoneDeviceInstance ?? string.Empty;
+            command.Parameters["$temperature"].Value = Convert.ToInt64(data.Temperature, CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteKernelAcpiFrequentAmlMethod(in KernelAcpiEventInfo_FrequentAmlMethod data)
+        {
+            SqliteCommand command = _writeKernelAcpiFrequentAmlMethodCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$eventId"].Value = data.EventId;
+            command.Parameters["$version"].Value = data.Version;
+            command.Parameters["$opcode"].Value = data.Opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$amlMethodNameLength"].Value = data.AmlMethodNameLength;
+            command.Parameters["$amlMethodName"].Value = data.AmlMethodName ?? string.Empty;
+            command.Parameters["$frequency"].Value = data.Frequency.ToString(CultureInfo.InvariantCulture);
             command.ExecuteNonQuery();
             CommitWriteBatchIfNeeded();
         }
@@ -809,6 +963,14 @@ namespace WpfApp1
             _writeThreadLifetimeCommand = null;
             _writePowerMeterPollingEvent4Command?.Dispose();
             _writePowerMeterPollingEvent4Command = null;
+            _writeKernelAcpiTemperatureNotificationCommand?.Dispose();
+            _writeKernelAcpiTemperatureNotificationCommand = null;
+            _writeKernelAcpiAmlMethodTraceCommand?.Dispose();
+            _writeKernelAcpiAmlMethodTraceCommand = null;
+            _writeKernelAcpiTemperatureChangeCommand?.Dispose();
+            _writeKernelAcpiTemperatureChangeCommand = null;
+            _writeKernelAcpiFrequentAmlMethodCommand?.Dispose();
+            _writeKernelAcpiFrequentAmlMethodCommand = null;
             _writeDiskIoOperationCommand?.Dispose();
             _writeDiskIoOperationCommand = null;
             _transaction?.Dispose();
@@ -856,6 +1018,10 @@ namespace WpfApp1
                 _writeInterruptCommand,
                 _writeThreadLifetimeCommand,
                 _writePowerMeterPollingEvent4Command,
+                _writeKernelAcpiTemperatureNotificationCommand,
+                _writeKernelAcpiAmlMethodTraceCommand,
+                _writeKernelAcpiTemperatureChangeCommand,
+                _writeKernelAcpiFrequentAmlMethodCommand,
                 _writeDiskIoOperationCommand,
             })
             {
@@ -1408,6 +1574,108 @@ namespace WpfApp1
             command.Parameters.Add("$meterId", SqliteType.Text);
             command.Parameters.Add("$absoluteEnergy", SqliteType.Integer);
             command.Parameters.Add("$absoluteTime", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteKernelAcpiTemperatureNotificationCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO KernelAcpiTemperatureNotifications
+                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, ThermalZoneDeviceInstanceLength, ThermalZoneDeviceInstance, _TMP, _PSV, _AC0, _AC1, _AC2, _AC3, _AC4, _AC5, _AC6, _AC7, _AC8, _AC9, _HOT, _CRT)
+                  VALUES
+                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $thermalZoneDeviceInstanceLength, $thermalZoneDeviceInstance, $tmp, $psv, $ac0, $ac1, $ac2, $ac3, $ac4, $ac5, $ac6, $ac7, $ac8, $ac9, $hot, $crt);";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$thermalZoneDeviceInstanceLength", SqliteType.Integer);
+            command.Parameters.Add("$thermalZoneDeviceInstance", SqliteType.Text);
+            command.Parameters.Add("$tmp", SqliteType.Integer);
+            command.Parameters.Add("$psv", SqliteType.Integer);
+            command.Parameters.Add("$ac0", SqliteType.Integer);
+            command.Parameters.Add("$ac1", SqliteType.Integer);
+            command.Parameters.Add("$ac2", SqliteType.Integer);
+            command.Parameters.Add("$ac3", SqliteType.Integer);
+            command.Parameters.Add("$ac4", SqliteType.Integer);
+            command.Parameters.Add("$ac5", SqliteType.Integer);
+            command.Parameters.Add("$ac6", SqliteType.Integer);
+            command.Parameters.Add("$ac7", SqliteType.Integer);
+            command.Parameters.Add("$ac8", SqliteType.Integer);
+            command.Parameters.Add("$ac9", SqliteType.Integer);
+            command.Parameters.Add("$hot", SqliteType.Integer);
+            command.Parameters.Add("$crt", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteKernelAcpiAmlMethodTraceCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO KernelAcpiAmlMethodTraces
+                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, AmlMethodNameLength, AmlMethodName, AmlMethodState, AmlElapsedTime)
+                  VALUES
+                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $amlMethodNameLength, $amlMethodName, $amlMethodState, $amlElapsedTime);";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$amlMethodNameLength", SqliteType.Integer);
+            command.Parameters.Add("$amlMethodName", SqliteType.Text);
+            command.Parameters.Add("$amlMethodState", SqliteType.Integer);
+            command.Parameters.Add("$amlElapsedTime", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteKernelAcpiTemperatureChangeCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO KernelAcpiTemperatureChanges
+                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, ThermalZoneDeviceInstanceLength, ThermalZoneDeviceInstance, Temperature)
+                  VALUES
+                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $thermalZoneDeviceInstanceLength, $thermalZoneDeviceInstance, $temperature);";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$thermalZoneDeviceInstanceLength", SqliteType.Integer);
+            command.Parameters.Add("$thermalZoneDeviceInstance", SqliteType.Text);
+            command.Parameters.Add("$temperature", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteKernelAcpiFrequentAmlMethodCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO KernelAcpiFrequentAmlMethods
+                    (TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, AmlMethodNameLength, AmlMethodName, Frequency)
+                  VALUES
+                    ($timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $amlMethodNameLength, $amlMethodName, $frequency);";
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$eventId", SqliteType.Integer);
+            command.Parameters.Add("$version", SqliteType.Integer);
+            command.Parameters.Add("$opcode", SqliteType.Integer);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$threadId", SqliteType.Integer);
+            command.Parameters.Add("$amlMethodNameLength", SqliteType.Integer);
+            command.Parameters.Add("$amlMethodName", SqliteType.Text);
+            command.Parameters.Add("$frequency", SqliteType.Text);
             command.Prepare();
             return command;
         }

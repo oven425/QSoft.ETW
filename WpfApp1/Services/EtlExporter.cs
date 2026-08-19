@@ -317,6 +317,31 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WritePowerMeterPollingEvent_4(in data);
     }
 
+    private void OnKernelAcpiTemperatureNotification(KernelAcpiEventInfo_TemperatureNotification data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteKernelAcpiTemperatureNotification(in data);
+    }
+
+    private void OnKernelAcpiAmlMethodTrace(KernelAcpiEventInfo_AmlMethodTrace data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteKernelAcpiAmlMethodTrace(in data);
+    }
+
+    private void OnKernelAcpiTemperatureChange(KernelAcpiEventInfo_TemperatureChange data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteKernelAcpiTemperatureChange(in data);
+    }
+
+    private void OnKernelAcpiFrequentAmlMethod(KernelAcpiEventInfo_FrequentAmlMethod data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteKernelAcpiFrequentAmlMethod(in data);
+    }
+
+
     private void Attach(EtlFileReader reader)
     {
         reader.ThreadCSwitch += OnThreadCSwitch;
@@ -342,6 +367,10 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
         reader.PerfInfoProfile += OnProfile;
         reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
+        reader.KernelAcpiTemperatureNotification += OnKernelAcpiTemperatureNotification;
+        reader.KernelAcpiAmlMethodTrace += OnKernelAcpiAmlMethodTrace;
+        reader.KernelAcpiTemperatureChange += OnKernelAcpiTemperatureChange;
+        reader.KernelAcpiFrequentAmlMethod += OnKernelAcpiFrequentAmlMethod;
         reader.DiskIoOperationCompleted += OnDiskIoOperationCompleted;
     }
 
@@ -400,6 +429,10 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ImageDCStart -= OnImageLoad;
         reader.PerfInfoProfile -= OnProfile;
         reader.PowerMeterPollingEventInfo_4 -= OnPowerMeterPollingEvent_4;
+        reader.KernelAcpiTemperatureNotification -= OnKernelAcpiTemperatureNotification;
+        reader.KernelAcpiAmlMethodTrace -= OnKernelAcpiAmlMethodTrace;
+        reader.KernelAcpiTemperatureChange -= OnKernelAcpiTemperatureChange;
+        reader.KernelAcpiFrequentAmlMethod -= OnKernelAcpiFrequentAmlMethod;
         reader.DiskIoOperationCompleted -= OnDiskIoOperationCompleted;
     }
 

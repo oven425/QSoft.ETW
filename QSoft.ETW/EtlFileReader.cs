@@ -308,11 +308,7 @@ internal sealed class EtlReadResult
     public EtlAnalysisResult? Analysis { get; set; }
     //public List<ProcessInfo> Processes { get; } = [];
     //public List<ThreadInfo> Threads { get; } = [];
-    public List<ModuleInfo> UnmatchedModules { get; } = [];
-    public List<EnergyEstimationEventInfo> EnergyEstimationEvents { get; } = [];
-    public List<KernelPowerEventInfo> KernelPowerEvents { get; } = [];
     public List<CSwitchEventInfo> CSwitchEvents { get; } = [];
-    public List<InterruptEventInfo> InterruptEvents { get; } = [];
     public List<ProfileEventInfo> ProfileEvents { get; } = [];
     public List<DpcEventInfo> DpcEvents { get; } = [];
     public List<DiskIoEventInfo> DiskIoEvents { get; } = [];
@@ -556,18 +552,6 @@ public readonly record struct PowerMeterPollingEventInfo_3
     public ulong Value { get; init; }
 }
 
-internal sealed class EnergyEstimationEventInfo
-{
-    public required DateTime Timestamp { get; init; }
-    public required ushort EventId { get; init; }
-    public required byte Version { get; init; }
-    public required byte Opcode { get; init; }
-    public required uint HeaderProcessId { get; init; }
-    public required uint ThreadId { get; init; }
-    public uint? ProcessId { get; init; }
-    public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
-}
-
 public readonly record struct WmiActivityEventInfo_11
 {
     public required DateTime Timestamp { get; init; }
@@ -603,6 +587,61 @@ public readonly record struct WmiActivityEventInfo_12
     public string ProviderName { get; init; }
     public string ProviderGuid { get; init; }
     public string Path { get; init; }
+}
+
+public readonly record struct WmiActivityEventInfo_17
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ThreadId { get; init; }
+    public string CorrelationId { get; init; }
+    public uint ProcessId { get; init; }
+    public string Protocol { get; init; }
+    public string Operation { get; init; }
+    public string User { get; init; }
+    public string Namespace { get; init; }
+}
+
+public readonly record struct WmiActivityEventInfo_20
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public uint OperationID { get; init; }
+    public string Operation { get; init; }
+    public uint Flags { get; init; }
+    public uint ClientProcessId { get; init; }
+    public string ClientMachineFQDN { get; init; }
+    public ulong ClientProcessCreationTime { get; init; }
+    public bool IsLocal { get; init; }
+}
+
+public readonly record struct WmiActivityEventInfo_22
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public string CorrelationId { get; init; }
+    public uint GroupOperationId { get; init; }
+    public uint OperationId { get; init; }
+    public string ClassName { get; init; }
+    public string MethodName { get; init; }
+    public string ImplementationClass { get; init; }
+    public string ClientMachine { get; init; }
+    public string ClientMachineFQDN { get; init; }
+    public string User { get; init; }
+    public uint ClientProcessId { get; init; }
+    public ulong ClientProcessCreationTime { get; init; }
+    public string NamespaceName { get; init; }
+    public bool IsLocal { get; init; }
 }
 
 
@@ -649,6 +688,20 @@ public readonly record struct WmiActivityEventInfo_100
     public string FileName { get; init; }
 }
 
+public readonly record struct WmiActivityEventInfo_101
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public string ComponentName { get; init; }
+    public uint ErrorId { get; init; }
+    public string ErrorDetail { get; init; }
+    public string FileName { get; init; }
+}
+
 public readonly record struct WmiActivityEventInfo_13
 {
     public required DateTime Timestamp { get; init; }
@@ -674,7 +727,15 @@ public readonly record struct WmiActivityEventInfo_16
     public uint ErrorId { get; init; }
     public string Message { get; init; }
 }
-public readonly record struct KernelAcpiEventInfo_23
+public enum KernelAcpiEventId : ushort
+{
+    TemperatureNotification = 3,
+    AmlMethodTrace = 7,
+    TemperatureChange = 11,
+    FrequentAmlMethod = 23,
+}
+
+public readonly record struct KernelAcpiEventInfo_FrequentAmlMethod
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
@@ -687,7 +748,7 @@ public readonly record struct KernelAcpiEventInfo_23
     public UInt64 Frequency { get; init; }
 }
 
-public readonly record struct KernelAcpiEventInfo_7
+public readonly record struct KernelAcpiEventInfo_AmlMethodTrace
 {
     public required DateTime Timestamp { get; init; }
     public required ushort EventId { get; init; }
@@ -699,6 +760,45 @@ public readonly record struct KernelAcpiEventInfo_7
     public string AmlMethodName { get; init; }
     public ushort AmlMethodState { get; init; }
     public UInt64 AmlElapsedTime { get; init; }
+}
+
+public readonly record struct KernelAcpiEventInfo_TemperatureNotification
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public ushort ThermalZoneDeviceInstanceLength { get; init; }
+    public string ThermalZoneDeviceInstance { get; init; }
+    public uint _TMP { get; init; }
+    public uint _PSV { get; init; }
+    public uint _AC0 { get; init; }
+    public uint _AC1 { get; init; }
+    public uint _AC2 { get; init; }
+    public uint _AC3 { get; init; }
+    public uint _AC4 { get; init; }
+    public uint _AC5 { get; init; }
+    public uint _AC6 { get; init; }
+    public uint _AC7 { get; init; }
+    public uint _AC8 { get; init; }
+    public uint _AC9 { get; init; }
+    public uint _HOT { get; init; }
+    public uint _CRT { get; init; }
+}
+
+public readonly record struct KernelAcpiEventInfo_TemperatureChange
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public ushort ThermalZoneDeviceInstanceLength { get; init; }
+    public string ThermalZoneDeviceInstance { get; init; }
+    public uint Temperature { get; init; }
 }
 
 public sealed class KernelPowerEventInfo
@@ -1259,11 +1359,17 @@ public sealed class EtlFileReader
     public event ImageLoadEventHandler? ImageDCStart;
     public event ImageLoadEventHandler? ImageDCStop;
 
-    public delegate void KernelAcpiEventHandler_7(KernelAcpiEventInfo_7 data);
-    public event KernelAcpiEventHandler_7? KernelAcpi_7;
+    public delegate void KernelAcpiTemperatureNotificationEventHandler(KernelAcpiEventInfo_TemperatureNotification data);
+    public event KernelAcpiTemperatureNotificationEventHandler? KernelAcpiTemperatureNotification;
 
-    public delegate void KernelAcpiEventHandler_23(KernelAcpiEventInfo_23 data);
-    public event KernelAcpiEventHandler_23? KernelAcpi_23;
+    public delegate void KernelAcpiAmlMethodTraceEventHandler(KernelAcpiEventInfo_AmlMethodTrace data);
+    public event KernelAcpiAmlMethodTraceEventHandler? KernelAcpiAmlMethodTrace;
+
+    public delegate void KernelAcpiTemperatureChangeEventHandler(KernelAcpiEventInfo_TemperatureChange data);
+    public event KernelAcpiTemperatureChangeEventHandler? KernelAcpiTemperatureChange;
+
+    public delegate void KernelAcpiFrequentAmlMethodEventHandler(KernelAcpiEventInfo_FrequentAmlMethod data);
+    public event KernelAcpiFrequentAmlMethodEventHandler? KernelAcpiFrequentAmlMethod;
 
     public delegate void KernelPowerEventHandler(KernelPowerEventInfo data);
     public event KernelPowerEventHandler? KernelPower;
@@ -1272,8 +1378,16 @@ public sealed class EtlFileReader
     public event WmiActivityEventHandler_24? WmiActivity_24;
     public delegate void WmiActivityEventHandler_11(in WmiActivityEventInfo_11 data);
     public event WmiActivityEventHandler_11? WmiActivity_11;
+    public delegate void WmiActivityEventHandler_17(in WmiActivityEventInfo_17 data);
+    public event WmiActivityEventHandler_17? WmiActivity_17;
     public delegate void WmiActivityEventHandler_12(in WmiActivityEventInfo_12 data);
     public event WmiActivityEventHandler_12? WmiActivity_12;
+    public delegate void WmiActivityEventHandler_20(in WmiActivityEventInfo_20 data);
+    public event WmiActivityEventHandler_20? WmiActivity_20;
+    public delegate void WmiActivityEventHandler_22(in WmiActivityEventInfo_22 data);
+    public event WmiActivityEventHandler_22? WmiActivity_22;
+    public delegate void WmiActivityEventHandler_101(in WmiActivityEventInfo_101 data);
+    public event WmiActivityEventHandler_101? WmiActivity_101;
 
     public delegate void EnergyEstimationEngine_37Handler(in EnergyEstimationEngineEventInfo_37 data);
     public event EnergyEstimationEngine_37Handler? EnergyEstimationEngine_37;
@@ -1427,14 +1541,6 @@ public sealed class EtlFileReader
         if (eventRecordPtr->EventHeader.ProviderId == s_processProviderId)
         {
             ProcessProcessEvent(opcode, timestamp, eventRecordPtr, cache);
-            //var strb = new StringBuilder();
-            //strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
-            //foreach (var oo in cache.Properties)
-            //{
-            //    strb.Append($"{oo.Key}:{oo.Value.InType} ");
-            //}
-            //strb.AppendLine();
-            //System.Diagnostics.Trace.WriteLine(strb.ToString());
         }
         else if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
         {
@@ -1487,6 +1593,17 @@ public sealed class EtlFileReader
                     }
                 }
             }
+            else if (wmiEventId == 17)
+            {
+                if (WmiActivity_17 is not null)
+                {
+                    var wmiActivityEvent_17 = ParseWmiActivityPayload_17(timestamp, eventRecordPtr, cache);
+                    if (wmiActivityEvent_17 is { } wmiActivityEventValue)
+                    {
+                        WmiActivity_17(in wmiActivityEventValue);
+                    }
+                }
+            }
             else if (wmiEventId == 12)
             {
                 var wmiActivityEvent = ParseWmiActivityPayload_12(timestamp, eventRecordPtr, cache);
@@ -1527,11 +1644,44 @@ public sealed class EtlFileReader
 
                 }
             }
+            else if (wmiEventId == 101)
+            {
+                if (WmiActivity_101 is not null)
+                {
+                    var wmiActivityEvent_101 = ParseWmiActivityPayload_101(timestamp, eventRecordPtr, cache);
+                    if (wmiActivityEvent_101 is { } wmiActivityEventValue)
+                    {
+                        WmiActivity_101(in wmiActivityEventValue);
+                    }
+                }
+            }
+            else if (wmiEventId == 20)
+            {
+                if (WmiActivity_20 is not null)
+                {
+                    var wmiActivityEvent_20 = ParseWmiActivityPayload_20(timestamp, eventRecordPtr, cache);
+                    if (wmiActivityEvent_20 is { } wmiActivityEventValue)
+                    {
+                        WmiActivity_20(in wmiActivityEventValue);
+                    }
+                }
+            }
+            else if (wmiEventId == 22)
+            {
+                if (WmiActivity_22 is not null)
+                {
+                    var wmiActivityEvent_22 = ParseWmiActivityPayload_22(timestamp, eventRecordPtr, cache);
+                    if (wmiActivityEvent_22 is { } wmiActivityEventValue)
+                    {
+                        WmiActivity_22(in wmiActivityEventValue);
+                    }
+                }
+            }
             else if (wmiEventId == 50) { }
             else
             {
                 var strb = new StringBuilder();
-                strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+                strb.Append($"wmi {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
                 foreach (var oo in cache.Properties)
                 {
                     strb.Append($"{oo.Key}:{oo.Value.InType} ");
@@ -1578,32 +1728,39 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
         {
-
-            var evtid = eventRecordPtr->EventHeader.EventDescriptor.Id;
-            if (evtid == 7)
+            switch ((KernelAcpiEventId)eventRecordPtr->EventHeader.EventDescriptor.Id)
             {
-                var acpiEvent = ProcessKernelAcpiEvent_7(timestamp, eventRecordPtr, cache);
-                if (acpiEvent is { } acpievtvalue)
-                    KernelAcpi_7?.Invoke(acpievtvalue);
+                case KernelAcpiEventId.TemperatureNotification:
+                    var temperatureNotification = ProcessKernelAcpiTemperatureNotificationEvent(timestamp, eventRecordPtr, cache);
+                    if (temperatureNotification is { } temperatureNotificationValue)
+                        KernelAcpiTemperatureNotification?.Invoke(temperatureNotificationValue);
+                    break;
+                case KernelAcpiEventId.AmlMethodTrace:
+                    var amlMethodTrace = ProcessKernelAcpiAmlMethodTraceEvent(timestamp, eventRecordPtr, cache);
+                    if (amlMethodTrace is { } amlMethodTraceValue)
+                        KernelAcpiAmlMethodTrace?.Invoke(amlMethodTraceValue);
+                    break;
+                case KernelAcpiEventId.TemperatureChange:
+                    var temperatureChange = ProcessKernelAcpiTemperatureChangeEvent(timestamp, eventRecordPtr, cache);
+                    if (temperatureChange is { } temperatureChangeValue)
+                        KernelAcpiTemperatureChange?.Invoke(temperatureChangeValue);
+                    break;
+                case KernelAcpiEventId.FrequentAmlMethod:
+                    var frequentAmlMethod = ProcessKernelAcpiFrequentAmlMethodEvent(timestamp, eventRecordPtr, cache);
+                    if (frequentAmlMethod is { } frequentAmlMethodValue)
+                        KernelAcpiFrequentAmlMethod?.Invoke(frequentAmlMethodValue);
+                    break;
+                default:
+                    var strb = new StringBuilder();
+                    strb.Append($"acpi {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+                    foreach (var oo in cache.Properties)
+                    {
+                        strb.Append($"{oo.Key}:{oo.Value.InType} ");
+                    }
+                    strb.AppendLine();
+                    System.Diagnostics.Trace.WriteLine(strb.ToString());
+                    break;
             }
-            else if (evtid == 23)
-            {
-                var acpiEvent = ProcessKernelAcpiEvent_23(timestamp, eventRecordPtr, cache);
-                if (acpiEvent is { } acpievtvalue)
-                    KernelAcpi_23?.Invoke(acpievtvalue);
-            }
-            else
-            {
-                var strb = new StringBuilder();
-                strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
-                foreach (var oo in cache.Properties)
-                {
-                    strb.Append($"{oo.Key}:{oo.Value.InType} ");
-                }
-                strb.AppendLine();
-                System.Diagnostics.Trace.WriteLine(strb.ToString());
-            }
-            
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
         {
@@ -1633,7 +1790,7 @@ public sealed class EtlFileReader
             else
             {
                 var strb = new StringBuilder();
-                strb.Append($"{eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+                strb.Append($"pmt {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
                 foreach (var oo in cache.Properties)
                 {
                     strb.Append($"{oo.Key}:{oo.Value.InType} ");
@@ -1750,6 +1907,76 @@ public sealed class EtlFileReader
         return m_Properties;
     }
 
+    private unsafe WmiActivityEventInfo_17? ParseWmiActivityPayload_17(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null) return null;
+
+        return new WmiActivityEventInfo_17
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            CorrelationId = GetRawPropertyString(eventRecordPtr, "CorrelationId", schema),
+            ProcessId = GetRawProperty<uint>(eventRecordPtr, "ProcessId", schema),
+            Protocol = GetRawPropertyString(eventRecordPtr, "Protocol", schema),
+            Operation = GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            User = GetRawPropertyString(eventRecordPtr, "User", schema),
+            Namespace = GetRawPropertyString(eventRecordPtr, "Namespace", schema),
+        };
+    }
+
+    private unsafe WmiActivityEventInfo_20? ParseWmiActivityPayload_20(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null) return null;
+
+        return new WmiActivityEventInfo_20
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            OperationID = GetRawProperty<uint>(eventRecordPtr, "OperationID", schema),
+            Operation = GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            Flags = GetRawProperty<uint>(eventRecordPtr, "Flags", schema),
+            ClientProcessId = GetRawProperty<uint>(eventRecordPtr, "ClientProcessId", schema),
+            ClientMachineFQDN = GetRawPropertyString(eventRecordPtr, "ClientMachineFQDN", schema),
+            ClientProcessCreationTime = GetRawProperty<ulong>(eventRecordPtr, "ClientProcessCreationTime", schema),
+            IsLocal = GetRawProperty<bool>(eventRecordPtr, "IsLocal", schema),
+        };
+    }
+
+    private unsafe WmiActivityEventInfo_22? ParseWmiActivityPayload_22(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null) return null;
+
+        return new WmiActivityEventInfo_22
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            CorrelationId = GetRawPropertyString(eventRecordPtr, "CorrelationId", schema),
+            GroupOperationId = GetRawProperty<uint>(eventRecordPtr, "GroupOperationId", schema),
+            OperationId = GetRawProperty<uint>(eventRecordPtr, "OperationId", schema),
+            ClassName = GetRawPropertyString(eventRecordPtr, "ClassName", schema),
+            MethodName = GetRawPropertyString(eventRecordPtr, "MethodName", schema),
+            ImplementationClass = GetRawPropertyString(eventRecordPtr, "ImplementationClass", schema),
+            ClientMachine = GetRawPropertyString(eventRecordPtr, "ClientMachine", schema),
+            ClientMachineFQDN = GetRawPropertyString(eventRecordPtr, "ClientMachineFQDN", schema),
+            User = GetRawPropertyString(eventRecordPtr, "User", schema),
+            ClientProcessId = GetRawProperty<uint>(eventRecordPtr, "ClientProcessId", schema),
+            ClientProcessCreationTime = GetRawProperty<ulong>(eventRecordPtr, "ClientProcessCreationTime", schema),
+            NamespaceName = GetRawPropertyString(eventRecordPtr, "NamespaceName", schema),
+            IsLocal = GetRawProperty<bool>(eventRecordPtr, "IsLocal", schema),
+        };
+    }
+
     private unsafe WmiActivityEventInfo_24? ParseWmiActivityPayload_24(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
         if (eventRecordPtr == null)
@@ -1839,6 +2066,28 @@ public sealed class EtlFileReader
         };
     }
 
+    private unsafe WmiActivityEventInfo_101? ParseWmiActivityPayload_101(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+
+        return new WmiActivityEventInfo_101
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            ComponentName = GetRawPropertyString(eventRecordPtr, "ComponentName", schema),
+            ErrorId = GetRawProperty<uint>(eventRecordPtr, "ErrorId", schema),
+            ErrorDetail = GetRawPropertyString(eventRecordPtr, "ErrorDetail", schema),
+            FileName = GetRawPropertyString(eventRecordPtr, "FileName", schema),
+        };
+    }
+
     private unsafe WmiActivityEventInfo_13? ParseWmiActivityPayload_13(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
         if (eventRecordPtr == null)
@@ -1909,6 +2158,7 @@ public sealed class EtlFileReader
             Path = GetRawPropertyString(eventRecordPtr, "Path", schema),
         };
     }
+
     private static unsafe T GetRawProperty<T>(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, T defaultvalue = default) where T : unmanaged
     {
         if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
@@ -2008,28 +2258,15 @@ public sealed class EtlFileReader
         return TdhInType.Null;
     }
 
-    /// <summary>
-    /// HexInt32/HexInt64 只是顯示格式（十六進位），二進位配置與 Int32/UInt32、Int64/UInt64 相同，
-    /// 因此讀取原始值時視為相容型別。
-    /// </summary>
     private static bool IsCompatibleInType(TdhInType actual, TdhInType expected)
     {
-        if (actual == expected)
+        return actual switch
         {
-            return true;
-        }
-
-        if (actual == TdhInType.HexInt32)
-        {
-            return expected is TdhInType.Int32 or TdhInType.UInt32;
-        }
-
-        if (actual == TdhInType.HexInt64)
-        {
-            return expected is TdhInType.Int64 or TdhInType.UInt64;
-        }
-
-        return false;
+            _ when actual == expected => true,
+            TdhInType.HexInt32 => expected is TdhInType.Int32 or TdhInType.UInt32,
+            TdhInType.HexInt64 => expected is TdhInType.Int64 or TdhInType.UInt64,
+            _ => false,
+        };
     }
 
     private static unsafe string GetRawPropertyString(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, string defaultvalue = "")
@@ -2095,12 +2332,6 @@ public sealed class EtlFileReader
             }
         }
     }
-
-    /// <summary>
-    /// 讀取 InType 為 Sid(19) 或 WBEMSID(310) 的屬性,轉換為標準 SID 字串(例如 "S-1-5-21-...")。
-    /// WBEMSID 是 MOF-based(classic WMI)provider 使用的格式:一段依指標大小而定長度的
-    /// TOKEN_USER 前置資料(SID_AND_ATTRIBUTES),之後才是實際的 SID 結構,因此需先跳過前置資料。
-    /// </summary>
     private static unsafe string GetRawPropertySidString(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, uint pointerSize, string defaultvalue = "")
     {
         if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
@@ -2335,13 +2566,46 @@ public sealed class EtlFileReader
         };
     }
 
-    private unsafe KernelAcpiEventInfo_7? ProcessKernelAcpiEvent_7(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    private unsafe KernelAcpiEventInfo_TemperatureNotification? ProcessKernelAcpiTemperatureNotificationEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
         if (eventRecordPtr == null)
         {
             return null;
         }
-        return new KernelAcpiEventInfo_7
+        return new KernelAcpiEventInfo_TemperatureNotification
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            ThermalZoneDeviceInstanceLength = GetRawProperty<ushort>(eventRecordPtr, "ThermalZoneDeviceInstanceLength", schema),
+            ThermalZoneDeviceInstance = GetRawPropertyString(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification.ThermalZoneDeviceInstance), schema),
+            _TMP = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._TMP), schema),
+            _PSV = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._PSV), schema),
+            _AC0 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC0), schema),
+            _AC1 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC1), schema),
+            _AC2 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC2), schema),
+            _AC3 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC3), schema),
+            _AC4 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC4), schema),
+            _AC5 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC5), schema),
+            _AC6 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC6), schema),
+            _AC7 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC7), schema),
+            _AC8 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC8), schema),
+            _AC9 = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._AC9), schema),
+            _HOT = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._HOT), schema),
+            _CRT = GetRawProperty<uint>(eventRecordPtr, nameof(KernelAcpiEventInfo_TemperatureNotification._CRT), schema),
+        };
+    }
+
+    private unsafe KernelAcpiEventInfo_AmlMethodTrace? ProcessKernelAcpiAmlMethodTraceEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+        return new KernelAcpiEventInfo_AmlMethodTrace
         {
             Timestamp = timestamp,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
@@ -2356,14 +2620,34 @@ public sealed class EtlFileReader
         };
     }
 
-
-    private unsafe KernelAcpiEventInfo_23? ProcessKernelAcpiEvent_23(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    private unsafe KernelAcpiEventInfo_TemperatureChange? ProcessKernelAcpiTemperatureChangeEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
         if (eventRecordPtr == null)
         {
             return null;
         }
-        return new KernelAcpiEventInfo_23
+        return new KernelAcpiEventInfo_TemperatureChange
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            ThermalZoneDeviceInstanceLength = GetRawProperty<ushort>(eventRecordPtr, "ThermalZoneDeviceInstanceLength", schema),
+            ThermalZoneDeviceInstance = GetRawPropertyString(eventRecordPtr, "ThermalZoneDeviceInstance", schema),
+            Temperature = GetRawProperty<uint>(eventRecordPtr, "Temperature", schema),
+
+        };
+    }
+
+    private unsafe KernelAcpiEventInfo_FrequentAmlMethod? ProcessKernelAcpiFrequentAmlMethodEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null)
+        {
+            return null;
+        }
+        return new KernelAcpiEventInfo_FrequentAmlMethod
         {
             Timestamp = timestamp,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
