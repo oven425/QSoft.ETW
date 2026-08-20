@@ -26,20 +26,30 @@ namespace QSoft.ETW
         EventTraceProperties? userProps = null;
 
         readonly KernelTraceFlags kernelEnableFlags;
-        readonly UserProviderConfiguration[] userProviders;
+        readonly ProviderConfiguration[] userProviders;
+        readonly ProviderConfiguration[] systemProviders;
         readonly string? mergedFileName;
+        readonly bool enableFileCompression;
         bool isStarted = false;
         bool isDisposed = false;
 
-        internal TraceSession(KernelTraceFlags kernelEnableFlags, UserProviderConfiguration[] userProviders, string baseDir, string? mergedFileName = null)
+        internal TraceSession(
+            KernelTraceFlags kernelEnableFlags,
+            ProviderConfiguration[] userProviders,
+            ProviderConfiguration[] systemProviders,
+            string baseDir,
+            string? mergedFileName = null,
+            bool enableFileCompression = false)
         {
             this.kernelEnableFlags = kernelEnableFlags;
             this.userProviders = userProviders ?? [];
+            this.systemProviders = systemProviders ?? [];
             this.baseDir = string.IsNullOrEmpty(baseDir) ? AppContext.BaseDirectory : baseDir;
             this.mergedFileName = mergedFileName;
+            this.enableFileCompression = enableFileCompression;
         }
 
-        internal readonly record struct UserProviderConfiguration(Guid ProviderId, ulong MatchAnyKeyword);
+        internal readonly record struct ProviderConfiguration(Guid ProviderId, ulong MatchAnyKeyword);
 
         public void Start()
         {
@@ -56,9 +66,29 @@ namespace QSoft.ETW
             userLogFile = Path.Combine(baseDir, $"user_{timestamp}.etl");
             mergedLogFile = Path.Combine(baseDir, string.IsNullOrWhiteSpace(mergedFileName) ? $"merged_{timestamp}.etl" : mergedFileName);
 
-            kernelProps = StartKernelTrace(kernelLogFile, kernelEnableFlags, out kernelHandle);
+            try
+            {
+                kernelProps = StartKernelTrace(kernelLogFile, kernelEnableFlags, systemProviders, out kernelHandle);
+                userProps = StartUserTrace(userSessionName, userLogFile, userProviders, out userHandle);
+            }
+            catch
+            {
+                if (userHandle != 0 && userProps is not null)
+                {
+                    _ = ControlTraceW(userHandle, null, ref userProps.Properties, EVENT_TRACE_CONTROL_STOP);
+                }
 
-            userProps = StartUserTrace(userSessionName, userLogFile, userProviders, out userHandle);
+                if (kernelHandle != 0 && kernelProps is not null)
+                {
+                    _ = ControlTraceW(kernelHandle, null, ref kernelProps.Properties, EVENT_TRACE_CONTROL_STOP);
+                }
+
+                userHandle = 0;
+                kernelHandle = 0;
+                userProps = null;
+                kernelProps = null;
+                throw;
+            }
 
             isStarted = true;
 
@@ -263,6 +293,18 @@ namespace QSoft.ETW
             return eventTraceProperties;
         }
         
+        uint GetLogFileMode()
+        {
+            return EVENT_TRACE_FILE_MODE_SEQUENTIAL |
+                (enableFileCompression ? EVENT_TRACE_COMPRESSED_MODE : 0);
+        }
+
+        uint GetKernelLogFileMode()
+        {
+            return GetLogFileMode() |
+                (systemProviders.Length > 0 ? EVENT_TRACE_SYSTEM_LOGGER_MODE : 0);
+        }
+
         void StopExistingSession(string sessionName, ref EVENT_TRACE_PROPERTIES props)
         {
             _ = ControlTraceW(0, sessionName, ref props, EVENT_TRACE_CONTROL_STOP);
@@ -281,11 +323,15 @@ namespace QSoft.ETW
             }
         }
 
-        EventTraceProperties? StartKernelTrace(string logFileName, KernelTraceFlags enableFlags, out ulong sessionHandle)
+        EventTraceProperties? StartKernelTrace(
+            string logFileName,
+            KernelTraceFlags enableFlags,
+            ProviderConfiguration[] systemProviders,
+            out ulong sessionHandle)
         {
             sessionHandle = 0;
 
-            if (enableFlags == KernelTraceFlags.None)
+            if (enableFlags == KernelTraceFlags.None && systemProviders.Length == 0)
             {
                 return null;
             }
@@ -298,7 +344,7 @@ namespace QSoft.ETW
                 KERNEL_LOGGER_NAME,
                 logFileName,
                 SystemTraceControlGuid,
-                EVENT_TRACE_FILE_MODE_SEQUENTIAL,
+                GetKernelLogFileMode(),
                 (uint)enableFlags,
                 minimumBuffers,
                 maximumBuffers);
@@ -313,10 +359,42 @@ namespace QSoft.ETW
                 StartKernelTrace(out sessionHandle, ref eventTraceProperties.Properties, in stackTracingEventId, 1),
                 nameof(StartKernelTrace));
 
+            try
+            {
+                EnableProviders(sessionHandle, systemProviders);
+            }
+            catch
+            {
+                _ = ControlTraceW(sessionHandle, null, ref eventTraceProperties.Properties, EVENT_TRACE_CONTROL_STOP);
+                sessionHandle = 0;
+                throw;
+            }
+
             return eventTraceProperties;
         }
 
-        EventTraceProperties? StartUserTrace(string sessionName, string logFileName, UserProviderConfiguration[] providers, out ulong sessionHandle)
+        void EnableProviders(ulong sessionHandle, ReadOnlySpan<ProviderConfiguration> providers)
+        {
+            foreach (ProviderConfiguration provider in providers)
+            {
+                Guid providerId = provider.ProviderId;
+                var enableParams = new ENABLE_TRACE_PARAMETERS { Version = ENABLE_TRACE_PARAMETERS_VERSION_2 };
+
+                ThrowIfError(
+                    EnableTraceEx2(
+                        sessionHandle,
+                        in providerId,
+                        EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                        TRACE_LEVEL_VERBOSE,
+                        matchAnyKeyword: provider.MatchAnyKeyword,
+                        matchAllKeyword: 0,
+                        timeout: 0,
+                        in enableParams),
+                    $"{nameof(EnableTraceEx2)}({provider.ProviderId})");
+            }
+        }
+
+        EventTraceProperties? StartUserTrace(string sessionName, string logFileName, ProviderConfiguration[] providers, out ulong sessionHandle)
         {
             sessionHandle = 0;
 
@@ -328,7 +406,7 @@ namespace QSoft.ETW
             (uint minimumBuffers, uint maximumBuffers) = GetRecommendedBufferCounts();
 
             EventTraceProperties eventTraceProperties = AllocateProperties(
-                sessionName, logFileName, Guid.NewGuid(), EVENT_TRACE_FILE_MODE_SEQUENTIAL, 0, minimumBuffers, maximumBuffers);
+                sessionName, logFileName, Guid.NewGuid(), GetLogFileMode(), 0, minimumBuffers, maximumBuffers);
 
             try
             {
@@ -336,24 +414,7 @@ namespace QSoft.ETW
 
                 ThrowIfError(StartTraceW(out sessionHandle, sessionName, ref eventTraceProperties.Properties), "StartTraceW(User)");
 
-                // 逐一啟用呼叫端指定要蒐集的 Provider。
-                foreach (UserProviderConfiguration provider in providers)
-                {
-                    Guid providerId = provider.ProviderId;
-                    var enableParams = new ENABLE_TRACE_PARAMETERS { Version = ENABLE_TRACE_PARAMETERS_VERSION_2 };
-
-                    ThrowIfError(
-                        EnableTraceEx2(
-                            sessionHandle,
-                            in providerId,
-                            EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                            TRACE_LEVEL_VERBOSE,
-                            matchAnyKeyword: provider.MatchAnyKeyword,
-                            matchAllKeyword: 0,
-                            timeout: 0,
-                            in enableParams),
-                        $"{nameof(EnableTraceEx2)}({provider.ProviderId})");
-                }
+                EnableProviders(sessionHandle, providers);
 
                 return eventTraceProperties;
             }
@@ -499,6 +560,8 @@ namespace QSoft.ETW
         const uint ERROR_INSUFFICIENT_BUFFER = 122;
 
         const uint EVENT_TRACE_FILE_MODE_SEQUENTIAL = 0x00000001;
+        const uint EVENT_TRACE_SYSTEM_LOGGER_MODE = 0x02000000;
+        const uint EVENT_TRACE_COMPRESSED_MODE = 0x04000000;
         const uint WNODE_FLAG_TRACED_GUID = 0x00020000;
         const uint DefaultBufferSizeKb = 64;
         const uint EVENT_TRACE_CONTROL_STOP = 1;
@@ -705,12 +768,29 @@ namespace QSoft.ETW
         public static readonly Guid KernelAcpiProviderGuid = new("c514638f-7723-485b-bcfc-96565d735d4a");
         public static readonly Guid KernelPowerProviderGuid = new("331c3b3a-2005-44c2-ac5e-77220c37d6b4");
         public static readonly Guid PowerMeterPollingProviderGuid = new("306c4e0b-e148-543d-315b-c618eb93157c");
+        public static readonly Guid SystemMemoryProviderGuid = new("82958ca9-b6cd-47f8-a3a8-03ae85a4bc24");
         public const ulong PowerMeterPollingFiveSecondKeyword = 0x0000000000000004;
+        public const ulong SystemMemoryMemoryInfoKeyword = 0x0000000000000010;
+        public const ulong SystemMemoryWorkingSetKeyword = 0x0000000000000100;
+        public const ulong SystemMemoryVirtualAllocKeyword = 0x0000000000000400;
 
         internal KernelTraceFlags m_EnableFlags = KernelTraceFlags.None;
-        internal readonly List<TraceSession.UserProviderConfiguration> m_UserProviders = [];
+        internal readonly List<TraceSession.ProviderConfiguration> m_UserProviders = [];
+        internal readonly List<TraceSession.ProviderConfiguration> m_SystemProviders = [];
         internal string m_BaseDir = AppContext.BaseDirectory;
         internal string? m_MergedFileName;
+        internal bool m_EnableFileCompression;
+
+        /// <summary>
+        /// Configures ETW to compress the kernel and user ETL files while they are recorded.
+        /// </summary>
+        /// <param name="enabled"><see langword="true"/> to enable compression; otherwise, <see langword="false"/>.</param>
+        /// <returns>The current builder.</returns>
+        public TraceSessionBuilder WithEtwFileCompression(bool enabled = true)
+        {
+            m_EnableFileCompression = enabled;
+            return this;
+        }
 
         public TraceSessionBuilder WithConfig(KernelTraceFlags traceflag)
         {
@@ -726,13 +806,25 @@ namespace QSoft.ETW
 
         public TraceSessionBuilder WithProvider(Guid guid)
         {
-            m_UserProviders.Add(new TraceSession.UserProviderConfiguration(guid, 0xFFFFFFFFFFFFFFFF));
+            m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, 0xFFFFFFFFFFFFFFFF));
             return this;
         }
 
         public TraceSessionBuilder WithProvider(Guid guid, ulong matchAnyKeyword)
         {
-            m_UserProviders.Add(new TraceSession.UserProviderConfiguration(guid, matchAnyKeyword));
+            m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, matchAnyKeyword));
+            return this;
+        }
+
+        /// <summary>
+        /// Adds a System Provider to the kernel system-logger session.
+        /// </summary>
+        /// <param name="guid">The System Provider GUID.</param>
+        /// <param name="matchAnyKeyword">The System Provider keyword mask.</param>
+        /// <returns>The current builder.</returns>
+        public TraceSessionBuilder WithSystemProvider(Guid guid, ulong matchAnyKeyword)
+        {
+            m_SystemProviders.Add(new TraceSession.ProviderConfiguration(guid, matchAnyKeyword));
             return this;
         }
 
@@ -740,7 +832,7 @@ namespace QSoft.ETW
         {
             foreach (Guid guid in guids)
             {
-                m_UserProviders.Add(new TraceSession.UserProviderConfiguration(guid, 0));
+                m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, 0));
             }
 
             return this;
@@ -776,6 +868,12 @@ namespace QSoft.ETW
             return this;
         }
 
-        public TraceSession Build() => new(m_EnableFlags, [.. m_UserProviders], m_BaseDir, m_MergedFileName);
+        public TraceSession Build() => new(
+            m_EnableFlags,
+            [.. m_UserProviders],
+            [.. m_SystemProviders],
+            m_BaseDir,
+            m_MergedFileName,
+            m_EnableFileCompression);
     }
 }

@@ -493,8 +493,31 @@ public readonly record struct ProcessTerminateInfo
     public DateTime TimeStamp { get; init; }
 }
 
-
-
+/// <summary>
+/// 對應 Process provider 的 Opcode 32 (PerfCtr) 與 33 (PerfCtrRundown) 事件。
+/// SizeT 欄位統一以 <see cref="ulong"/> 表示，保留 ETL 中的原始數值。
+/// </summary>
+public readonly record struct ProcessCounterEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public ushort EventId { get; init; }
+    public byte Version { get; init; }
+    public byte Opcode { get; init; }
+    public uint ProcessId { get; init; }
+    public uint PageFaultCount { get; init; }
+    public uint HandleCount { get; init; }
+    public ulong PeakVirtualSize { get; init; }
+    public ulong PeakWorkingSetSize { get; init; }
+    public ulong PeakPagefileUsage { get; init; }
+    public ulong QuotaPeakPagedPoolUsage { get; init; }
+    public ulong QuotaPeakNonPagedPoolUsage { get; init; }
+    public ulong VirtualSize { get; init; }
+    public ulong WorkingSetSize { get; init; }
+    public ulong PagefileUsage { get; init; }
+    public ulong QuotaPagedPoolUsage { get; init; }
+    public ulong QuotaNonPagedPoolUsage { get; init; }
+    public ulong PrivatePageCount { get; init; }
+}
 
 public sealed class ModuleInfo
 {
@@ -710,6 +733,24 @@ public readonly record struct WmiActivityEventInfo_5857
     public string ProviderPath { get; init; }
 }
 
+public readonly record struct WmiActivityEventInfo_5858
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public string Id { get; init; }
+    public string ClientMachine { get; init; }
+    public string User { get; init; }
+    public uint ClientProcessId { get; init; }
+    public string Component { get; init; }
+    public string Operation { get; init; }
+    public int ResultCode { get; init; }
+    public string PossibleCause { get; init; }
+}
+
 public readonly record struct WmiActivityEventInfo_100
 {
     public required DateTime Timestamp { get; init; }
@@ -846,6 +887,21 @@ public sealed class KernelPowerEventInfo
     public required uint ThreadId { get; init; }
 }
 
+public readonly record struct KernelPowerEventInfo_63
+{
+    public DateTime Timestamp { get; init; }
+    public ushort EventId { get; init; }
+    public byte Version { get; init; }
+    public byte Opcode { get; init; }
+    public uint ProcessId { get; init; }
+    public uint ThreadId { get; init; }
+    public uint RequestedResolution { get; init; }
+    public uint Pid { get; init; }
+    public ushort AppNameLength { get; init; }
+    public string AppName { get; init; }
+    public uint SubProcessTag { get; init; }
+    public bool RequestIgnored { get; init; }
+}
 public readonly record struct ThreadStartStopEventInfo
 {
     public required DateTime Timestamp { get; init; }
@@ -1377,6 +1433,9 @@ public sealed class EtlFileReader
     public delegate void ProcessTerminateEventHandler(in ProcessTerminateInfo data);
     public event ProcessTerminateEventHandler? ProcessTerminate;
 
+    public delegate void ProcessCounterEventHandler(in ProcessCounterEventInfo data);
+    public event ProcessCounterEventHandler? ProcessCounter;
+
     public delegate void PerfInfoDpcEventHandler(in DpcEventInfo data);
     public event PerfInfoDpcEventHandler? PerfInfoThreadedDPC;
     public event PerfInfoDpcEventHandler? PerfInfoDPC;
@@ -1583,173 +1642,187 @@ public sealed class EtlFileReader
 
             //ProcessThreadEvent(opcode, timestamp, properties);
         }
-        else if (eventRecordPtr->EventHeader.ProviderId == s_diskIoProviderId)
-        {
-            //Dictionary<string, string>? properties = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
-            //if (properties is not null)
-            //{
-            //    ProcessDiskIoEvent(timestamp, in eventRecordPtr->EventHeader, properties);
-            //}
-            var pps = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
-            System.Diagnostics.Trace.Write($"disk ");
-            foreach (var oo in pps)
-            {
-                System.Diagnostics.Trace.Write($"{oo.Key}:{oo.Value} ");
-            }
-            System.Diagnostics.Trace.WriteLine("");
-        }
-        else if (eventRecordPtr->EventHeader.ProviderId == s_fileIoProviderId)
-        {
-            var pps = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
-            System.Diagnostics.Trace.Write($"file ");
-            foreach (var oo in pps)
-            {
-                System.Diagnostics.Trace.Write($"{oo.Key}:{oo.Value} ");
-            }
-            System.Diagnostics.Trace.WriteLine("");
-            //byte rawOpcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
-            //FileIoOpcode fileIoOpcode = (FileIoOpcode)rawOpcode;
-            //FileIOEventInfo ff = new FileIOEventInfo()
-            //{
-            //    Timestamp = timestamp,
-            //    EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
-            //    Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
-            //    Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
-            //    ProcessId = eventRecordPtr->EventHeader.ProcessId,
-            //    ThreadId = eventRecordPtr->EventHeader.ThreadId,
-            //    FileObject = GetRawProperty<uint>(eventRecordPtr, "FileObject", cache),
-            //    FileName = GetRawPropertyString(eventRecordPtr, "FileName", cache),
-            //};
-            //var strb = new StringBuilder();
-            //strb.Append($"fileio {eventRecordPtr->EventHeader.EventDescriptor.Id} {fileIoOpcode} ({rawOpcode})");
-            //foreach (var oo in cache.Properties)
-            //{
-            //    strb.Append($"{oo.Key}:{oo.Value.InType}");
-            //}
-            //strb.AppendLine();
-            //System.Diagnostics.Trace.WriteLine(strb.ToString());
-            //ProcessFileIoEvent(timestamp, eventRecordPtr, cache);
-        }
+        //else if (eventRecordPtr->EventHeader.ProviderId == s_diskIoProviderId)
+        //{
+        //    //Dictionary<string, string>? properties = ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+        //    //if (properties is not null)
+        //    //{
+        //    //    ProcessDiskIoEvent(timestamp, in eventRecordPtr->EventHeader, properties);
+        //    //}
+        //    var pps = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+        //    System.Diagnostics.Trace.Write($"disk ");
+        //    foreach (var oo in pps)
+        //    {
+        //        System.Diagnostics.Trace.Write($"{oo.Key}:{oo.Value} ");
+        //    }
+        //    System.Diagnostics.Trace.WriteLine("");
+        //}
+        //else if (eventRecordPtr->EventHeader.ProviderId == s_fileIoProviderId)
+        //{
+        //    var pps = this.ReadProperties(eventRecordPtr, in eventRecordPtr->EventHeader);
+        //    System.Diagnostics.Trace.Write($"file ");
+        //    foreach (var oo in pps)
+        //    {
+        //        System.Diagnostics.Trace.Write($"{oo.Key}:{oo.Value} ");
+        //    }
+        //    System.Diagnostics.Trace.WriteLine("");
+        //    //byte rawOpcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
+        //    //FileIoOpcode fileIoOpcode = (FileIoOpcode)rawOpcode;
+        //    //FileIOEventInfo ff = new FileIOEventInfo()
+        //    //{
+        //    //    Timestamp = timestamp,
+        //    //    EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+        //    //    Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+        //    //    Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+        //    //    ProcessId = eventRecordPtr->EventHeader.ProcessId,
+        //    //    ThreadId = eventRecordPtr->EventHeader.ThreadId,
+        //    //    FileObject = GetRawProperty<uint>(eventRecordPtr, "FileObject", cache),
+        //    //    FileName = GetRawPropertyString(eventRecordPtr, "FileName", cache),
+        //    //};
+        //    //var strb = new StringBuilder();
+        //    //strb.Append($"fileio {eventRecordPtr->EventHeader.EventDescriptor.Id} {fileIoOpcode} ({rawOpcode})");
+        //    //foreach (var oo in cache.Properties)
+        //    //{
+        //    //    strb.Append($"{oo.Key}:{oo.Value.InType}");
+        //    //}
+        //    //strb.AppendLine();
+        //    //System.Diagnostics.Trace.WriteLine(strb.ToString());
+        //    //ProcessFileIoEvent(timestamp, eventRecordPtr, cache);
+        //}
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.WmiActivityProviderGuid)
         {
             var wmiEventId = eventRecordPtr->EventHeader.EventDescriptor.Id;
-            if (wmiEventId == 24)
+            
+            switch (wmiEventId)
             {
-                if (WmiActivity_24 is not null)
-                {
-                    var wmiActivityEvent_24 = ParseWmiActivityPayload_24(timestamp, eventRecordPtr, cache);
-                    if (wmiActivityEvent_24 is { } wmiActivityEventValue)
+                case 24:
+                    if (WmiActivity_24 is not null)
                     {
-                        WmiActivity_24(in wmiActivityEventValue);
+                        var wmiActivityEvent_24 = ParseWmiActivityPayload_24(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent_24 is { } wmiActivityEventValue)
+                        {
+                            WmiActivity_24(in wmiActivityEventValue);
+                        }
                     }
-                }
-            }
-            else if (wmiEventId == 11)
-            {
-                if (WmiActivity_11 is not null)
-                {
-                    var wmiActivityEvent_11 = ParseWmiActivityPayload_11(timestamp, eventRecordPtr, cache);
-                    if (wmiActivityEvent_11 is { } wmiActivityEventValue)
+                    break;
+                case 11:
+                    if (WmiActivity_11 is not null)
                     {
-                        WmiActivity_11(in wmiActivityEventValue);
+                        var wmiActivityEvent_11 = ParseWmiActivityPayload_11(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent_11 is { } wmiActivityEventValue)
+                        {
+                            WmiActivity_11(in wmiActivityEventValue);
+                        }
                     }
-                }
-            }
-            else if (wmiEventId == 17)
-            {
-                if (WmiActivity_17 is not null)
-                {
-                    var wmiActivityEvent_17 = ParseWmiActivityPayload_17(timestamp, eventRecordPtr, cache);
-                    if (wmiActivityEvent_17 is { } wmiActivityEventValue)
+                    break;
+                case 17:
+                    if (WmiActivity_17 is not null)
                     {
-                        WmiActivity_17(in wmiActivityEventValue);
+                        var wmiActivityEvent_17 = ParseWmiActivityPayload_17(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent_17 is { } wmiActivityEventValue)
+                        {
+                            WmiActivity_17(in wmiActivityEventValue);
+                        }
                     }
-                }
-            }
-            else if (wmiEventId == 12)
-            {
-                var wmiActivityEvent = ParseWmiActivityPayload_12(timestamp, eventRecordPtr, cache);
-                if (wmiActivityEvent is { } wmiActivityEventValue)
-                {
+                    break;
+                case 12:
+                    {
+                        var wmiActivityEvent = ParseWmiActivityPayload_12(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent is { } wmiActivityEventValue)
+                        {
 
-                }
-            }
-            else if (wmiEventId == 5857)
-            {
-                var wmiActivityEvent = ParseWmiActivityPayload_5857(timestamp, eventRecordPtr, cache);
-                if (wmiActivityEvent is { } wmiActivityEventValue)
-                {
-
-                }
-            }
-            else if (wmiEventId == 16)
-            {
-                var wmiActivityEvent = ParseWmiActivityPayload_16(timestamp, eventRecordPtr, cache);
-                if (wmiActivityEvent is { } wmiActivityEventValue)
-                {
-
-                }
-            }
-            else if (wmiEventId == 13)
-            {
-                var wmiActivityEvent = ParseWmiActivityPayload_13(timestamp, eventRecordPtr, cache);
-                if (wmiActivityEvent is { } wmiActivityEventValue)
-                {
-
-                }
-            }
-            else if (wmiEventId == 100)
-            {
-                var wmiActivityEvent = ParseWmiActivityPayload_100(timestamp, eventRecordPtr, cache);
-                if (wmiActivityEvent is { } wmiActivityEventValue)
-                {
-
-                }
-            }
-            else if (wmiEventId == 101)
-            {
-                if (WmiActivity_101 is not null)
-                {
-                    var wmiActivityEvent_101 = ParseWmiActivityPayload_101(timestamp, eventRecordPtr, cache);
-                    if (wmiActivityEvent_101 is { } wmiActivityEventValue)
-                    {
-                        WmiActivity_101(in wmiActivityEventValue);
+                        }
                     }
-                }
-            }
-            else if (wmiEventId == 20)
-            {
-                if (WmiActivity_20 is not null)
-                {
-                    var wmiActivityEvent_20 = ParseWmiActivityPayload_20(timestamp, eventRecordPtr, cache);
-                    if (wmiActivityEvent_20 is { } wmiActivityEventValue)
+                    break;
+                case 5857:
                     {
-                        WmiActivity_20(in wmiActivityEventValue);
+                        var wmiActivityEvent = ParseWmiActivityPayload_5857(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent is { } wmiActivityEventValue)
+                        {
+
+                        }
                     }
-                }
-            }
-            else if (wmiEventId == 22)
-            {
-                if (WmiActivity_22 is not null)
-                {
-                    var wmiActivityEvent_22 = ParseWmiActivityPayload_22(timestamp, eventRecordPtr, cache);
-                    if (wmiActivityEvent_22 is { } wmiActivityEventValue)
+                    break;
+                case 5858:
                     {
-                        WmiActivity_22(in wmiActivityEventValue);
+                        var wmiActivityEvent = ParseWmiActivityPayload_5858(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent is { } wmiActivityEventValue)
+                        {
+
+                        }
                     }
-                }
-            }
-            else if (wmiEventId == 50) { }
-            else
-            {
-                var strb = new StringBuilder();
-                strb.Append($"wmi {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
-                foreach (var oo in cache.Properties)
-                {
-                    strb.Append($"{oo.Key}:{oo.Value.InType} ");
-                }
-                strb.AppendLine();
-                System.Diagnostics.Trace.WriteLine(strb.ToString());
+                    break;
+                case 16:
+                    {
+                        var wmiActivityEvent = ParseWmiActivityPayload_16(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent is { } wmiActivityEventValue)
+                        {
+
+                        }
+                    }
+                    break;
+                case 13:
+                    {
+                        var wmiActivityEvent = ParseWmiActivityPayload_13(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent is { } wmiActivityEventValue)
+                        {
+
+                        }
+                    }
+                    break;
+                case 100:
+                    {
+                        var wmiActivityEvent = ParseWmiActivityPayload_100(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent is { } wmiActivityEventValue)
+                        {
+
+                        }
+                    }
+                    break;
+                case 101:
+                    if (WmiActivity_101 is not null)
+                    {
+                        var wmiActivityEvent_101 = ParseWmiActivityPayload_101(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent_101 is { } wmiActivityEventValue)
+                        {
+                            WmiActivity_101(in wmiActivityEventValue);
+                        }
+                    }
+                    break;
+                case 20:
+                    if (WmiActivity_20 is not null)
+                    {
+                        var wmiActivityEvent_20 = ParseWmiActivityPayload_20(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent_20 is { } wmiActivityEventValue)
+                        {
+                            WmiActivity_20(in wmiActivityEventValue);
+                        }
+                    }
+                    break;
+                case 22:
+                    if (WmiActivity_22 is not null)
+                    {
+                        var wmiActivityEvent_22 = ParseWmiActivityPayload_22(timestamp, eventRecordPtr, cache);
+                        if (wmiActivityEvent_22 is { } wmiActivityEventValue)
+                        {
+                            WmiActivity_22(in wmiActivityEventValue);
+                        }
+                    }
+                    break;
+                case 50:
+                    break;
+                default:
+                    {
+                        var strb = new StringBuilder();
+                        strb.Append($"wmi {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+                        foreach (var oo in cache.Properties)
+                        {
+                            strb.Append($"{oo.Key}:{oo.Value.InType} ");
+                        }
+                        strb.AppendLine();
+                        System.Diagnostics.Trace.WriteLine(strb.ToString());
+                    }
+                    break;
             }
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
@@ -1826,46 +1899,54 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelPowerProviderGuid)
         {
-            //var strb = new StringBuilder();
-            //strb.Append($"kernel power {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
-            //foreach (var oo in cache.Properties)
-            //{
-            //    strb.Append($"{oo.Key}:{oo.Value.InType} ");
-            //}
-            //strb.AppendLine();
-            //System.Diagnostics.Trace.WriteLine(strb.ToString());
-            //KernelPowerEventInfo kernelPowerEvent = ProcessKernelPowerEvent(timestamp, in eventRecordPtr->EventHeader);
-            //KernelPower?.Invoke(kernelPowerEvent);
+            var evtid = eventRecordPtr->EventHeader.EventDescriptor.Id;
+            switch(evtid)
+            {
+                case 63:
+                    var pd = ProcessKernelPowerEvent_63(timestamp, eventRecordPtr, cache);
+                    break;
+                default:
+                    //var strb = new StringBuilder();
+                    //strb.Append($"kernel power {eventRecordPtr->EventHeader.EventDescriptor.Id} {eventRecordPtr->EventHeader.EventDescriptor.Opcode}");
+                    //foreach (var oo in cache.Properties)
+                    //{
+                    //    strb.Append($"{oo.Key}:{oo.Value.InType} ");
+                    //}
+                    //strb.AppendLine();
+                    //System.Diagnostics.Trace.WriteLine(strb.ToString());
+                    break;
+            }
+
 
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.PowerMeterPollingProviderGuid)
         {
-            var pepid = eventRecordPtr->EventHeader.EventDescriptor.Id;
-            if(pepid == 4)
+            var evtid = eventRecordPtr->EventHeader.EventDescriptor.Id;
+            switch(evtid)
             {
-                var powerneter_4 = ProcessPowerMeterPollingEvent_4(timestamp, eventRecordPtr, cache);
-                if(PowerMeterPollingEventInfo_4 is not null)
-                {
-                    PowerMeterPollingEventInfo_4(powerneter_4);
-                }
-            }
-            else if (pepid == 3)
-            {
-                var powerneter = ProcessPowerMeterPollingEvent_3(timestamp, eventRecordPtr, cache);
-                if (PowerMeterPollingEventInfo_4 is not null)
-                {
-                }
-            }
-            else
-            {
-                var strb = new StringBuilder();
-                strb.Append($"pmt {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
-                foreach (var oo in cache.Properties)
-                {
-                    strb.Append($"{oo.Key}:{oo.Value.InType} ");
-                }
-                strb.AppendLine();
-                System.Diagnostics.Trace.WriteLine(strb.ToString());
+                case 3:
+                    var powerneter = ProcessPowerMeterPollingEvent_3(timestamp, eventRecordPtr, cache);
+                    if (PowerMeterPollingEventInfo_4 is not null)
+                    {
+                    }
+                    break;
+                case 4:
+                    var powerneter_4 = ProcessPowerMeterPollingEvent_4(timestamp, eventRecordPtr, cache);
+                    if (PowerMeterPollingEventInfo_4 is not null)
+                    {
+                        PowerMeterPollingEventInfo_4(powerneter_4);
+                    }
+                    break;
+                default:
+                    var strb = new StringBuilder();
+                    strb.Append($"pmt {eventRecordPtr->EventHeader.EventDescriptor.Id} ");
+                    foreach (var oo in cache.Properties)
+                    {
+                        strb.Append($"{oo.Key}:{oo.Value.InType} ");
+                    }
+                    strb.AppendLine();
+                    System.Diagnostics.Trace.WriteLine(strb.ToString());
+                    break;
             }
         }
     }
@@ -2204,6 +2285,29 @@ public sealed class EtlFileReader
         };
     }
 
+    private unsafe WmiActivityEventInfo_5858? ParseWmiActivityPayload_5858(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null) return null;
+
+        return new WmiActivityEventInfo_5858
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = eventRecordPtr->EventHeader.ProcessId,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            Id = GetRawPropertyString(eventRecordPtr, "Id", schema),
+            ClientMachine = GetRawPropertyString(eventRecordPtr, "ClientMachine", schema),
+            User = GetRawPropertyString(eventRecordPtr, "User", schema),
+            ClientProcessId = GetRawProperty<uint>(eventRecordPtr, "ClientProcessId", schema),
+            Component = GetRawPropertyString(eventRecordPtr, "Component", schema),
+            Operation = GetRawPropertyString(eventRecordPtr, "Operation", schema),
+            ResultCode = GetRawProperty<int>(eventRecordPtr, "ResultCode", schema),
+            PossibleCause = GetRawPropertyString(eventRecordPtr, "PossibleCause", schema),
+        };
+    }
+
     private static unsafe T GetRawProperty<T>(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, T defaultvalue = default) where T : unmanaged
     {
         if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
@@ -2263,7 +2367,7 @@ public sealed class EtlFileReader
 
     private static unsafe ulong GetRawPointerProperty(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, ulong defaultvalue = default)
     {
-        if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property) || property.InType != TdhInType.Pointer)
+        if (!cache.Properties.ContainsKey(propertyName))
         {
             return defaultvalue;
         }
@@ -2529,8 +2633,43 @@ public sealed class EtlFileReader
         };
     }
 
+    private unsafe ProcessCounterEventInfo ParseProcessCounterEvent(
+        DateTime timestamp,
+        EVENT_RECORD* eventRecordPtr,
+        CachedSchema cache)
+    {
+        return new ProcessCounterEventInfo
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            ProcessId = GetRawProperty<uint>(eventRecordPtr, "ProcessId", cache),
+            PageFaultCount = GetRawProperty<uint>(eventRecordPtr, "PageFaultCount", cache),
+            HandleCount = GetRawProperty<uint>(eventRecordPtr, "HandleCount", cache),
+            PeakVirtualSize = GetRawPointerProperty(eventRecordPtr, "PeakVirtualSize", cache),
+            PeakWorkingSetSize = GetRawPointerProperty(eventRecordPtr, "PeakWorkingSetSize", cache),
+            PeakPagefileUsage = GetRawPointerProperty(eventRecordPtr, "PeakPagefileUsage", cache),
+            QuotaPeakPagedPoolUsage = GetRawPointerProperty(eventRecordPtr, "QuotaPeakPagedPoolUsage", cache),
+            QuotaPeakNonPagedPoolUsage = GetRawPointerProperty(eventRecordPtr, "QuotaPeakNonPagedPoolUsage", cache),
+            VirtualSize = GetRawPointerProperty(eventRecordPtr, "VirtualSize", cache),
+            WorkingSetSize = GetRawPointerProperty(eventRecordPtr, "WorkingSetSize", cache),
+            PagefileUsage = GetRawPointerProperty(eventRecordPtr, "PagefileUsage", cache),
+            QuotaPagedPoolUsage = GetRawPointerProperty(eventRecordPtr, "QuotaPagedPoolUsage", cache),
+            QuotaNonPagedPoolUsage = GetRawPointerProperty(eventRecordPtr, "QuotaNonPagedPoolUsage", cache),
+            PrivatePageCount = GetRawPointerProperty(eventRecordPtr, "PrivatePageCount", cache),
+        };
+    }
+
     private unsafe void ProcessProcessEvent(byte opcode, DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
+        if (opcode is 32 or 33)
+        {
+            ProcessCounterEventInfo counter = ParseProcessCounterEvent(timestamp, eventRecordPtr, cache);
+            ProcessCounter?.Invoke(in counter);
+            return;
+        }
+
         if (opcode == 11)
         {
             var terminateInfo = new ProcessTerminateInfo
@@ -2570,7 +2709,6 @@ public sealed class EtlFileReader
                     break;
             }
         }
-
     }
 
 
@@ -2719,6 +2857,21 @@ public sealed class EtlFileReader
             Opcode = header.EventDescriptor.Opcode,
             ProcessId = header.ProcessId,
             ThreadId = header.ThreadId,
+        };
+    }
+
+    private unsafe KernelPowerEventInfo_63? ProcessKernelPowerEvent_63(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        if (eventRecordPtr is null) return null;
+        return new KernelPowerEventInfo_63
+        {
+            Timestamp = timestamp,
+            RequestedResolution = GetRawProperty<uint>(eventRecordPtr, "RequestedResolution", cache),
+            Pid = GetRawProperty<uint>(eventRecordPtr, "Pid", cache),
+            AppNameLength = GetRawProperty<ushort>(eventRecordPtr, "AppNameLength", cache),
+            AppName = GetRawPropertyString(eventRecordPtr, "AppName", cache),
+            SubProcessTag = GetRawProperty<uint>(eventRecordPtr, "SubProcessTag", cache),
+            RequestIgnored = GetRawProperty<bool>(eventRecordPtr, "RequestIgnored", cache),
         };
     }
 

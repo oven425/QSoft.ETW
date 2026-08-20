@@ -7,9 +7,6 @@ namespace WpfApp1.Services;
 public interface IEtlAnalyzer
 {
     Task AnalyzeAsync(string etlPath, CancellationToken cancellationToken);
-    //string GetOutputPath(string etlPath);
-    ////IReadOnlyList<EtlTableDefinition> GetBrowsableTables();
-    //EtlTablePage ReadTablePage(string outputPath, string tableName, int pageNumber, int pageSize);
 }
 
 /// <summary>

@@ -344,33 +344,33 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     private void Attach(EtlFileReader reader)
     {
-        reader.ThreadCSwitch += OnThreadCSwitch;
-        reader.PerfInfoThreadedDPC += OnDpc;
-        reader.PerfInfoDPC += OnDpc;
-        reader.PerfInfoTimerDPC += OnDpc;
-        reader.PerfInfoISR += OnIsr;
-        reader.ThreadStart += OnThreadStart;
-        reader.ThreadStop += OnThreadStop;
-        reader.ThreadDCStart += OnThreadStart;
-        reader.ThreadDCStop += OnThreadStop;
-        reader.ProcessStart += OnProcessStart;
-        reader.ProcessStop += OnProcessStop;
-        reader.ProcessTerminate += OnProcessTerminate;
-        reader.ImageLoad += OnImageLoad;
-        reader.ImageUnload += OnImageUnload;
-        reader.ImageDCStart += OnImageLoad;
-        reader.WmiActivity_24 += OnWmiActivity_24;
-        reader.WmiActivity_11 += OnWmiActivity_11;
-        reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
-        reader.EnergyEstimationEngine_14 += OnEnergyEstimationEngine_14;
-        reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
-        reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
-        reader.PerfInfoProfile += OnProfile;
-        reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
-        reader.KernelAcpiTemperatureNotification += OnKernelAcpiTemperatureNotification;
-        reader.KernelAcpiAmlMethodTrace += OnKernelAcpiAmlMethodTrace;
-        reader.KernelAcpiTemperatureChange += OnKernelAcpiTemperatureChange;
-        reader.KernelAcpiFrequentAmlMethod += OnKernelAcpiFrequentAmlMethod;
+        //reader.ThreadCSwitch += OnThreadCSwitch;
+        //reader.PerfInfoThreadedDPC += OnDpc;
+        //reader.PerfInfoDPC += OnDpc;
+        //reader.PerfInfoTimerDPC += OnDpc;
+        //reader.PerfInfoISR += OnIsr;
+        //reader.ThreadStart += OnThreadStart;
+        //reader.ThreadStop += OnThreadStop;
+        //reader.ThreadDCStart += OnThreadStart;
+        //reader.ThreadDCStop += OnThreadStop;
+        //reader.ProcessStart += OnProcessStart;
+        //reader.ProcessStop += OnProcessStop;
+        //reader.ProcessTerminate += OnProcessTerminate;
+        //reader.ImageLoad += OnImageLoad;
+        //reader.ImageUnload += OnImageUnload;
+        //reader.ImageDCStart += OnImageLoad;
+        //reader.WmiActivity_24 += OnWmiActivity_24;
+        //reader.WmiActivity_11 += OnWmiActivity_11;
+        //reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
+        //reader.EnergyEstimationEngine_14 += OnEnergyEstimationEngine_14;
+        //reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
+        //reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
+        //reader.PerfInfoProfile += OnProfile;
+        //reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
+        //reader.KernelAcpiTemperatureNotification += OnKernelAcpiTemperatureNotification;
+        //reader.KernelAcpiAmlMethodTrace += OnKernelAcpiAmlMethodTrace;
+        //reader.KernelAcpiTemperatureChange += OnKernelAcpiTemperatureChange;
+        //reader.KernelAcpiFrequentAmlMethod += OnKernelAcpiFrequentAmlMethod;
     }
 
     private void OnEnergyEstimationEngine_33(in EnergyEstimationEngineEventInfo_33 data)

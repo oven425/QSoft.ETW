@@ -122,21 +122,28 @@ public partial class MainViewModel : ObservableObject
         {
             using TraceSession session = new TraceSessionBuilder()
                 .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS)
+                .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS_COUNTERS)
                 .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_IMAGE_LOAD)
                 .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_CSWITCH)
                 .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_THREAD)
                 .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_INTERRUPT)
                 .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROFILE)
                 .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DPC)
-                .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO)
-                .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_FILE_IO)
-                .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO_INIT)
+                //.WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO)
+                //.WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_FILE_IO)
+                //.WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DISK_IO_INIT)
                 .WithProvider(TraceSessionBuilder.WmiActivityProviderGuid)
                 .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
                 .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
                 .WithProvider(TraceSessionBuilder.KernelPowerProviderGuid)
+                .WithSystemProvider(
+                    TraceSessionBuilder.SystemMemoryProviderGuid,
+                    TraceSessionBuilder.SystemMemoryMemoryInfoKeyword |
+                    TraceSessionBuilder.SystemMemoryWorkingSetKeyword |
+                    TraceSessionBuilder.SystemMemoryVirtualAllocKeyword)
                 .WithProvider(TraceSessionBuilder.PowerMeterPollingProviderGuid, TraceSessionBuilder.PowerMeterPollingFiveSecondKeyword)
                 .WithOutputPath(ResolveCapturePath())
+                .WithEtwFileCompression()
                 .Build();
 
             if (!session.IsElevated())
