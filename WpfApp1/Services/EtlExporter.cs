@@ -2,7 +2,6 @@ using QSoft.ETW;
 using System.Globalization;
 using System.IO;
 using System.Text;
-using System.Text.Json;
 using WpfApp1.Models;
 
 namespace WpfApp1.Services;
@@ -209,6 +208,12 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WriteProcessStart(process);
     }
 
+    protected virtual void OnProcessCounter(in ProcessCounterEventInfo data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteProcessMemoryCounter(in data);
+    }
+
     protected virtual void OnProcessStop(ProcessInfo process)
     {
         DateTime processStoppedAt = process.TimeStamp;
@@ -304,6 +309,65 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WriteWmiActivity(in data);
     }
 
+    private void OnWmiActivity_12(in WmiActivityEventInfo_12 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_13(in WmiActivityEventInfo_13 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_16(in WmiActivityEventInfo_16 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_17(in WmiActivityEventInfo_17 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_20(in WmiActivityEventInfo_20 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_22(in WmiActivityEventInfo_22 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_100(in WmiActivityEventInfo_100 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_101(in WmiActivityEventInfo_101 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_5857(in WmiActivityEventInfo_5857 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
+
+    private void OnWmiActivity_5858(in WmiActivityEventInfo_5858 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteWmiActivity(in data);
+    }
 
     protected virtual void OnProfile(ProfileEventInfo data)
     {
@@ -344,33 +408,44 @@ internal class SQLiteExport(DataBase_SQLite db)
 
     private void Attach(EtlFileReader reader)
     {
-        //reader.ThreadCSwitch += OnThreadCSwitch;
-        //reader.PerfInfoThreadedDPC += OnDpc;
-        //reader.PerfInfoDPC += OnDpc;
-        //reader.PerfInfoTimerDPC += OnDpc;
-        //reader.PerfInfoISR += OnIsr;
-        //reader.ThreadStart += OnThreadStart;
-        //reader.ThreadStop += OnThreadStop;
-        //reader.ThreadDCStart += OnThreadStart;
-        //reader.ThreadDCStop += OnThreadStop;
-        //reader.ProcessStart += OnProcessStart;
-        //reader.ProcessStop += OnProcessStop;
-        //reader.ProcessTerminate += OnProcessTerminate;
-        //reader.ImageLoad += OnImageLoad;
-        //reader.ImageUnload += OnImageUnload;
-        //reader.ImageDCStart += OnImageLoad;
-        //reader.WmiActivity_24 += OnWmiActivity_24;
-        //reader.WmiActivity_11 += OnWmiActivity_11;
-        //reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
-        //reader.EnergyEstimationEngine_14 += OnEnergyEstimationEngine_14;
-        //reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
-        //reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
-        //reader.PerfInfoProfile += OnProfile;
-        //reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
-        //reader.KernelAcpiTemperatureNotification += OnKernelAcpiTemperatureNotification;
-        //reader.KernelAcpiAmlMethodTrace += OnKernelAcpiAmlMethodTrace;
-        //reader.KernelAcpiTemperatureChange += OnKernelAcpiTemperatureChange;
-        //reader.KernelAcpiFrequentAmlMethod += OnKernelAcpiFrequentAmlMethod;
+        reader.ThreadCSwitch += OnThreadCSwitch;
+        reader.PerfInfoThreadedDPC += OnDpc;
+        reader.PerfInfoDPC += OnDpc;
+        reader.PerfInfoTimerDPC += OnDpc;
+        reader.PerfInfoISR += OnIsr;
+        reader.ThreadStart += OnThreadStart;
+        reader.ThreadStop += OnThreadStop;
+        reader.ThreadDCStart += OnThreadStart;
+        reader.ThreadDCStop += OnThreadStop;
+        reader.ProcessStart += OnProcessStart;
+        reader.ProcessCounter += OnProcessCounter;
+        reader.ProcessStop += OnProcessStop;
+        reader.ProcessTerminate += OnProcessTerminate;
+        reader.ImageLoad += OnImageLoad;
+        reader.ImageUnload += OnImageUnload;
+        reader.ImageDCStart += OnImageLoad;
+        reader.WmiActivity_24 += OnWmiActivity_24;
+        reader.WmiActivity_11 += OnWmiActivity_11;
+        reader.WmiActivity_12 += OnWmiActivity_12;
+        reader.WmiActivity_13 += OnWmiActivity_13;
+        reader.WmiActivity_16 += OnWmiActivity_16;
+        reader.WmiActivity_17 += OnWmiActivity_17;
+        reader.WmiActivity_20 += OnWmiActivity_20;
+        reader.WmiActivity_22 += OnWmiActivity_22;
+        reader.WmiActivity_100 += OnWmiActivity_100;
+        reader.WmiActivity_101 += OnWmiActivity_101;
+        reader.WmiActivity_5857 += OnWmiActivity_5857;
+        reader.WmiActivity_5858 += OnWmiActivity_5858;
+        reader.EnergyEstimationEngine_37 += OnEnergyEstimationEngine_37;
+        reader.EnergyEstimationEngine_14 += OnEnergyEstimationEngine_14;
+        reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
+        reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
+        reader.PerfInfoProfile += OnProfile;
+        reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
+        reader.KernelAcpiTemperatureNotification += OnKernelAcpiTemperatureNotification;
+        reader.KernelAcpiAmlMethodTrace += OnKernelAcpiAmlMethodTrace;
+        reader.KernelAcpiTemperatureChange += OnKernelAcpiTemperatureChange;
+        reader.KernelAcpiFrequentAmlMethod += OnKernelAcpiFrequentAmlMethod;
     }
 
     private void OnEnergyEstimationEngine_33(in EnergyEstimationEngineEventInfo_33 data)
@@ -409,12 +484,23 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.ThreadDCStart -= OnThreadStart;
         reader.ThreadDCStop -= OnThreadStop;
         reader.ProcessStart -= OnProcessStart;
+        reader.ProcessCounter -= OnProcessCounter;
         reader.ProcessStop -= OnProcessStop;
         reader.ProcessTerminate -= OnProcessTerminate;
         reader.ImageLoad -= OnImageLoad;
         reader.ImageUnload -= OnImageUnload;
         reader.WmiActivity_24 -= OnWmiActivity_24;
         reader.WmiActivity_11 -= OnWmiActivity_11;
+        reader.WmiActivity_12 -= OnWmiActivity_12;
+        reader.WmiActivity_13 -= OnWmiActivity_13;
+        reader.WmiActivity_16 -= OnWmiActivity_16;
+        reader.WmiActivity_17 -= OnWmiActivity_17;
+        reader.WmiActivity_20 -= OnWmiActivity_20;
+        reader.WmiActivity_22 -= OnWmiActivity_22;
+        reader.WmiActivity_100 -= OnWmiActivity_100;
+        reader.WmiActivity_101 -= OnWmiActivity_101;
+        reader.WmiActivity_5857 -= OnWmiActivity_5857;
+        reader.WmiActivity_5858 -= OnWmiActivity_5858;
         reader.EnergyEstimationEngine_37 -= OnEnergyEstimationEngine_37;
         reader.EnergyEstimationEngine_14 -= OnEnergyEstimationEngine_14;
         reader.EnergyEstimationEngine_18 -= OnEnergyEstimationEngine_18;

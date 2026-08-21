@@ -22,6 +22,8 @@ namespace WpfApp1
             //services.AddSingleton<IEtlExporterFactory>(provider => new EtlExporterFactory(
             //    () => provider.GetRequiredService<IEtlExporter>()));
             services.AddSingleton<IEtlAnalyzer, EtlAnalyzer>();
+            services.AddSingleton<IProcessHierarchyReader, ProcessHierarchyReader>();
+            services.AddSingleton<IWmiActivityReader, WmiActivityReader>();
             services.AddSingleton<MainViewModel>();
             services.AddTransient<MainWindow>();
 

@@ -21,15 +21,6 @@ internal sealed class EtlAnalyzer : IEtlAnalyzer
         return Task.Run(() => Analyze(etlPath, cancellationToken), cancellationToken);
     }
 
-    //public string GetOutputPath(string etlPath) => database.GetDatabasePath(etlPath);
-
-    //public IReadOnlyList<EtlTableDefinition> GetBrowsableTables() => database.GetBrowsableTables();
-
-    //public EtlTablePage ReadTablePage(string outputPath, string tableName, int pageNumber, int pageSize)
-    //{
-    //    return database.ReadTablePage(outputPath, tableName, pageNumber, pageSize);
-    //}
-
     private void Analyze(string etlPath, CancellationToken cancellationToken)
     {
         if (!File.Exists(etlPath))

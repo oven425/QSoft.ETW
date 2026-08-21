@@ -19,8 +19,20 @@ namespace WpfApp1
         private SqliteCommand? _writeImageUnloadCommand;
         private SqliteCommand? _writeProcessStartCommand;
         private SqliteCommand? _writeProcessStopCommand;
-        private SqliteCommand? _writeWmiActivityCommand;
+        private SqliteCommand? _writeProcessMemoryCounterCommand;
+        private SqliteCommand? _writeWmiActivityParentCommand;
         private SqliteCommand? _writeWmiActivity11Command;
+        private SqliteCommand? _writeWmiActivity12Command;
+        private SqliteCommand? _writeWmiActivity13Command;
+        private SqliteCommand? _writeWmiActivity16Command;
+        private SqliteCommand? _writeWmiActivity17Command;
+        private SqliteCommand? _writeWmiActivity20Command;
+        private SqliteCommand? _writeWmiActivity22Command;
+        private SqliteCommand? _writeWmiActivity24Command;
+        private SqliteCommand? _writeWmiActivity100Command;
+        private SqliteCommand? _writeWmiActivity101Command;
+        private SqliteCommand? _writeWmiActivity5857Command;
+        private SqliteCommand? _writeWmiActivity5858Command;
         private SqliteCommand? _writeEnergyEstimationEngineCommand;
         private SqliteCommand? _writeEnergyEstimationQueryStatsCommand;
         private SqliteCommand? _writeEnergyEstimationCpuPowerCommand;
@@ -108,7 +120,24 @@ namespace WpfApp1
                       CREATE INDEX IF NOT EXISTS IX_Processes_ActiveProcess
                        ON Processes (ProcessId, EndedAtUtc, StartedAtUtc DESC);
 
-                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_24
+                      CREATE TABLE IF NOT EXISTS ProcessMemoryCounters
+                      (
+                          ProcessMemoryCounterId INTEGER PRIMARY KEY,
+                          ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                          ProcessId INTEGER NOT NULL,
+                          TimestampUtc TEXT NOT NULL,
+                          PageFaultCount INTEGER NOT NULL,
+                          PeakVirtualBytes INTEGER NOT NULL,
+                          PeakWorkingSetBytes INTEGER NOT NULL,
+                          VirtualBytes INTEGER NOT NULL,
+                          WorkingSetBytes INTEGER NOT NULL,
+                          PrivateBytes INTEGER NOT NULL
+                      );
+
+                      CREATE INDEX IF NOT EXISTS IX_ProcessMemoryCounters_ProcessRecordTimestamp
+                      ON ProcessMemoryCounters (ProcessRecordId, TimestampUtc DESC, ProcessMemoryCounterId DESC);
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents
                        (
                            WmiActivityEventId INTEGER PRIMARY KEY,
                            ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
@@ -117,30 +146,18 @@ namespace WpfApp1
                            Version INTEGER NOT NULL,
                            Opcode INTEGER NOT NULL,
                            ProcessId INTEGER NOT NULL,
-                           ThreadId INTEGER NOT NULL,
-                           NamespaceName TEXT NOT NULL,
-                           ClientProcessId INTEGER NULL,
-                           IntervalMs INTEGER NULL,
-                           Query TEXT NULL,
-                           GroupOperationId INTEGER NULL
+                           ThreadId INTEGER NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_NamespaceTimestamp
-                        ON WmiActivityEvents_24 (NamespaceName, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_EventTimestamp
+                        ON WmiActivityEvents (EventId, TimestampUtc);
 
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_ProcessRecord
-                        ON WmiActivityEvents_24 (ProcessRecordId, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_ProcessRecord
+                        ON WmiActivityEvents (ProcessRecordId, TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS WmiActivityEvents_11
                        (
-                           WmiActivityEvent11Id INTEGER PRIMARY KEY,
-                           ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
-                           TimestampUtc TEXT NOT NULL,
-                           EventId INTEGER NOT NULL,
-                           Version INTEGER NOT NULL,
-                           Opcode INTEGER NOT NULL,
-                           ProcessId INTEGER NOT NULL,
-                           ThreadId INTEGER NOT NULL,
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
                            CorrelationId TEXT NULL,
                            GroupOperationId INTEGER NULL,
                            OperationId INTEGER NULL,
@@ -154,11 +171,128 @@ namespace WpfApp1
                            IsLocal INTEGER NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_11_NamespaceTimestamp
-                       ON WmiActivityEvents_11 (NamespaceName, TimestampUtc);
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_11_Namespace
+                       ON WmiActivityEvents_11 (NamespaceName, WmiActivityEventId);
 
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_11_ProcessRecord
-                       ON WmiActivityEvents_11 (ProcessRecordId, TimestampUtc);
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_12
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           GroupOperationId INTEGER NOT NULL,
+                           Operation TEXT NULL,
+                           HostId INTEGER NOT NULL,
+                           ProviderName TEXT NULL,
+                           ProviderGuid TEXT NULL,
+                           Path TEXT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_13
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           OperationId INTEGER NOT NULL,
+                           ResultCode INTEGER NOT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_16
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           OperationId INTEGER NOT NULL,
+                           Operation TEXT NULL,
+                           ErrorId INTEGER NOT NULL,
+                           Message TEXT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_17
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           CorrelationId TEXT NULL,
+                           Protocol TEXT NULL,
+                           Operation TEXT NULL,
+                           UserName TEXT NULL,
+                           NamespaceName TEXT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_20
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           OperationId INTEGER NOT NULL,
+                           Operation TEXT NULL,
+                           Flags INTEGER NOT NULL,
+                           ClientProcessId INTEGER NOT NULL,
+                           ClientMachineFQDN TEXT NULL,
+                           ClientProcessCreationTime INTEGER NOT NULL,
+                           IsLocal INTEGER NOT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_22
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           CorrelationId TEXT NULL,
+                           GroupOperationId INTEGER NOT NULL,
+                           OperationId INTEGER NOT NULL,
+                           ClassName TEXT NULL,
+                           MethodName TEXT NULL,
+                           ImplementationClass TEXT NULL,
+                           ClientMachine TEXT NULL,
+                           ClientMachineFQDN TEXT NULL,
+                           UserName TEXT NULL,
+                           ClientProcessId INTEGER NOT NULL,
+                           ClientProcessCreationTime INTEGER NOT NULL,
+                           NamespaceName TEXT NULL,
+                           IsLocal INTEGER NOT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_24
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           NamespaceName TEXT NOT NULL,
+                           ClientProcessId INTEGER NOT NULL,
+                           IntervalMs INTEGER NOT NULL,
+                           Query TEXT NULL,
+                           GroupOperationId INTEGER NOT NULL
+                       );
+
+                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_Namespace
+                        ON WmiActivityEvents_24 (NamespaceName, WmiActivityEventId);
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_100
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           ComponentName TEXT NULL,
+                           MessageDetail TEXT NULL,
+                           FileName TEXT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_101
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           ComponentName TEXT NULL,
+                           ErrorId INTEGER NOT NULL,
+                           ErrorDetail TEXT NULL,
+                           FileName TEXT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_5857
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           ProviderName TEXT NULL,
+                           Code INTEGER NOT NULL,
+                           HostProcess TEXT NULL,
+                           ProcessID INTEGER NOT NULL,
+                           ProviderPath TEXT NULL
+                       );
+
+                       CREATE TABLE IF NOT EXISTS WmiActivityEvents_5858
+                       (
+                           WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
+                           Id TEXT NULL,
+                           ClientMachine TEXT NULL,
+                           UserName TEXT NULL,
+                           ClientProcessId INTEGER NOT NULL,
+                           Component TEXT NULL,
+                           Operation TEXT NULL,
+                           ResultCode INTEGER NOT NULL,
+                           PossibleCause TEXT NULL
+                       );
 
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngineEvents
                        (
@@ -457,16 +591,26 @@ namespace WpfApp1
             EnsureEnergyEstimationEngineEnergyColumnsAreIntegers(connection);
             EnsureEnergyEstimationEngineTablesWithoutProcessColumns(connection);
             EnsureThreadEventColumns(connection);
-            EnsureWmiActivityColumns(connection);
-            EnsureCpuProfileSampleColumns(connection);
 
             SqliteTransaction transaction = connection.BeginTransaction();
             _writeImageLoadCommand = CreateWriteImageLoadCommand(connection, transaction);
             _writeImageUnloadCommand = CreateWriteImageUnloadCommand(connection, transaction);
             _writeProcessStartCommand = CreateWriteProcessStartCommand(connection, transaction);
             _writeProcessStopCommand = CreateWriteProcessStopCommand(connection, transaction);
-            _writeWmiActivityCommand = CreateWriteWmiActivityCommand(connection, transaction);
+            _writeProcessMemoryCounterCommand = CreateWriteProcessMemoryCounterCommand(connection, transaction);
+            _writeWmiActivityParentCommand = CreateWriteWmiActivityParentCommand(connection, transaction);
             _writeWmiActivity11Command = CreateWriteWmiActivity11Command(connection, transaction);
+            _writeWmiActivity12Command = CreateWriteWmiActivity12Command(connection, transaction);
+            _writeWmiActivity13Command = CreateWriteWmiActivity13Command(connection, transaction);
+            _writeWmiActivity16Command = CreateWriteWmiActivity16Command(connection, transaction);
+            _writeWmiActivity17Command = CreateWriteWmiActivity17Command(connection, transaction);
+            _writeWmiActivity20Command = CreateWriteWmiActivity20Command(connection, transaction);
+            _writeWmiActivity22Command = CreateWriteWmiActivity22Command(connection, transaction);
+            _writeWmiActivity24Command = CreateWriteWmiActivity24Command(connection, transaction);
+            _writeWmiActivity100Command = CreateWriteWmiActivity100Command(connection, transaction);
+            _writeWmiActivity101Command = CreateWriteWmiActivity101Command(connection, transaction);
+            _writeWmiActivity5857Command = CreateWriteWmiActivity5857Command(connection, transaction);
+            _writeWmiActivity5858Command = CreateWriteWmiActivity5858Command(connection, transaction);
             _writeEnergyEstimationEngineCommand = CreateWriteEnergyEstimationEngineCommand(connection, transaction);
             _writeEnergyEstimationQueryStatsCommand = CreateWriteEnergyEstimationQueryStatsCommand(connection, transaction);
             _writeEnergyEstimationEnergyDeltaCommand = CreateWriteEnergyEstimationEnergyDeltaCommand(connection, transaction);
@@ -500,32 +644,11 @@ namespace WpfApp1
             command.ExecuteNonQuery();
         }
 
-        public void WriteWmiActivity(in WmiActivityEventInfo_24 data)
-        {
-            SqliteCommand command = _writeWmiActivityCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
-            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
-            command.Parameters["$eventId"].Value = data.EventId;
-            command.Parameters["$version"].Value = data.Version;
-            command.Parameters["$opcode"].Value = data.Opcode;
-            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
-            command.Parameters["$namespaceName"].Value = ToDbValue(data.NamespaceName);
-            command.Parameters["$clientProcessId"].Value = Convert.ToInt64(data.ClientProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$intervalMs"].Value = Convert.ToInt64(data.IntervalMs, CultureInfo.InvariantCulture);
-            command.Parameters["$query"].Value = ToDbValue(data.Query);
-            command.Parameters["$groupOperationId"].Value = Convert.ToInt64(data.GroupOperationId, CultureInfo.InvariantCulture);
-            command.ExecuteNonQuery();
-        }
-
         public void WriteWmiActivity(in WmiActivityEventInfo_11 data)
         {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ClientProcessId);
             SqliteCommand command = _writeWmiActivity11Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
-            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
-            command.Parameters["$eventId"].Value = data.EventId;
-            command.Parameters["$version"].Value = data.Version;
-            command.Parameters["$opcode"].Value = data.Opcode;
-            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
-            command.Parameters["$threadId"].Value = Convert.ToInt64(data.ThreadId, CultureInfo.InvariantCulture);
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
             command.Parameters["$correlationId"].Value = ToDbValue(data.CorrelationId);
             command.Parameters["$groupOperationId"].Value = Convert.ToInt64(data.GroupOperationId, CultureInfo.InvariantCulture);
             command.Parameters["$operationId"].Value = Convert.ToInt64(data.OperationId, CultureInfo.InvariantCulture);
@@ -539,6 +662,180 @@ namespace WpfApp1
             command.Parameters["$isLocal"].Value = data.IsLocal ? 1 : 0;
             command.ExecuteNonQuery();
             CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_12 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity12Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$groupOperationId"].Value = Convert.ToInt64(data.GroupOperationId, CultureInfo.InvariantCulture);
+            command.Parameters["$operation"].Value = ToDbValue(data.Operation);
+            command.Parameters["$hostId"].Value = Convert.ToInt64(data.HostId, CultureInfo.InvariantCulture);
+            command.Parameters["$providerName"].Value = ToDbValue(data.ProviderName);
+            command.Parameters["$providerGuid"].Value = ToDbValue(data.ProviderGuid);
+            command.Parameters["$path"].Value = ToDbValue(data.Path);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_13 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity13Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$operationId"].Value = Convert.ToInt64(data.OperationId, CultureInfo.InvariantCulture);
+            command.Parameters["$resultCode"].Value = Convert.ToInt64(data.ResultCode, CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_16 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity16Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$operationId"].Value = Convert.ToInt64(data.OperationId, CultureInfo.InvariantCulture);
+            command.Parameters["$operation"].Value = ToDbValue(data.Operation);
+            command.Parameters["$errorId"].Value = Convert.ToInt64(data.ErrorId, CultureInfo.InvariantCulture);
+            command.Parameters["$message"].Value = ToDbValue(data.Message);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_17 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity17Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$correlationId"].Value = ToDbValue(data.CorrelationId);
+            command.Parameters["$protocol"].Value = ToDbValue(data.Protocol);
+            command.Parameters["$operation"].Value = ToDbValue(data.Operation);
+            command.Parameters["$userName"].Value = ToDbValue(data.User);
+            command.Parameters["$namespaceName"].Value = ToDbValue(data.Namespace);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_20 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity20Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$operationId"].Value = Convert.ToInt64(data.OperationID, CultureInfo.InvariantCulture);
+            command.Parameters["$operation"].Value = ToDbValue(data.Operation);
+            command.Parameters["$flags"].Value = Convert.ToInt64(data.Flags, CultureInfo.InvariantCulture);
+            command.Parameters["$clientProcessId"].Value = Convert.ToInt64(data.ClientProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$clientMachineFqdn"].Value = ToDbValue(data.ClientMachineFQDN);
+            command.Parameters["$clientProcessCreationTime"].Value = checked((long)data.ClientProcessCreationTime);
+            command.Parameters["$isLocal"].Value = data.IsLocal ? 1 : 0;
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_22 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity22Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$correlationId"].Value = ToDbValue(data.CorrelationId);
+            command.Parameters["$groupOperationId"].Value = Convert.ToInt64(data.GroupOperationId, CultureInfo.InvariantCulture);
+            command.Parameters["$operationId"].Value = Convert.ToInt64(data.OperationId, CultureInfo.InvariantCulture);
+            command.Parameters["$className"].Value = ToDbValue(data.ClassName);
+            command.Parameters["$methodName"].Value = ToDbValue(data.MethodName);
+            command.Parameters["$implementationClass"].Value = ToDbValue(data.ImplementationClass);
+            command.Parameters["$clientMachine"].Value = ToDbValue(data.ClientMachine);
+            command.Parameters["$clientMachineFqdn"].Value = ToDbValue(data.ClientMachineFQDN);
+            command.Parameters["$userName"].Value = ToDbValue(data.User);
+            command.Parameters["$clientProcessId"].Value = Convert.ToInt64(data.ClientProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$clientProcessCreationTime"].Value = checked((long)data.ClientProcessCreationTime);
+            command.Parameters["$namespaceName"].Value = ToDbValue(data.NamespaceName);
+            command.Parameters["$isLocal"].Value = data.IsLocal ? 1 : 0;
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_24 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity24Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$namespaceName"].Value = ToDbValue(data.NamespaceName);
+            command.Parameters["$clientProcessId"].Value = Convert.ToInt64(data.ClientProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$intervalMs"].Value = Convert.ToInt64(data.IntervalMs, CultureInfo.InvariantCulture);
+            command.Parameters["$query"].Value = ToDbValue(data.Query);
+            command.Parameters["$groupOperationId"].Value = Convert.ToInt64(data.GroupOperationId, CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_100 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity100Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$componentName"].Value = ToDbValue(data.ComponentName);
+            command.Parameters["$messageDetail"].Value = ToDbValue(data.MessageDetail);
+            command.Parameters["$fileName"].Value = ToDbValue(data.FileName);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_101 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity101Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$componentName"].Value = ToDbValue(data.ComponentName);
+            command.Parameters["$errorId"].Value = Convert.ToInt64(data.ErrorId, CultureInfo.InvariantCulture);
+            command.Parameters["$errorDetail"].Value = ToDbValue(data.ErrorDetail);
+            command.Parameters["$fileName"].Value = ToDbValue(data.FileName);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_5857 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity5857Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$providerName"].Value = ToDbValue(data.ProviderName);
+            command.Parameters["$code"].Value = Convert.ToInt64(data.Code, CultureInfo.InvariantCulture);
+            command.Parameters["$hostProcess"].Value = ToDbValue(data.HostProcess);
+            command.Parameters["$providerProcessId"].Value = Convert.ToInt64(data.ProcessID, CultureInfo.InvariantCulture);
+            command.Parameters["$providerPath"].Value = ToDbValue(data.ProviderPath);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        public void WriteWmiActivity(in WmiActivityEventInfo_5858 data)
+        {
+            long wmiActivityEventId = WriteWmiActivityParent(data.Timestamp, data.EventId, data.Version, data.Opcode, data.ProcessId, data.ThreadId, data.ProcessId);
+            SqliteCommand command = _writeWmiActivity5858Command ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+            command.Parameters["$id"].Value = ToDbValue(data.Id);
+            command.Parameters["$clientMachine"].Value = ToDbValue(data.ClientMachine);
+            command.Parameters["$userName"].Value = ToDbValue(data.User);
+            command.Parameters["$clientProcessId"].Value = Convert.ToInt64(data.ClientProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$component"].Value = ToDbValue(data.Component);
+            command.Parameters["$operation"].Value = ToDbValue(data.Operation);
+            command.Parameters["$resultCode"].Value = data.ResultCode;
+            command.Parameters["$possibleCause"].Value = ToDbValue(data.PossibleCause);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
+        private long WriteWmiActivityParent(DateTime timestamp, ushort eventId, byte version, byte opcode, uint processId, uint threadId, uint processRecordLookupProcessId)
+        {
+            SqliteCommand command = _writeWmiActivityParentCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(timestamp);
+            command.Parameters["$eventId"].Value = eventId;
+            command.Parameters["$version"].Value = version;
+            command.Parameters["$opcode"].Value = opcode;
+            command.Parameters["$processId"].Value = Convert.ToInt64(processId, CultureInfo.InvariantCulture);
+            command.Parameters["$threadId"].Value = Convert.ToInt64(threadId, CultureInfo.InvariantCulture);
+            command.Parameters["$processRecordLookupProcessId"].Value = Convert.ToInt64(processRecordLookupProcessId, CultureInfo.InvariantCulture);
+            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
         }
 
         public void WriteEnergyEstimationEngine(in EnergyEstimationEngineEventInfo_37 data)
@@ -791,6 +1088,21 @@ namespace WpfApp1
             CommitWriteBatchIfNeeded();
         }
 
+        public void WriteProcessMemoryCounter(in ProcessCounterEventInfo data)
+        {
+            SqliteCommand command = _writeProcessMemoryCounterCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$timestampUtc"].Value = ToUtcTimestamp(data.Timestamp);
+            command.Parameters["$pageFaultCount"].Value = Convert.ToInt64(data.PageFaultCount, CultureInfo.InvariantCulture);
+            command.Parameters["$peakVirtualBytes"].Value = checked((long)data.PeakVirtualSize);
+            command.Parameters["$peakWorkingSetBytes"].Value = checked((long)data.PeakWorkingSetSize);
+            command.Parameters["$virtualBytes"].Value = checked((long)data.VirtualSize);
+            command.Parameters["$workingSetBytes"].Value = checked((long)data.WorkingSetSize);
+            command.Parameters["$privateBytes"].Value = checked((long)data.PrivatePageCount);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
         public void WriteProcessStop(ProcessInfo process, DateTime startedAt, long? cpuDurationTicks = null, double? cpuUsagePercent = null)
         {
             if ((cpuDurationTicks is null) != (cpuUsagePercent is null))
@@ -885,10 +1197,34 @@ namespace WpfApp1
             _writeProcessStartCommand = null;
             _writeProcessStopCommand?.Dispose();
             _writeProcessStopCommand = null;
-            _writeWmiActivityCommand?.Dispose();
-            _writeWmiActivityCommand = null;
+            _writeProcessMemoryCounterCommand?.Dispose();
+            _writeProcessMemoryCounterCommand = null;
+            _writeWmiActivityParentCommand?.Dispose();
+            _writeWmiActivityParentCommand = null;
             _writeWmiActivity11Command?.Dispose();
             _writeWmiActivity11Command = null;
+            _writeWmiActivity12Command?.Dispose();
+            _writeWmiActivity12Command = null;
+            _writeWmiActivity13Command?.Dispose();
+            _writeWmiActivity13Command = null;
+            _writeWmiActivity16Command?.Dispose();
+            _writeWmiActivity16Command = null;
+            _writeWmiActivity17Command?.Dispose();
+            _writeWmiActivity17Command = null;
+            _writeWmiActivity20Command?.Dispose();
+            _writeWmiActivity20Command = null;
+            _writeWmiActivity22Command?.Dispose();
+            _writeWmiActivity22Command = null;
+            _writeWmiActivity24Command?.Dispose();
+            _writeWmiActivity24Command = null;
+            _writeWmiActivity100Command?.Dispose();
+            _writeWmiActivity100Command = null;
+            _writeWmiActivity101Command?.Dispose();
+            _writeWmiActivity101Command = null;
+            _writeWmiActivity5857Command?.Dispose();
+            _writeWmiActivity5857Command = null;
+            _writeWmiActivity5858Command?.Dispose();
+            _writeWmiActivity5858Command = null;
             _writeEnergyEstimationEngineCommand?.Dispose();
             _writeEnergyEstimationEngineCommand = null;
             _writeEnergyEstimationQueryStatsCommand?.Dispose();
@@ -950,8 +1286,20 @@ namespace WpfApp1
                 _writeImageUnloadCommand,
                 _writeProcessStartCommand,
                 _writeProcessStopCommand,
-                _writeWmiActivityCommand,
+                _writeProcessMemoryCounterCommand,
+                _writeWmiActivityParentCommand,
                 _writeWmiActivity11Command,
+                _writeWmiActivity12Command,
+                _writeWmiActivity13Command,
+                _writeWmiActivity16Command,
+                _writeWmiActivity17Command,
+                _writeWmiActivity20Command,
+                _writeWmiActivity22Command,
+                _writeWmiActivity24Command,
+                _writeWmiActivity100Command,
+                _writeWmiActivity101Command,
+                _writeWmiActivity5857Command,
+                _writeWmiActivity5858Command,
                 _writeEnergyEstimationEngineCommand,
                 _writeEnergyEstimationQueryStatsCommand,
                 _writeEnergyEstimationEnergyDeltaCommand,
@@ -1585,37 +1933,34 @@ namespace WpfApp1
             return command;
         }
 
-        private static SqliteCommand CreateWriteWmiActivityCommand(SqliteConnection connection, SqliteTransaction transaction)
+        private static SqliteCommand CreateWriteWmiActivityParentCommand(SqliteConnection connection, SqliteTransaction transaction)
         {
             SqliteCommand command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText =
-                @"INSERT INTO WmiActivityEvents_24
-                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, NamespaceName, ClientProcessId, IntervalMs, Query, GroupOperationId)
+                @"INSERT INTO WmiActivityEvents
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId)
                   VALUES
                     (
                         (
                             SELECT ProcessRecordId
                             FROM Processes
-                            WHERE ProcessId = $processId
+                            WHERE ProcessId = $processRecordLookupProcessId
                               AND StartedAtUtc <= $timestampUtc
                               AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
                             ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
                             LIMIT 1
                         ),
-                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $namespaceName, $clientProcessId, $intervalMs, $query, $groupOperationId
-                    );";
+                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId
+                    )
+                  RETURNING WmiActivityEventId;";
             command.Parameters.Add("$timestampUtc", SqliteType.Text);
             command.Parameters.Add("$eventId", SqliteType.Integer);
             command.Parameters.Add("$version", SqliteType.Integer);
             command.Parameters.Add("$opcode", SqliteType.Integer);
             command.Parameters.Add("$processId", SqliteType.Integer);
             command.Parameters.Add("$threadId", SqliteType.Integer);
-            command.Parameters.Add("$namespaceName", SqliteType.Text);
-            command.Parameters.Add("$clientProcessId", SqliteType.Integer);
-            command.Parameters.Add("$intervalMs", SqliteType.Integer);
-            command.Parameters.Add("$query", SqliteType.Text);
-            command.Parameters.Add("$groupOperationId", SqliteType.Integer);
+            command.Parameters.Add("$processRecordLookupProcessId", SqliteType.Integer);
             command.Prepare();
             return command;
         }
@@ -1626,26 +1971,10 @@ namespace WpfApp1
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO WmiActivityEvents_11
-                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, CorrelationId, GroupOperationId, OperationId, Operation, ClientMachine, ClientMachineFQDN, UserName, ClientProcessId, ClientProcessCreationTime, NamespaceName, IsLocal)
+                    (WmiActivityEventId, CorrelationId, GroupOperationId, OperationId, Operation, ClientMachine, ClientMachineFQDN, UserName, ClientProcessId, ClientProcessCreationTime, NamespaceName, IsLocal)
                   VALUES
-                    (
-                        (
-                            SELECT ProcessRecordId
-                            FROM Processes
-                            WHERE ProcessId = $clientProcessId
-                              AND StartedAtUtc <= $timestampUtc
-                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
-                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
-                            LIMIT 1
-                        ),
-                        $timestampUtc, $eventId, $version, $opcode, $processId, $threadId, $correlationId, $groupOperationId, $operationId, $operation, $clientMachine, $clientMachineFqdn, $userName, $clientProcessId, $clientProcessCreationTime, $namespaceName, $isLocal
-                    );";
-            command.Parameters.Add("$timestampUtc", SqliteType.Text);
-            command.Parameters.Add("$eventId", SqliteType.Integer);
-            command.Parameters.Add("$version", SqliteType.Integer);
-            command.Parameters.Add("$opcode", SqliteType.Integer);
-            command.Parameters.Add("$processId", SqliteType.Integer);
-            command.Parameters.Add("$threadId", SqliteType.Integer);
+                    ($wmiActivityEventId, $correlationId, $groupOperationId, $operationId, $operation, $clientMachine, $clientMachineFqdn, $userName, $clientProcessId, $clientProcessCreationTime, $namespaceName, $isLocal);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
             command.Parameters.Add("$correlationId", SqliteType.Text);
             command.Parameters.Add("$groupOperationId", SqliteType.Integer);
             command.Parameters.Add("$operationId", SqliteType.Integer);
@@ -1657,6 +1986,222 @@ namespace WpfApp1
             command.Parameters.Add("$clientProcessCreationTime", SqliteType.Integer);
             command.Parameters.Add("$namespaceName", SqliteType.Text);
             command.Parameters.Add("$isLocal", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity12Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_12
+                    (WmiActivityEventId, GroupOperationId, Operation, HostId, ProviderName, ProviderGuid, Path)
+                  VALUES
+                    ($wmiActivityEventId, $groupOperationId, $operation, $hostId, $providerName, $providerGuid, $path);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$groupOperationId", SqliteType.Integer);
+            command.Parameters.Add("$operation", SqliteType.Text);
+            command.Parameters.Add("$hostId", SqliteType.Integer);
+            command.Parameters.Add("$providerName", SqliteType.Text);
+            command.Parameters.Add("$providerGuid", SqliteType.Text);
+            command.Parameters.Add("$path", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity13Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_13
+                    (WmiActivityEventId, OperationId, ResultCode)
+                  VALUES
+                    ($wmiActivityEventId, $operationId, $resultCode);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$operationId", SqliteType.Integer);
+            command.Parameters.Add("$resultCode", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity16Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_16
+                    (WmiActivityEventId, OperationId, Operation, ErrorId, Message)
+                  VALUES
+                    ($wmiActivityEventId, $operationId, $operation, $errorId, $message);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$operationId", SqliteType.Integer);
+            command.Parameters.Add("$operation", SqliteType.Text);
+            command.Parameters.Add("$errorId", SqliteType.Integer);
+            command.Parameters.Add("$message", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity17Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_17
+                    (WmiActivityEventId, CorrelationId, Protocol, Operation, UserName, NamespaceName)
+                  VALUES
+                    ($wmiActivityEventId, $correlationId, $protocol, $operation, $userName, $namespaceName);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$correlationId", SqliteType.Text);
+            command.Parameters.Add("$protocol", SqliteType.Text);
+            command.Parameters.Add("$operation", SqliteType.Text);
+            command.Parameters.Add("$userName", SqliteType.Text);
+            command.Parameters.Add("$namespaceName", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity20Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_20
+                    (WmiActivityEventId, OperationId, Operation, Flags, ClientProcessId, ClientMachineFQDN, ClientProcessCreationTime, IsLocal)
+                  VALUES
+                    ($wmiActivityEventId, $operationId, $operation, $flags, $clientProcessId, $clientMachineFqdn, $clientProcessCreationTime, $isLocal);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$operationId", SqliteType.Integer);
+            command.Parameters.Add("$operation", SqliteType.Text);
+            command.Parameters.Add("$flags", SqliteType.Integer);
+            command.Parameters.Add("$clientProcessId", SqliteType.Integer);
+            command.Parameters.Add("$clientMachineFqdn", SqliteType.Text);
+            command.Parameters.Add("$clientProcessCreationTime", SqliteType.Integer);
+            command.Parameters.Add("$isLocal", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity22Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_22
+                    (WmiActivityEventId, CorrelationId, GroupOperationId, OperationId, ClassName, MethodName, ImplementationClass, ClientMachine, ClientMachineFQDN, UserName, ClientProcessId, ClientProcessCreationTime, NamespaceName, IsLocal)
+                  VALUES
+                    ($wmiActivityEventId, $correlationId, $groupOperationId, $operationId, $className, $methodName, $implementationClass, $clientMachine, $clientMachineFqdn, $userName, $clientProcessId, $clientProcessCreationTime, $namespaceName, $isLocal);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$correlationId", SqliteType.Text);
+            command.Parameters.Add("$groupOperationId", SqliteType.Integer);
+            command.Parameters.Add("$operationId", SqliteType.Integer);
+            command.Parameters.Add("$className", SqliteType.Text);
+            command.Parameters.Add("$methodName", SqliteType.Text);
+            command.Parameters.Add("$implementationClass", SqliteType.Text);
+            command.Parameters.Add("$clientMachine", SqliteType.Text);
+            command.Parameters.Add("$clientMachineFqdn", SqliteType.Text);
+            command.Parameters.Add("$userName", SqliteType.Text);
+            command.Parameters.Add("$clientProcessId", SqliteType.Integer);
+            command.Parameters.Add("$clientProcessCreationTime", SqliteType.Integer);
+            command.Parameters.Add("$namespaceName", SqliteType.Text);
+            command.Parameters.Add("$isLocal", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity24Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_24
+                    (WmiActivityEventId, NamespaceName, ClientProcessId, IntervalMs, Query, GroupOperationId)
+                  VALUES
+                    ($wmiActivityEventId, $namespaceName, $clientProcessId, $intervalMs, $query, $groupOperationId);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$namespaceName", SqliteType.Text);
+            command.Parameters.Add("$clientProcessId", SqliteType.Integer);
+            command.Parameters.Add("$intervalMs", SqliteType.Integer);
+            command.Parameters.Add("$query", SqliteType.Text);
+            command.Parameters.Add("$groupOperationId", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity100Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_100
+                    (WmiActivityEventId, ComponentName, MessageDetail, FileName)
+                  VALUES
+                    ($wmiActivityEventId, $componentName, $messageDetail, $fileName);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$componentName", SqliteType.Text);
+            command.Parameters.Add("$messageDetail", SqliteType.Text);
+            command.Parameters.Add("$fileName", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity101Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_101
+                    (WmiActivityEventId, ComponentName, ErrorId, ErrorDetail, FileName)
+                  VALUES
+                    ($wmiActivityEventId, $componentName, $errorId, $errorDetail, $fileName);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$componentName", SqliteType.Text);
+            command.Parameters.Add("$errorId", SqliteType.Integer);
+            command.Parameters.Add("$errorDetail", SqliteType.Text);
+            command.Parameters.Add("$fileName", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity5857Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_5857
+                    (WmiActivityEventId, ProviderName, Code, HostProcess, ProcessID, ProviderPath)
+                  VALUES
+                    ($wmiActivityEventId, $providerName, $code, $hostProcess, $providerProcessId, $providerPath);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$providerName", SqliteType.Text);
+            command.Parameters.Add("$code", SqliteType.Integer);
+            command.Parameters.Add("$hostProcess", SqliteType.Text);
+            command.Parameters.Add("$providerProcessId", SqliteType.Integer);
+            command.Parameters.Add("$providerPath", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteWmiActivity5858Command(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO WmiActivityEvents_5858
+                    (WmiActivityEventId, Id, ClientMachine, UserName, ClientProcessId, Component, Operation, ResultCode, PossibleCause)
+                  VALUES
+                    ($wmiActivityEventId, $id, $clientMachine, $userName, $clientProcessId, $component, $operation, $resultCode, $possibleCause);";
+            command.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            command.Parameters.Add("$id", SqliteType.Text);
+            command.Parameters.Add("$clientMachine", SqliteType.Text);
+            command.Parameters.Add("$userName", SqliteType.Text);
+            command.Parameters.Add("$clientProcessId", SqliteType.Integer);
+            command.Parameters.Add("$component", SqliteType.Text);
+            command.Parameters.Add("$operation", SqliteType.Text);
+            command.Parameters.Add("$resultCode", SqliteType.Integer);
+            command.Parameters.Add("$possibleCause", SqliteType.Text);
             command.Prepare();
             return command;
         }
@@ -1700,6 +2245,38 @@ namespace WpfApp1
             command.Parameters.Add("$commandLine", SqliteType.Text);
             command.Parameters.Add("$userSID", SqliteType.Text);
             command.Parameters.Add("$startedAtUtc", SqliteType.Text);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteProcessMemoryCounterCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO ProcessMemoryCounters
+                    (ProcessRecordId, ProcessId, TimestampUtc, PageFaultCount, PeakVirtualBytes, PeakWorkingSetBytes, VirtualBytes, WorkingSetBytes, PrivateBytes)
+                  VALUES
+                    (
+                        (
+                            SELECT ProcessRecordId
+                            FROM Processes
+                            WHERE ProcessId = $processId
+                              AND StartedAtUtc <= $timestampUtc
+                              AND (EndedAtUtc IS NULL OR EndedAtUtc >= $timestampUtc)
+                            ORDER BY StartedAtUtc DESC, ProcessRecordId DESC
+                            LIMIT 1
+                        ),
+                        $processId, $timestampUtc, $pageFaultCount, $peakVirtualBytes, $peakWorkingSetBytes, $virtualBytes, $workingSetBytes, $privateBytes
+                    );";
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            command.Parameters.Add("$pageFaultCount", SqliteType.Integer);
+            command.Parameters.Add("$peakVirtualBytes", SqliteType.Integer);
+            command.Parameters.Add("$peakWorkingSetBytes", SqliteType.Integer);
+            command.Parameters.Add("$virtualBytes", SqliteType.Integer);
+            command.Parameters.Add("$workingSetBytes", SqliteType.Integer);
+            command.Parameters.Add("$privateBytes", SqliteType.Integer);
             command.Prepare();
             return command;
         }
@@ -1949,144 +2526,278 @@ namespace WpfApp1
             createIndexCommand.ExecuteNonQuery();
         }
 
-        private static void EnsureCpuProfileSampleColumns(SqliteConnection connection)
+        private static void RenameLegacyWmiActivityTableIfNeeded(SqliteConnection connection, string tableName, string backupTableName, string indicatorColumn, string dropIndexSql)
         {
-            (string Name, string Definition)[] columns =
+            if (!TableExists(connection, tableName) || !ColumnExists(connection, tableName, indicatorColumn))
             {
-                ("ImageLoadId", "INTEGER NULL REFERENCES ImageLoads(ImageLoadId) ON DELETE RESTRICT"),
-                ("ModuleFileName", "TEXT NULL"),
-                ("ModuleRva", "TEXT NULL"),
-            };
-
-            foreach ((string name, string definition) in columns)
-            {
-                using SqliteCommand columnExistsCommand = connection.CreateCommand();
-                columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('CpuProfileSamples') WHERE name = $name;";
-                columnExistsCommand.Parameters.AddWithValue("$name", name);
-
-                if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-                {
-                    continue;
-                }
-
-                using SqliteCommand addColumnCommand = connection.CreateCommand();
-                addColumnCommand.CommandText = $"ALTER TABLE CpuProfileSamples ADD COLUMN {name} {definition};";
-                addColumnCommand.ExecuteNonQuery();
+                return;
             }
 
-            using SqliteCommand createIndexCommand = connection.CreateCommand();
-            createIndexCommand.CommandText =
-                @"CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ImageLoad
-                  ON CpuProfileSamples (ImageLoadId, TimestampUtc);";
-            createIndexCommand.ExecuteNonQuery();
+            if (TableExists(connection, backupTableName))
+            {
+                throw new InvalidOperationException($"發現待遷移的 {tableName} 與既有備份 {backupTableName}，為避免資料遺失已停止開啟資料庫。");
+            }
+
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = $"ALTER TABLE {tableName} RENAME TO {backupTableName}; {dropIndexSql}";
+            command.ExecuteNonQuery();
         }
 
-        private static void EnsureWmiActivityColumns(SqliteConnection connection)
+        private static void MigrateLegacyWmiActivity24Table(SqliteConnection connection, string legacyTableName)
         {
-            using SqliteCommand legacyTableExistsCommand = connection.CreateCommand();
-            legacyTableExistsCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'WmiActivityEvents';";
-
-            using SqliteCommand newTableExistsCommand = connection.CreateCommand();
-            newTableExistsCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'WmiActivityEvents_24';";
-
-            bool legacyTableExists = Convert.ToInt64(legacyTableExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
-            bool newTableExists = Convert.ToInt64(newTableExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
-
-            if (legacyTableExists && !newTableExists)
+            if (!TableExists(connection, legacyTableName))
             {
-                // 舊版資料表名稱為 WmiActivityEvents，最新命名為 WmiActivityEvents_24，需先更名並移除舊索引。
-                using SqliteCommand renameTableCommand = connection.CreateCommand();
-                renameTableCommand.CommandText =
-                    @"ALTER TABLE WmiActivityEvents RENAME TO WmiActivityEvents_24;
-
-                      DROP INDEX IF EXISTS IX_WmiActivityEvents_OperationTimestamp;
-                      DROP INDEX IF EXISTS IX_WmiActivityEvents_NamespaceTimestamp;
-                      DROP INDEX IF EXISTS IX_WmiActivityEvents_ProcessRecord;";
-                renameTableCommand.ExecuteNonQuery();
+                return;
             }
 
-            using SqliteCommand columnExistsCommand = connection.CreateCommand();
-            columnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('WmiActivityEvents_24') WHERE name = 'ProcessRecordId';";
-
-            if (Convert.ToInt64(columnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
+            long legacyRowCount = GetTableRowCount(connection, legacyTableName);
+            if (legacyRowCount == 0)
             {
-                using SqliteCommand addColumnCommand = connection.CreateCommand();
-                addColumnCommand.CommandText = "ALTER TABLE WmiActivityEvents_24 ADD COLUMN ProcessRecordId INTEGER NULL;";
-                addColumnCommand.ExecuteNonQuery();
+                DropTable(connection, legacyTableName);
+                return;
             }
 
-            using SqliteCommand operationColumnExistsCommand = connection.CreateCommand();
-            operationColumnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('WmiActivityEvents_24') WHERE name = 'Operation';";
+            string processRecordIdExpression = ColumnExists(connection, legacyTableName, "ProcessRecordId") ? "ProcessRecordId" : "NULL";
+            string clientProcessIdExpression = ColumnExists(connection, legacyTableName, "ClientProcessId") ? "ClientProcessId" : "0";
+            string intervalMsExpression = ColumnExists(connection, legacyTableName, "IntervalMs") ? "IntervalMs" : "0";
+            string queryExpression = ColumnExists(connection, legacyTableName, "Query") ? "Query" : "NULL";
+            string groupOperationIdExpression = ColumnExists(connection, legacyTableName, "GroupOperationId") ? "GroupOperationId" : "0";
 
-            if (Convert.ToInt64(operationColumnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            using SqliteCommand selectCommand = connection.CreateCommand();
+            selectCommand.CommandText =
+                $@"SELECT
+                       {processRecordIdExpression} AS ProcessRecordId,
+                       TimestampUtc,
+                       EventId,
+                       Version,
+                       Opcode,
+                       ProcessId,
+                       ThreadId,
+                       NamespaceName,
+                       {clientProcessIdExpression} AS ClientProcessId,
+                       {intervalMsExpression} AS IntervalMs,
+                       {queryExpression} AS Query,
+                       {groupOperationIdExpression} AS GroupOperationId
+                   FROM {legacyTableName}
+                   ORDER BY rowid;";
+
+            using SqliteCommand insertParentCommand = connection.CreateCommand();
+            insertParentCommand.CommandText =
+                @"INSERT INTO WmiActivityEvents
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId)
+                  VALUES
+                    ($processRecordId, $timestampUtc, $eventId, $version, $opcode, $processId, $threadId)
+                  RETURNING WmiActivityEventId;";
+            insertParentCommand.Parameters.Add("$processRecordId", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$timestampUtc", SqliteType.Text);
+            insertParentCommand.Parameters.Add("$eventId", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$version", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$opcode", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$processId", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$threadId", SqliteType.Integer);
+
+            using SqliteCommand insertDetailCommand = connection.CreateCommand();
+            insertDetailCommand.CommandText =
+                @"INSERT INTO WmiActivityEvents_24
+                    (WmiActivityEventId, NamespaceName, ClientProcessId, IntervalMs, Query, GroupOperationId)
+                  VALUES
+                    ($wmiActivityEventId, $namespaceName, $clientProcessId, $intervalMs, $query, $groupOperationId);";
+            insertDetailCommand.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            insertDetailCommand.Parameters.Add("$namespaceName", SqliteType.Text);
+            insertDetailCommand.Parameters.Add("$clientProcessId", SqliteType.Integer);
+            insertDetailCommand.Parameters.Add("$intervalMs", SqliteType.Integer);
+            insertDetailCommand.Parameters.Add("$query", SqliteType.Text);
+            insertDetailCommand.Parameters.Add("$groupOperationId", SqliteType.Integer);
+
+            long migratedRowCount = 0;
+            using SqliteDataReader reader = selectCommand.ExecuteReader();
+            while (reader.Read())
             {
-                // 舊版資料表含 Operation (NOT NULL) 欄位，最新事件定義已移除該欄位，需重建資料表結構。
-                using SqliteCommand rebuildCommand = connection.CreateCommand();
-                rebuildCommand.CommandText =
-                    @"ALTER TABLE WmiActivityEvents_24 RENAME TO WmiActivityEvents_24_Old;
+                insertParentCommand.Parameters["$processRecordId"].Value = reader.IsDBNull(0) ? DBNull.Value : reader.GetInt64(0);
+                insertParentCommand.Parameters["$timestampUtc"].Value = reader.GetString(1);
+                insertParentCommand.Parameters["$eventId"].Value = reader.GetInt64(2);
+                insertParentCommand.Parameters["$version"].Value = reader.GetInt64(3);
+                insertParentCommand.Parameters["$opcode"].Value = reader.GetInt64(4);
+                insertParentCommand.Parameters["$processId"].Value = reader.GetInt64(5);
+                insertParentCommand.Parameters["$threadId"].Value = reader.GetInt64(6);
+                long wmiActivityEventId = Convert.ToInt64(insertParentCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
 
-                      CREATE TABLE WmiActivityEvents_24
-                      (
-                          WmiActivityEventId INTEGER PRIMARY KEY,
-                          ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
-                          TimestampUtc TEXT NOT NULL,
-                          EventId INTEGER NOT NULL,
-                          Version INTEGER NOT NULL,
-                          Opcode INTEGER NOT NULL,
-                          ProcessId INTEGER NOT NULL,
-                          ThreadId INTEGER NOT NULL,
-                          NamespaceName TEXT NOT NULL,
-                          ClientProcessId INTEGER NULL,
-                          IntervalMs INTEGER NULL,
-                          Query TEXT NULL,
-                          GroupOperationId INTEGER NULL
-                      );
-
-                      INSERT INTO WmiActivityEvents_24
-                          (WmiActivityEventId, ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, NamespaceName)
-                      SELECT
-                          WmiActivityEventId, ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId, NamespaceName
-                      FROM WmiActivityEvents_24_Old;
-
-                      DROP TABLE WmiActivityEvents_24_Old;";
-                rebuildCommand.ExecuteNonQuery();
+                insertDetailCommand.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+                insertDetailCommand.Parameters["$namespaceName"].Value = reader.IsDBNull(7) ? string.Empty : reader.GetString(7);
+                insertDetailCommand.Parameters["$clientProcessId"].Value = reader.IsDBNull(8) ? 0L : reader.GetInt64(8);
+                insertDetailCommand.Parameters["$intervalMs"].Value = reader.IsDBNull(9) ? 0L : reader.GetInt64(9);
+                insertDetailCommand.Parameters["$query"].Value = reader.IsDBNull(10) ? DBNull.Value : reader.GetString(10);
+                insertDetailCommand.Parameters["$groupOperationId"].Value = reader.IsDBNull(11) ? 0L : reader.GetInt64(11);
+                insertDetailCommand.ExecuteNonQuery();
+                migratedRowCount++;
             }
 
-            (string Name, string Definition)[] wmiColumns =
+            if (migratedRowCount != legacyRowCount)
             {
-                ("ClientProcessId", "INTEGER NULL"),
-                ("IntervalMs", "INTEGER NULL"),
-                ("Query", "TEXT NULL"),
-                ("GroupOperationId", "INTEGER NULL"),
-            };
-
-            foreach ((string name, string definition) in wmiColumns)
-            {
-                using SqliteCommand wmiColumnExistsCommand = connection.CreateCommand();
-                wmiColumnExistsCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('WmiActivityEvents_24') WHERE name = $name;";
-                wmiColumnExistsCommand.Parameters.AddWithValue("$name", name);
-
-                if (Convert.ToInt64(wmiColumnExistsCommand.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-                {
-                    continue;
-                }
-
-                using SqliteCommand addWmiColumnCommand = connection.CreateCommand();
-                addWmiColumnCommand.CommandText = $"ALTER TABLE WmiActivityEvents_24 ADD COLUMN {name} {definition};";
-                addWmiColumnCommand.ExecuteNonQuery();
+                throw new InvalidOperationException($"{legacyTableName} 遷移至正規化 WMI Activity 資料表時筆數不一致。");
             }
 
-            using SqliteCommand createNamespaceIndexCommand = connection.CreateCommand();
-            createNamespaceIndexCommand.CommandText =
-                @"CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_NamespaceTimestamp
-                  ON WmiActivityEvents_24 (NamespaceName, TimestampUtc);";
-            createNamespaceIndexCommand.ExecuteNonQuery();
+            DropTable(connection, legacyTableName);
+        }
 
-            using SqliteCommand createIndexCommand = connection.CreateCommand();
-            createIndexCommand.CommandText =
-                @"CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_ProcessRecord
-                  ON WmiActivityEvents_24 (ProcessRecordId, TimestampUtc);";
-            createIndexCommand.ExecuteNonQuery();
+        private static void MigrateLegacyWmiActivity11Table(SqliteConnection connection, string legacyTableName)
+        {
+            if (!TableExists(connection, legacyTableName))
+            {
+                return;
+            }
+
+            long legacyRowCount = GetTableRowCount(connection, legacyTableName);
+            if (legacyRowCount == 0)
+            {
+                DropTable(connection, legacyTableName);
+                return;
+            }
+
+            string processRecordIdExpression = ColumnExists(connection, legacyTableName, "ProcessRecordId") ? "ProcessRecordId" : "NULL";
+            using SqliteCommand selectCommand = connection.CreateCommand();
+            selectCommand.CommandText =
+                $@"SELECT
+                       {processRecordIdExpression} AS ProcessRecordId,
+                       TimestampUtc,
+                       EventId,
+                       Version,
+                       Opcode,
+                       ProcessId,
+                       ThreadId,
+                       CorrelationId,
+                       GroupOperationId,
+                       OperationId,
+                       Operation,
+                       ClientMachine,
+                       ClientMachineFQDN,
+                       UserName,
+                       ClientProcessId,
+                       ClientProcessCreationTime,
+                       NamespaceName,
+                       IsLocal
+                   FROM {legacyTableName}
+                   ORDER BY rowid;";
+
+            using SqliteCommand insertParentCommand = connection.CreateCommand();
+            insertParentCommand.CommandText =
+                @"INSERT INTO WmiActivityEvents
+                    (ProcessRecordId, TimestampUtc, EventId, Version, Opcode, ProcessId, ThreadId)
+                  VALUES
+                    ($processRecordId, $timestampUtc, $eventId, $version, $opcode, $processId, $threadId)
+                  RETURNING WmiActivityEventId;";
+            insertParentCommand.Parameters.Add("$processRecordId", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$timestampUtc", SqliteType.Text);
+            insertParentCommand.Parameters.Add("$eventId", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$version", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$opcode", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$processId", SqliteType.Integer);
+            insertParentCommand.Parameters.Add("$threadId", SqliteType.Integer);
+
+            using SqliteCommand insertDetailCommand = connection.CreateCommand();
+            insertDetailCommand.CommandText =
+                @"INSERT INTO WmiActivityEvents_11
+                    (WmiActivityEventId, CorrelationId, GroupOperationId, OperationId, Operation, ClientMachine, ClientMachineFQDN, UserName, ClientProcessId, ClientProcessCreationTime, NamespaceName, IsLocal)
+                  VALUES
+                    ($wmiActivityEventId, $correlationId, $groupOperationId, $operationId, $operation, $clientMachine, $clientMachineFqdn, $userName, $clientProcessId, $clientProcessCreationTime, $namespaceName, $isLocal);";
+            insertDetailCommand.Parameters.Add("$wmiActivityEventId", SqliteType.Integer);
+            insertDetailCommand.Parameters.Add("$correlationId", SqliteType.Text);
+            insertDetailCommand.Parameters.Add("$groupOperationId", SqliteType.Integer);
+            insertDetailCommand.Parameters.Add("$operationId", SqliteType.Integer);
+            insertDetailCommand.Parameters.Add("$operation", SqliteType.Text);
+            insertDetailCommand.Parameters.Add("$clientMachine", SqliteType.Text);
+            insertDetailCommand.Parameters.Add("$clientMachineFqdn", SqliteType.Text);
+            insertDetailCommand.Parameters.Add("$userName", SqliteType.Text);
+            insertDetailCommand.Parameters.Add("$clientProcessId", SqliteType.Integer);
+            insertDetailCommand.Parameters.Add("$clientProcessCreationTime", SqliteType.Integer);
+            insertDetailCommand.Parameters.Add("$namespaceName", SqliteType.Text);
+            insertDetailCommand.Parameters.Add("$isLocal", SqliteType.Integer);
+
+            long migratedRowCount = 0;
+            using SqliteDataReader reader = selectCommand.ExecuteReader();
+            while (reader.Read())
+            {
+                insertParentCommand.Parameters["$processRecordId"].Value = reader.IsDBNull(0) ? DBNull.Value : reader.GetInt64(0);
+                insertParentCommand.Parameters["$timestampUtc"].Value = reader.GetString(1);
+                insertParentCommand.Parameters["$eventId"].Value = reader.GetInt64(2);
+                insertParentCommand.Parameters["$version"].Value = reader.GetInt64(3);
+                insertParentCommand.Parameters["$opcode"].Value = reader.GetInt64(4);
+                insertParentCommand.Parameters["$processId"].Value = reader.GetInt64(5);
+                insertParentCommand.Parameters["$threadId"].Value = reader.GetInt64(6);
+                long wmiActivityEventId = Convert.ToInt64(insertParentCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
+
+                insertDetailCommand.Parameters["$wmiActivityEventId"].Value = wmiActivityEventId;
+                insertDetailCommand.Parameters["$correlationId"].Value = reader.IsDBNull(7) ? DBNull.Value : reader.GetString(7);
+                insertDetailCommand.Parameters["$groupOperationId"].Value = reader.IsDBNull(8) ? DBNull.Value : reader.GetInt64(8);
+                insertDetailCommand.Parameters["$operationId"].Value = reader.IsDBNull(9) ? DBNull.Value : reader.GetInt64(9);
+                insertDetailCommand.Parameters["$operation"].Value = reader.IsDBNull(10) ? DBNull.Value : reader.GetString(10);
+                insertDetailCommand.Parameters["$clientMachine"].Value = reader.IsDBNull(11) ? DBNull.Value : reader.GetString(11);
+                insertDetailCommand.Parameters["$clientMachineFqdn"].Value = reader.IsDBNull(12) ? DBNull.Value : reader.GetString(12);
+                insertDetailCommand.Parameters["$userName"].Value = reader.IsDBNull(13) ? DBNull.Value : reader.GetString(13);
+                insertDetailCommand.Parameters["$clientProcessId"].Value = reader.IsDBNull(14) ? DBNull.Value : reader.GetInt64(14);
+                insertDetailCommand.Parameters["$clientProcessCreationTime"].Value = reader.IsDBNull(15) ? DBNull.Value : reader.GetInt64(15);
+                insertDetailCommand.Parameters["$namespaceName"].Value = reader.IsDBNull(16) ? DBNull.Value : reader.GetString(16);
+                insertDetailCommand.Parameters["$isLocal"].Value = reader.IsDBNull(17) ? 0L : reader.GetInt64(17);
+                insertDetailCommand.ExecuteNonQuery();
+                migratedRowCount++;
+            }
+
+            if (migratedRowCount != legacyRowCount)
+            {
+                throw new InvalidOperationException($"{legacyTableName} 遷移至正規化 WMI Activity 資料表時筆數不一致。");
+            }
+
+            DropTable(connection, legacyTableName);
+        }
+
+        private static void DropWmiActivityPayloadTableIfEmpty(SqliteConnection connection)
+        {
+            if (!TableExists(connection, "WmiActivityEventPayloads"))
+            {
+                return;
+            }
+
+            if (GetTableRowCount(connection, "WmiActivityEventPayloads") != 0)
+            {
+                return;
+            }
+
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText =
+                @"DROP INDEX IF EXISTS IX_WmiActivityEventPayloads_EventTimestamp;
+                  DROP INDEX IF EXISTS IX_WmiActivityEventPayloads_ProcessRecord;
+                  DROP TABLE IF EXISTS WmiActivityEventPayloads;";
+            command.ExecuteNonQuery();
+        }
+
+        private static bool TableExists(SqliteConnection connection, string tableName)
+        {
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $tableName;";
+            command.Parameters.AddWithValue("$tableName", tableName);
+            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+        }
+
+        private static bool ColumnExists(SqliteConnection connection, string tableName, string columnName)
+        {
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{tableName}') WHERE name = $columnName;";
+            command.Parameters.AddWithValue("$columnName", columnName);
+            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+        }
+
+        private static long GetTableRowCount(SqliteConnection connection, string tableName)
+        {
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = $"SELECT COUNT(*) FROM {tableName};";
+            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+
+        private static void DropTable(SqliteConnection connection, string tableName)
+        {
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = $"DROP TABLE IF EXISTS {tableName};";
+            command.ExecuteNonQuery();
         }
 
         private static string ToUtcTimestamp(DateTime timestamp)

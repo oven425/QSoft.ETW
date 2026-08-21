@@ -1476,12 +1476,22 @@ public sealed class EtlFileReader
     public event WmiActivityEventHandler_17? WmiActivity_17;
     public delegate void WmiActivityEventHandler_12(in WmiActivityEventInfo_12 data);
     public event WmiActivityEventHandler_12? WmiActivity_12;
+    public delegate void WmiActivityEventHandler_13(in WmiActivityEventInfo_13 data);
+    public event WmiActivityEventHandler_13? WmiActivity_13;
+    public delegate void WmiActivityEventHandler_16(in WmiActivityEventInfo_16 data);
+    public event WmiActivityEventHandler_16? WmiActivity_16;
     public delegate void WmiActivityEventHandler_20(in WmiActivityEventInfo_20 data);
     public event WmiActivityEventHandler_20? WmiActivity_20;
     public delegate void WmiActivityEventHandler_22(in WmiActivityEventInfo_22 data);
     public event WmiActivityEventHandler_22? WmiActivity_22;
+    public delegate void WmiActivityEventHandler_100(in WmiActivityEventInfo_100 data);
+    public event WmiActivityEventHandler_100? WmiActivity_100;
     public delegate void WmiActivityEventHandler_101(in WmiActivityEventInfo_101 data);
     public event WmiActivityEventHandler_101? WmiActivity_101;
+    public delegate void WmiActivityEventHandler_5857(in WmiActivityEventInfo_5857 data);
+    public event WmiActivityEventHandler_5857? WmiActivity_5857;
+    public delegate void WmiActivityEventHandler_5858(in WmiActivityEventInfo_5858 data);
+    public event WmiActivityEventHandler_5858? WmiActivity_5858;
 
     public delegate void EnergyEstimationEngine_37Handler(in EnergyEstimationEngineEventInfo_37 data);
     public event EnergyEstimationEngine_37Handler? EnergyEstimationEngine_37;
@@ -1726,56 +1736,62 @@ public sealed class EtlFileReader
                     }
                     break;
                 case 12:
+                    if (WmiActivity_12 is not null)
                     {
                         var wmiActivityEvent = ParseWmiActivityPayload_12(timestamp, eventRecordPtr, cache);
                         if (wmiActivityEvent is { } wmiActivityEventValue)
                         {
-
+                            WmiActivity_12(in wmiActivityEventValue);
                         }
                     }
                     break;
                 case 5857:
+                    if (WmiActivity_5857 is not null)
                     {
                         var wmiActivityEvent = ParseWmiActivityPayload_5857(timestamp, eventRecordPtr, cache);
                         if (wmiActivityEvent is { } wmiActivityEventValue)
                         {
-
+                            WmiActivity_5857(in wmiActivityEventValue);
                         }
                     }
                     break;
                 case 5858:
+                    if (WmiActivity_5858 is not null)
                     {
                         var wmiActivityEvent = ParseWmiActivityPayload_5858(timestamp, eventRecordPtr, cache);
                         if (wmiActivityEvent is { } wmiActivityEventValue)
                         {
-
+                            WmiActivity_5858(in wmiActivityEventValue);
                         }
                     }
                     break;
                 case 16:
+                    if (WmiActivity_16 is not null)
                     {
                         var wmiActivityEvent = ParseWmiActivityPayload_16(timestamp, eventRecordPtr, cache);
                         if (wmiActivityEvent is { } wmiActivityEventValue)
                         {
-
+                            WmiActivity_16(in wmiActivityEventValue);
                         }
                     }
                     break;
                 case 13:
+                    if (WmiActivity_13 is not null)
                     {
                         var wmiActivityEvent = ParseWmiActivityPayload_13(timestamp, eventRecordPtr, cache);
                         if (wmiActivityEvent is { } wmiActivityEventValue)
                         {
-
+                            WmiActivity_13(in wmiActivityEventValue);
                         }
                     }
                     break;
                 case 100:
+                    if (WmiActivity_100 is not null)
                     {
                         var wmiActivityEvent = ParseWmiActivityPayload_100(timestamp, eventRecordPtr, cache);
                         if (wmiActivityEvent is { } wmiActivityEventValue)
                         {
-
+                            WmiActivity_100(in wmiActivityEventValue);
                         }
                     }
                     break;

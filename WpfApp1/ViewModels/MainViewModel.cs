@@ -4,6 +4,7 @@ using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using QSoft.ETW;
+using WpfApp1.Models;
 using WpfApp1.Services;
 
 namespace WpfApp1.ViewModels;
@@ -12,10 +13,14 @@ public partial class MainViewModel : ObservableObject
 {
     private const int PageSize = 100;
     private readonly IEtlAnalyzer _analyzer;
+    private readonly IProcessHierarchyReader _processHierarchyReader;
+    private readonly IWmiActivityReader _wmiActivityReader;
 
-    public MainViewModel(IEtlAnalyzer analyzer)
+    public MainViewModel(IEtlAnalyzer analyzer, IProcessHierarchyReader processHierarchyReader, IWmiActivityReader wmiActivityReader)
     {
         _analyzer = analyzer;
+        _processHierarchyReader = processHierarchyReader;
+        _wmiActivityReader = wmiActivityReader;
     }
 
     [ObservableProperty]
@@ -32,6 +37,12 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private bool isBusy;
+
+    [ObservableProperty]
+    private string processTreeStatus = "尚未載入 Process 資料。";
+
+    [ObservableProperty]
+    private string wmiStatus = "尚未載入 WMI 資料。";
 
     private string? databasePath;
     //private EtlTableDefinition? selectedTable;
@@ -64,6 +75,12 @@ public partial class MainViewModel : ObservableObject
         private set => SetProperty(ref tableRows, value);
     }
 
+    public ObservableCollection<ProcessTreeNode> ProcessRoots { get; } = [];
+
+    public ObservableCollection<WmiSignatureNode> WmiHotspots { get; } = [];
+
+    public ObservableCollection<WmiSystemEventNode> WmiSystemEvents { get; } = [];
+
     public long TotalRowCount
     {
         get => totalRowCount;
@@ -93,8 +110,6 @@ public partial class MainViewModel : ObservableObject
             }
         }
     }
-
-    //public ObservableCollection<EtlTableDefinition> Tables { get; } = [];
 
     public bool CanGoToFirstPage => CurrentPage > 1;
 
@@ -235,6 +250,50 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    public async Task LoadExistingDatabaseAsync(string databasePath)
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        ErrorMessage = null;
+        if (!string.Equals(Path.GetExtension(databasePath), ".db", StringComparison.OrdinalIgnoreCase))
+        {
+            ErrorMessage = "檔案類型錯誤，請選擇副檔名為 .db 的 SQLite 資料庫。";
+            return;
+        }
+
+        if (!File.Exists(databasePath))
+        {
+            ErrorMessage = $"找不到指定的資料庫：{databasePath}";
+            return;
+        }
+
+        IsBusy = true;
+        cts = new CancellationTokenSource();
+        try
+        {
+            Status = "正在載入 SQLite 資料庫...";
+            await LoadDatabaseAsync(databasePath, cts.Token);
+            Status = "SQLite 資料庫載入完成。";
+        }
+        catch (OperationCanceledException)
+        {
+            Status = "操作已取消。";
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"載入 SQLite 資料庫失敗：{ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+            cts?.Dispose();
+            cts = null;
+        }
+    }
+
     public void Cancel()
     {
         cts?.Cancel();
@@ -253,98 +312,72 @@ public partial class MainViewModel : ObservableObject
             }
         }
         await _analyzer.AnalyzeAsync(etlPath, cancellationToken);
-        await LoadDatabaseAsync(etlPath, cancellationToken);
+        await LoadDatabaseAsync(Path.ChangeExtension(etlPath, ".db"), cancellationToken);
     }
 
-    [RelayCommand]
-    private Task GoToFirstPageAsync() => LoadPageAsync(1);
-
-    [RelayCommand]
-    private Task GoToPreviousPageAsync() => LoadPageAsync(CurrentPage - 1);
-
-    [RelayCommand]
-    private Task GoToNextPageAsync() => LoadPageAsync(CurrentPage + 1);
-
-    [RelayCommand]
-    private Task GoToLastPageAsync() => LoadPageAsync(TotalPages);
-
-    private async Task LoadDatabaseAsync(string etlPath, CancellationToken cancellationToken)
+    private async Task LoadDatabaseAsync(string databasePath, CancellationToken cancellationToken)
     {
-        //string path = _analyzer.GetOutputPath(etlPath);
-        //if (!File.Exists(path))
-        //{
-        //    ClearDatabaseView();
-        //    throw new FileNotFoundException("分析完成，但找不到 ETL 對應的 SQLite 資料庫檔案。", path);
-        //}
+        if (!File.Exists(databasePath))
+        {
+            ClearDatabaseView();
+            throw new FileNotFoundException("找不到 SQLite 資料庫檔案。", databasePath);
+        }
 
-        //cancellationToken.ThrowIfCancellationRequested();
-        //DatabasePath = path;
-        //Tables.Clear();
-        //foreach (EtlTableDefinition table in _analyzer.GetBrowsableTables())
-        //{
-        //    Tables.Add(table);
-        //}
+        cancellationToken.ThrowIfCancellationRequested();
+        IReadOnlyList<ProcessTreeNode> roots = await _processHierarchyReader.LoadAsync(databasePath, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
 
-        //suppressTableLoad = true;
-        //SelectedTable = Tables.FirstOrDefault();
-        //suppressTableLoad = false;
-        //if (SelectedTable is null)
-        //{
-        //    ClearDatabaseView();
-        //    return;
-        //}
+        DatabasePath = databasePath;
+        ProcessRoots.Clear();
+        foreach (ProcessTreeNode root in roots)
+        {
+            ProcessRoots.Add(root);
+        }
 
-        //await LoadPageAsync(1);
+        ProcessTreeStatus = ProcessRoots.Count == 0
+            ? "SQLite 中沒有 Process 資料。"
+            : $"已載入 {ProcessRoots.Count:N0} 個根 Process；展開節點可檢視子 Process 與對應 Image。";
+
+        cancellationToken.ThrowIfCancellationRequested();
+        WmiAnalysisResult wmiResult = await _wmiActivityReader.LoadAsync(databasePath, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        WmiHotspots.Clear();
+        foreach (WmiSignatureNode hotspot in wmiResult.Hotspots)
+        {
+            WmiHotspots.Add(hotspot);
+        }
+
+        WmiSystemEvents.Clear();
+        foreach (WmiSystemEventNode systemEvent in wmiResult.SystemEvents)
+        {
+            WmiSystemEvents.Add(systemEvent);
+        }
+
+        if (WmiHotspots.Count == 0)
+        {
+            WmiStatus = "SQLite 中沒有 WMI 活動資料。";
+        }
+        else
+        {
+            int totalCalls = WmiHotspots.Sum(h => h.CallCount);
+            int totalCallers = WmiHotspots.SelectMany(h => h.Callers).Select(c => c.ClientProcessId).Distinct().Count();
+            int totalErrors = WmiHotspots.Sum(h => h.ErrorCount) + WmiSystemEvents.Count;
+            WmiStatus = $"已載入 {WmiHotspots.Count:N0} 個 WMI 呼叫特徵，共 {totalCalls:N0} 次呼叫、{totalCallers:N0} 個發話 Process、{totalErrors:N0} 筆錯誤/異常事件；依呼叫次數排序，點選列可展開查看個別 Process 明細。";
+        }
     }
 
-    private async Task LoadPageAsync(int pageNumber)
-    {
-        //EtlTableDefinition? table = SelectedTable;
-        //string? path = DatabasePath;
-        //if (table is null || string.IsNullOrWhiteSpace(path))
-        //{
-        //    return;
-        //}
-
-        //ErrorMessage = null;
-        //bool ownsBusyState = !IsBusy;
-        //if (ownsBusyState)
-        //{
-        //    IsBusy = true;
-        //}
-        //try
-        //{
-        //    EtlTablePage page = await Task.Run(() => _analyzer.ReadTablePage(path, table.Name, pageNumber, PageSize));
-        //    if (SelectedTable != table || DatabasePath != path)
-        //    {
-        //        return;
-        //    }
-
-        //    TableRows = page.Rows;
-        //    TotalRowCount = page.TotalRowCount;
-        //    CurrentPage = page.PageNumber;
-        //    TotalPages = page.TotalPages;
-        //    Status = $"已載入 {table.DisplayName}：第 {CurrentPage} / {TotalPages} 頁，共 {TotalRowCount:N0} 筆。";
-        //}
-        //catch (Exception ex)
-        //{
-        //    ClearDatabaseView();
-        //    ErrorMessage = $"讀取 SQLite 資料表失敗：{ex.Message}";
-        //}
-        //finally
-        //{
-        //    if (ownsBusyState)
-        //    {
-        //        IsBusy = false;
-        //    }
-        //}
-    }
 
     private void ClearDatabaseView()
     {
         DatabasePath = null;
         //Tables.Clear();
         TableRows = null;
+        ProcessRoots.Clear();
+        ProcessTreeStatus = "尚未載入 Process 資料。";
+        WmiHotspots.Clear();
+        WmiSystemEvents.Clear();
+        WmiStatus = "尚未載入 WMI 資料。";
         TotalRowCount = 0;
         CurrentPage = 1;
         TotalPages = 1;

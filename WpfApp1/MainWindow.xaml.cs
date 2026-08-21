@@ -33,4 +33,18 @@ public partial class MainWindow : Window
             await ViewModel.AnalyzeExistingAsync();
         }
     }
+
+    private async void OpenDatabase_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Filter = "SQLite database (*.db)|*.db",
+            Title = "選擇已分析完成的 SQLite 資料庫",
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            await ViewModel.LoadExistingDatabaseAsync(dialog.FileName);
+        }
+    }
 }
