@@ -130,6 +130,153 @@
                     </DataGrid>
                 </Grid>
             </TabItem>
+            <TabItem Header="DPC / UI 卡頓分析">
+                <Grid Margin="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="2*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="1*"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="0,0,0,6">
+                        <TextBlock Text="{Binding DpcAnalysisStatus}" TextWrapping="Wrap"/>
+                        <TextBlock Margin="0,4,0,0" Foreground="DimGray" Text="{Binding DpcInterpretationNote}" TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <DataGrid Grid.Row="1" ItemsSource="{Binding DpcHotspots}" AutoGenerateColumns="False" IsReadOnly="True"
+                              CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Routine" Binding="{Binding RoutineDisplay}" Width="130"/>
+                            <DataGridTextColumn Header="模組 / Image" Binding="{Binding ModuleDisplay}" Width="220">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                        <Setter Property="ToolTip" Value="{Binding ModulePath}"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="事件數" Binding="{Binding EventCount}" Width="70"/>
+                            <DataGridTextColumn Header="類型分布" Binding="{Binding DpcTypeSummary}" Width="180"/>
+                            <DataGridTextColumn Header="Notable CPU" Binding="{Binding NotableCpu}" Width="110"/>
+                            <DataGridTextColumn Header="CPU 分布" Binding="{Binding CpuDistribution}" Width="220">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                        <Setter Property="ToolTip" Value="{Binding CpuDistribution}"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="首次" Binding="{Binding FirstSeenUtc, StringFormat={}{0:HH:mm:ss.fff}}" Width="95"/>
+                            <DataGridTextColumn Header="末次" Binding="{Binding LastSeenUtc, StringFormat={}{0:HH:mm:ss.fff}}" Width="95"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <TextBlock Grid.Row="2" Margin="0,8,0,4" FontWeight="SemiBold"
+                               Text="DPC 事件尖峰時間窗（僅代表事件在該時段集中，適合與 UI 卡頓/WMI/能耗時間點交叉比對，並非因果證明）"/>
+
+                    <DataGrid Grid.Row="3" ItemsSource="{Binding DpcSpikeWindows}" AutoGenerateColumns="False" IsReadOnly="True"
+                              CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                              RowDetailsVisibilityMode="VisibleWhenSelected">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="開始(UTC)" Binding="{Binding WindowStartUtc, StringFormat={}{0:HH:mm:ss.fff}}" Width="100"/>
+                            <DataGridTextColumn Header="結束(UTC)" Binding="{Binding WindowEndUtc, StringFormat={}{0:HH:mm:ss.fff}}" Width="100"/>
+                            <DataGridTextColumn Header="事件數" Binding="{Binding EventCount}" Width="70"/>
+                            <DataGridTextColumn Header="類型分布" Binding="{Binding DpcTypeSummary}" Width="180"/>
+                            <DataGridTextColumn Header="Notable CPU" Binding="{Binding NotableCpu}" Width="110"/>
+                            <DataGridTextColumn Header="尖峰判定" Binding="{Binding ThresholdDisplay}" Width="220"/>
+                        </DataGrid.Columns>
+                        <DataGrid.RowDetailsTemplate>
+                            <DataTemplate DataType="{x:Type models:DpcSpikeWindow}">
+                                <DataGrid Margin="24,4,4,4" MaxHeight="220" ItemsSource="{Binding TopRoutines}" AutoGenerateColumns="False"
+                                          IsReadOnly="True" CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                          HeadersVisibility="Column">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Routine" Binding="{Binding RoutineDisplay}" Width="130"/>
+                                        <DataGridTextColumn Header="模組 / Image" Binding="{Binding ModuleDisplay}" Width="220">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                                    <Setter Property="ToolTip" Value="{Binding ModulePath}"/>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="事件數" Binding="{Binding EventCount}" Width="70"/>
+                                        <DataGridTextColumn Header="類型分布" Binding="{Binding DpcTypeSummary}" Width="180"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </DataTemplate>
+                        </DataGrid.RowDetailsTemplate>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+            <TabItem Header="能耗分析">
+                <Grid Margin="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="1*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="1*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Margin="0,0,0,6" Text="{Binding EnergyConsumerStatus}" TextWrapping="Wrap"/>
+
+                    <DataGrid Grid.Row="1" ItemsSource="{Binding EnergyConsumers}" AutoGenerateColumns="False" IsReadOnly="True"
+                              CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="名稱" Binding="{Binding AppName}" Width="200">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                        <Setter Property="ToolTip" Value="{Binding AppName}"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="分類" Binding="{Binding Category}" Width="100"/>
+                            <DataGridTextColumn Header="總估算能耗" Binding="{Binding TotalEnergy, StringFormat={}{0:N0}}" Width="100"/>
+                            <DataGridTextColumn Header="CPU" Binding="{Binding TotalCpuEnergy, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="GPU" Binding="{Binding TotalGpuEnergy, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="Display" Binding="{Binding TotalDisplayEnergy, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="Disk" Binding="{Binding TotalDiskEnergy, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="Network" Binding="{Binding TotalNetworkEnergy, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="MBB" Binding="{Binding TotalMbbEnergy, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="NPU" Binding="{Binding TotalNpuEnergy, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="Loss" Binding="{Binding TotalLossEnergy, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="事件數" Binding="{Binding EventCount}" Width="70"/>
+                            <DataGridTextColumn Header="實測比例" Binding="{Binding MeasuredRatio, StringFormat={}{0:P0}}" Width="80"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <TextBlock Grid.Row="2" Margin="0,8,0,4" Text="{Binding EnergyAccuracyStatus}" TextWrapping="Wrap"/>
+
+                    <DataGrid Grid.Row="3" ItemsSource="{Binding EnergyAccuracyMeters}" AutoGenerateColumns="False" IsReadOnly="True"
+                              CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                              RowDetailsVisibilityMode="VisibleWhenSelected">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="電表 MeterId" Binding="{Binding MeterId}" Width="140"/>
+                            <DataGridTextColumn Header="區間數" Binding="{Binding BucketCount}" Width="70"/>
+                            <DataGridTextColumn Header="E3 估算總量" Binding="{Binding TotalEstimatedEnergy, StringFormat={}{0:N0}}" Width="120"/>
+                            <DataGridTextColumn Header="電表實測總量" Binding="{Binding TotalMeasuredEnergyDelta, StringFormat={}{0:N0}}" Width="120"/>
+                            <DataGridTextColumn Header="平均比值" Binding="{Binding AverageRatio, StringFormat={}{0:N4}}" Width="90"/>
+                            <DataGridTextColumn Header="相關係數" Binding="{Binding CorrelationCoefficient, StringFormat={}{0:N2}}" Width="90"/>
+                        </DataGrid.Columns>
+                        <DataGrid.RowDetailsTemplate>
+                            <DataTemplate DataType="{x:Type models:EnergyAccuracyMeterSummary}">
+                                <DataGrid Margin="24,4,4,4" MaxHeight="220" ItemsSource="{Binding Buckets}" AutoGenerateColumns="False"
+                                          IsReadOnly="True" CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                          HeadersVisibility="Column">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="分鐘區間(UTC)" Binding="{Binding BucketStartUtc, StringFormat={}{0:HH:mm}}" Width="100"/>
+                                        <DataGridTextColumn Header="E3 估算" Binding="{Binding EstimatedEnergy, StringFormat={}{0:N0}}" Width="120"/>
+                                        <DataGridTextColumn Header="電表實測差值" Binding="{Binding MeasuredEnergyDelta, StringFormat={}{0:N0}}" Width="120"/>
+                                        <DataGridTextColumn Header="比值" Binding="{Binding Ratio, StringFormat={}{0:N4}}" Width="90"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </DataTemplate>
+                        </DataGrid.RowDetailsTemplate>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
         </TabControl>
 
     </DockPanel>

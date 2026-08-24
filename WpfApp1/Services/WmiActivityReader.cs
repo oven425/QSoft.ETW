@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.IO;
 using Microsoft.Data.Sqlite;
 using WpfApp1.Models;
@@ -10,14 +9,6 @@ public interface IWmiActivityReader
     Task<WmiAnalysisResult> LoadAsync(string databasePath, CancellationToken cancellationToken);
 }
 
-/// <summary>
-/// 從 SQLite 讀取 Microsoft-Windows-WMI-Activity 事件，並改以「WMI 呼叫特徵」
-/// (Namespace + 種類 + Query/Class::Method) 為主軸彙總呼叫次數、耗時、輪詢間隔與錯誤次數，
-/// 同時保留「哪個 Process 呼叫」的明細，用來從 WMI 視角找出消耗系統資源的熱點。
-/// 關聯 (11/22/24/20 呼叫 與 13 Stop 與 12 Provider 載入配對) 以及彙總 (GROUP BY) 都交給 SQL
-/// (CTE + Window Function) 處理，結果先物化成一張 TEMP TABLE (Enriched)，
-/// C# 端只負責讀取彙總後的結果列並組成回傳用的 Model，盡量避免額外的 LINQ/中介物件。
-/// </summary>
 internal sealed class WmiActivityReader : IWmiActivityReader
 {
     public Task<WmiAnalysisResult> LoadAsync(string databasePath, CancellationToken cancellationToken)
@@ -73,19 +64,6 @@ internal sealed class WmiActivityReader : IWmiActivityReader
         return new WmiAnalysisResult(hotspots, systemEvents);
     }
 
-    /// <summary>
-    /// 把 11(查詢)/22(方法呼叫)/24(輪詢查詢)/20(非同步通知) 四種呼叫來源 UNION ALL 成 Calls，
-    /// 用 ROW_NUMBER() OVER (PARTITION BY HostProcessId, OperationId ORDER BY TimestampUtc)
-    /// 分別替 Calls 與 13(Stop) 事件編號，再依 (HostProcessId, OperationId, Seq) 配對，
-    /// 取代原本 C# 端逐筆游標比對的 Start/Stop 配對邏輯 (OperationId 在單次擷取中幾乎不會重複，
-    /// 因此以時間排序後的相同序號配對，等同於原本「最早呼叫配最早可用 Stop」的貪婪演算法；
-    /// 另外用 Stop.TimestampUtc >= Call.TimestampUtc 避免配對到時間early於呼叫本身的異常資料)。
-    /// Provider(12) 以相同手法配對 GroupOperationId 後取時間最早的非空值。
-    /// 呼叫端 Process 名稱則用「時間區間命中優先、其次取時間最接近」的相關子查詢解析 Processes 表；
-    /// 子查詢刻意把排序用的 RangeRank/TimeDiff 算在內層 SELECT 再對別名 ORDER BY，
-    /// 這是因為 SQLite 對「ORDER BY 直接參照外層關聯欄位」有解析限制 (WHERE 子句參照則沒有此限制)。
-    /// 最終結果物化成 TEMP TABLE Enriched，讓後續兩個 GROUP BY 彙總查詢重複使用。
-    /// </summary>
     private static void CreateEnrichedTempTable(
         SqliteConnection connection,
         bool hasQuery,
@@ -213,7 +191,7 @@ internal sealed class WmiActivityReader : IWmiActivityReader
                          SELECT
                              p3.ImageFileName AS ImageFileName,
                              CASE WHEN p3.StartedAtUtc <= c.TimestampUtc AND (p3.EndedAtUtc IS NULL OR p3.EndedAtUtc >= c.TimestampUtc) THEN 0 ELSE 1 END AS RangeRank,
-                             ABS(julianday(p3.StartedAtUtc) - julianday(c.TimestampUtc)) AS TimeDiff
+                             ABS(p3.StartedAtUtc - c.TimestampUtc) AS TimeDiff
                          FROM Processes p3
                          WHERE p3.ProcessId = c.ClientProcessId
                      ) proc
@@ -221,7 +199,7 @@ internal sealed class WmiActivityReader : IWmiActivityReader
                      LIMIT 1),
                     'PID ' || c.ClientProcessId || '（未知行程）'
                 ) AS ProcessDisplayName,
-                (julianday(s.TimestampUtc) - julianday(c.TimestampUtc)) * 86400000.0 AS DurationMs,
+                (s.TimestampUtc - c.TimestampUtc) / 10000.0 AS DurationMs,
                 s.ResultCode AS ResultCode,
                 pv.ProviderName AS Provider
             FROM Calls c
@@ -283,8 +261,8 @@ internal sealed class WmiActivityReader : IWmiActivityReader
                 MaxDurationMs = reader.IsDBNull(7) ? null : reader.GetDouble(7),
                 AverageIntervalMs = reader.IsDBNull(8) ? null : reader.GetDouble(8),
                 ErrorCount = reader.GetInt32(9),
-                FirstSeenUtc = ParseTimestamp(reader.GetString(10)),
-                LastSeenUtc = ParseTimestamp(reader.GetString(11)),
+                FirstSeenUtc = ParseTimestamp(reader.GetInt64(10)),
+                LastSeenUtc = ParseTimestamp(reader.GetInt64(11)),
             });
         }
 
@@ -343,8 +321,8 @@ internal sealed class WmiActivityReader : IWmiActivityReader
                 MaxDurationMs = reader.IsDBNull(7) ? null : reader.GetDouble(7),
                 AverageIntervalMs = reader.IsDBNull(8) ? null : reader.GetDouble(8),
                 ErrorCount = reader.GetInt32(9),
-                FirstSeenUtc = ParseTimestamp(reader.GetString(10)),
-                LastSeenUtc = ParseTimestamp(reader.GetString(11)),
+                FirstSeenUtc = ParseTimestamp(reader.GetInt64(10)),
+                LastSeenUtc = ParseTimestamp(reader.GetInt64(11)),
                 Callers = callers,
             });
         }
@@ -443,7 +421,7 @@ internal sealed class WmiActivityReader : IWmiActivityReader
             cancellationToken.ThrowIfCancellationRequested();
             events.Add(new WmiSystemEventNode
             {
-                TimestampUtc = ParseTimestamp(reader.GetString(0)),
+                TimestampUtc = ParseTimestamp(reader.GetInt64(0)),
                 EventLabel = reader.GetString(1),
                 Source = reader.GetString(2),
                 Detail = reader.GetString(3),
@@ -462,6 +440,5 @@ internal sealed class WmiActivityReader : IWmiActivityReader
         return command.ExecuteScalar() is not null;
     }
 
-    private static DateTime ParseTimestamp(string value) =>
-        DateTime.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+    private static DateTime ParseTimestamp(long ticks) => new(ticks, DateTimeKind.Utc);
 }

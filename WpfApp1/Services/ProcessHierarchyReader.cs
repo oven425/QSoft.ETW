@@ -130,8 +130,8 @@ internal sealed class ProcessHierarchyReader : IProcessHierarchyReader
                 reader.GetInt64(2),
                 reader.GetString(3),
                 reader.GetString(4),
-                reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
+                FormatTicks(reader.GetInt64(5)),
+                reader.IsDBNull(6) ? null : FormatTicks(reader.GetInt64(6)),
                 reader.IsDBNull(7) ? null : reader.GetInt64(7)));
         }
 
@@ -156,11 +156,16 @@ internal sealed class ProcessHierarchyReader : IProcessHierarchyReader
             images.Add(new ProcessImageRow(
                 reader.GetInt64(0),
                 reader.GetString(1),
-                reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3)));
+                FormatTicks(reader.GetInt64(2)),
+                reader.IsDBNull(3) ? null : FormatTicks(reader.GetInt64(3))));
         }
 
         return images;
+    }
+
+    private static string FormatTicks(long ticks)
+    {
+        return new DateTime(ticks, DateTimeKind.Utc).ToString("O");
     }
 
     private static bool TableExists(SqliteConnection connection, string tableName)

@@ -41,6 +41,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         m_ThreadCSwitchs.Clear();
         m_ThreadStartedAts.Clear();
         m_ThreadProcessIds.Clear();
+        m_RunningThreadIdsByProcessor.Clear();
         m_ProcessThreadCpuSummaries.Clear();
         m_ProcessStartedAts.Clear();
         m_LastEventTimestamp = null;
@@ -76,6 +77,7 @@ internal class SQLiteExport(DataBase_SQLite db)
     private readonly Dictionary<uint, List<CSwitchEventInfo>> m_ThreadCSwitchs = [];
     private readonly Dictionary<uint, DateTime> m_ThreadStartedAts = [];
     private readonly Dictionary<uint, uint> m_ThreadProcessIds = [];
+    private readonly Dictionary<byte, uint> m_RunningThreadIdsByProcessor = [];
     private readonly Dictionary<uint, List<ThreadCpuSummary>> m_ProcessThreadCpuSummaries = [];
     private readonly Dictionary<uint, DateTime> m_ProcessStartedAts = [];
     private StreamWriter? m_CSwitchCsvWriter;
@@ -85,6 +87,7 @@ internal class SQLiteExport(DataBase_SQLite db)
     protected virtual void OnThreadCSwitch(in CSwitchEventInfo data)
     {
         TrackEventTimestamp(data.Timestamp);
+        m_RunningThreadIdsByProcessor[data.ProcessorNumber] = data.NewThreadId;
         WriteCSwitchCsvRow(data);
         if (m_ThreadCSwitchs.TryGetValue(data.OldThreadId, out List<CSwitchEventInfo>? threadCSwitchs))
         {
@@ -372,7 +375,9 @@ internal class SQLiteExport(DataBase_SQLite db)
     protected virtual void OnProfile(ProfileEventInfo data)
     {
         TrackEventTimestamp(data.Timestamp);
-        db.WriteCpuProfileSample(data);
+        uint sampledThreadId = m_RunningThreadIdsByProcessor.GetValueOrDefault(data.ProcessorNumber, data.ThreadId);
+        uint sampledProcessId = m_ThreadProcessIds.GetValueOrDefault(sampledThreadId, data.ProcessId);
+        db.WriteCpuProfileSample(data, sampledProcessId, sampledThreadId);
     }
 
     private void OnPowerMeterPollingEvent_4(in PowerMeterPollingEventInfo_4 data)
@@ -440,6 +445,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.EnergyEstimationEngine_14 += OnEnergyEstimationEngine_14;
         reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
         reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
+        reader.EnergyEstimationEngine_35 += OnEnergyEstimationEngine_35;
         reader.PerfInfoProfile += OnProfile;
         reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
         reader.KernelAcpiTemperatureNotification += OnKernelAcpiTemperatureNotification;
@@ -470,6 +476,12 @@ internal class SQLiteExport(DataBase_SQLite db)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteEnergyEstimationEngine(in data);
+    }
+
+    private void OnEnergyEstimationEngine_35(in EnergyEstimationEngineEventInfo_35 data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteEnergyEstimationEngineStandbyDrips(in data);
     }
 
     private void Detach(EtlFileReader reader)
@@ -505,6 +517,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.EnergyEstimationEngine_14 -= OnEnergyEstimationEngine_14;
         reader.EnergyEstimationEngine_18 -= OnEnergyEstimationEngine_18;
         reader.EnergyEstimationEngine_33 -= OnEnergyEstimationEngine_33;
+        reader.EnergyEstimationEngine_35 -= OnEnergyEstimationEngine_35;
         reader.ImageDCStart -= OnImageLoad;
         reader.PerfInfoProfile -= OnProfile;
         reader.PowerMeterPollingEventInfo_4 -= OnPowerMeterPollingEvent_4;

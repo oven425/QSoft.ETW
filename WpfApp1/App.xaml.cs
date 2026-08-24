@@ -24,6 +24,8 @@ namespace WpfApp1
             services.AddSingleton<IEtlAnalyzer, EtlAnalyzer>();
             services.AddSingleton<IProcessHierarchyReader, ProcessHierarchyReader>();
             services.AddSingleton<IWmiActivityReader, WmiActivityReader>();
+            services.AddSingleton<IEnergyAnalysisReader, EnergyAnalysisReader>();
+            services.AddSingleton<IDpcUiStutterAnalysisReader, DpcUiStutterAnalysisReader>();
             services.AddSingleton<MainViewModel>();
             services.AddTransient<MainWindow>();
 

@@ -938,7 +938,6 @@ public readonly record struct CSwitchEventInfo
     public required int OldThreadState { get; init; }
     public required int OldThreadWaitIdealProcessor { get; init; }
     public required int NewThreadWaitTime { get; init; }
-    //public IReadOnlyDictionary<string, string> Properties { get; init; } = new Dictionary<string, string>();
 }
 
 public sealed class InterruptEventInfo
@@ -950,7 +949,8 @@ public sealed class InterruptEventInfo
     public required byte Opcode { get; init; }
     public ulong? InitialTime { get; init; }
     public ulong? Routine { get; init; }
-    public uint? ReturnValue { get; init; }
+    public byte? ReturnValue { get; init; }
+    public byte? Vector { get; init; }
 }
 
 public sealed class ProfileEventInfo
@@ -989,6 +989,10 @@ public readonly record struct ImageLoadEventInfo
     public string FileName { get; init; }
 }
 
+/// <summary>
+/// 對應 Event ID 37(EnergyEstimate,Version 2):應用程式在本次估算週期內依裝置分類的能耗數值(單位:mJ),
+/// 以及描述量測情境的旗標(電源狀態、前景/背景、是否為實測值等)。欄位對應 tid_34 樣板的完整定義。
+/// </summary>
 public readonly record struct EnergyEstimationEngineEventInfo_37
 {
     public required DateTime Timestamp { get; init; }
@@ -1012,6 +1016,32 @@ public readonly record struct EnergyEstimationEngineEventInfo_37
     public uint TimeInMSec { get; init; }
     public ulong NpuEnergy { get; init; }
 
+    /// <summary>保留供系統內部使用的能耗欄位,目前無公開定義,分析時建議忽略。</summary>
+    public ulong ForInternalUse { get; init; }
+
+    /// <summary>
+    /// 位元旗標(map=mapDeviceState):0x1=DC(使用電池)、0x2=MonitorOn(螢幕開啟)、
+    /// 0x4=EnergySaver(省電模式)、0x8=LPE(深度低電力狀態)、0x10=Foreground(前景)、0x80=Container。
+    /// </summary>
+    public uint RecordFlags { get; init; }
+
+    /// <summary>
+    /// 位元旗標(map=mapRecordMeasured),標示本筆記錄中哪些能耗分量是「硬體實測」而非估算:
+    /// 0x1=Metadata、0x2=MetadataExt、0x4=Loss、0x8=CPU、0x10=SOC、0x20=Display。
+    /// </summary>
+    public uint RecordMeasured { get; init; }
+
+    /// <summary>應用程式互動狀態(map=mapAppInteractivityState):0=NotUnique、1=Minimized、2=Visible、3=Focus。</summary>
+    public uint InteractivityState { get; init; }
+
+    /// <summary>本次能耗記錄是否已提交/認可(非 0 表示已提交)。</summary>
+    public uint Committed { get; init; }
+
+    /// <summary>本行程「代表其他行程執行工作」(Work-On-Behalf-Of)所產生的 CPU 能耗(單位:mJ)。</summary>
+    public ulong WorkOnBehalfCPUEnergy { get; init; }
+
+    /// <summary>由其他行程轉嫁歸屬到本行程的 CPU 能耗(單位:mJ)。</summary>
+    public ulong AttributedCPUEnergy { get; init; }
 }
 
 /// <summary>
@@ -1053,6 +1083,40 @@ public readonly record struct EnergyEstimationEngineEventInfo_18
     public required byte Opcode { get; init; }
     public uint Component { get; init; }
     public ulong EnergyDelta { get; init; }
+}
+
+/// <summary>
+/// 對應 Event ID 35 (StandbyDripsTime):每次 Modern Standby(連線待機)週期結束時回報的待機品質計數器,
+/// 單位為 100ns tick(QPC 時間刻度)。Last/Curr 為上次與本次的累計總量,Delta 為本次週期的差值,
+/// 可用來計算「DRIPS 深度閒置佔比」與「待機期間被喚醒(Activation)佔比」,是診斷待機耗電的關鍵資料。
+/// </summary>
+public readonly record struct EnergyEstimationEngineEventInfo_35
+{
+    public required DateTime Timestamp { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+
+    /// <summary>上次回報時的 Modern Standby 累計總時間。</summary>
+    public ulong LastStandbyTotal { get; init; }
+    /// <summary>本次回報時的 Modern Standby 累計總時間。</summary>
+    public ulong CurrStandbyTotal { get; init; }
+    /// <summary>本次待機週期的 Standby 總時間差值(Curr - Last)。</summary>
+    public ulong DeltaStandbyTotal { get; init; }
+
+    /// <summary>上次回報時進入 DRIPS(SoC 最深層閒置狀態)的累計總時間。</summary>
+    public ulong LastDripsTotal { get; init; }
+    /// <summary>本次回報時進入 DRIPS 的累計總時間。</summary>
+    public ulong CurrDripsTotal { get; init; }
+    /// <summary>本次待機週期的 DRIPS 總時間差值,DeltaDripsTotal / DeltaStandbyTotal 即為深度閒置佔比。</summary>
+    public ulong DeltaDripsTotal { get; init; }
+
+    /// <summary>上次回報時待機期間被喚醒(Activation)的累計總時間。</summary>
+    public ulong LastActivationTotal { get; init; }
+    /// <summary>本次回報時待機期間被喚醒的累計總時間。</summary>
+    public ulong CurrActivationTotal { get; init; }
+    /// <summary>本次待機週期被喚醒的總時間差值,數值越高代表待機時越常被喚醒、越耗電。</summary>
+    public ulong DeltaActivationTotal { get; init; }
 }
 
 
@@ -1505,6 +1569,9 @@ public sealed class EtlFileReader
     public delegate void EnergyEstimationEngine_18Handler(in EnergyEstimationEngineEventInfo_18 data);
     public event EnergyEstimationEngine_18Handler? EnergyEstimationEngine_18;
 
+    public delegate void EnergyEstimationEngine_35Handler(in EnergyEstimationEngineEventInfo_35 data);
+    public event EnergyEstimationEngine_35Handler? EnergyEstimationEngine_35;
+
     public delegate void PowerMeterPollingEventInfo_4Handler(in PowerMeterPollingEventInfo_4 data);
     public event PowerMeterPollingEventInfo_4Handler? PowerMeterPollingEventInfo_4;
     public delegate void DiskIoOperationHandler(DiskIoOperation operation);
@@ -1843,38 +1910,61 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         {
-            ushort e3EventId = eventRecordPtr->EventHeader.EventDescriptor.Id;
-            if (this.EnergyEstimationEngine_37 is not null && e3EventId == 37)
+            ushort evtid = eventRecordPtr->EventHeader.EventDescriptor.Id;
+            switch(evtid)
             {
-                var e3_37 = ParseEnergyEstimationEnginePayload_37(timestamp, eventRecordPtr, cache);
-                if (e3_37 is { } e3_37value)
-                {
-                    this.EnergyEstimationEngine_37.Invoke(in e3_37value);
-                }
-            }
-            else if (this.EnergyEstimationEngine_33 is not null && e3EventId == 33)
-            {
-                var e3_33 = ParseEnergyEstimationEnginePayload_33(timestamp, eventRecordPtr, cache);
-                if (e3_33 is { } e3_33value)
-                {
-                    this.EnergyEstimationEngine_33.Invoke(in e3_33value);
-                }
-            }
-            else if (this.EnergyEstimationEngine_14 is not null && e3EventId == 14)
-            {
-                var e3_14 = ParseEnergyEstimationEnginePayload_14(timestamp, eventRecordPtr, cache);
-                if (e3_14 is { } e3_14value)
-                {
-                    this.EnergyEstimationEngine_14.Invoke(in e3_14value);
-                }
-            }
-            else if (this.EnergyEstimationEngine_18 is not null && e3EventId == 18)
-            {
-                var e3_18 = ParseEnergyEstimationEnginePayload_18(timestamp, eventRecordPtr, cache);
-                if (e3_18 is { } e3_18value)
-                {
-                    this.EnergyEstimationEngine_18.Invoke(in e3_18value);
-                }
+                case 14:
+                    if (this.EnergyEstimationEngine_14 is not null)
+                    {
+                        var ed = ParseEnergyEstimationEnginePayload_14(timestamp, eventRecordPtr, cache);
+                        if (ed is { } ed_value)
+                        {
+                            this.EnergyEstimationEngine_14.Invoke(in ed_value);
+                        }
+                    }
+                    break;
+                case 18:
+                    if (this.EnergyEstimationEngine_18 is not null)
+                    {
+                        var ed = ParseEnergyEstimationEnginePayload_18(timestamp, eventRecordPtr, cache);
+                        if (ed is { } ed_value)
+                        {
+                            this.EnergyEstimationEngine_18.Invoke(in ed_value);
+                        }
+                    }
+                    break;
+                case 33:
+                    if (this.EnergyEstimationEngine_33 is not null)
+                    {
+                        var ed = ParseEnergyEstimationEnginePayload_33(timestamp, eventRecordPtr, cache);
+                        if (ed is { } ed_value)
+                        {
+                            this.EnergyEstimationEngine_33.Invoke(in ed_value);
+                        }
+                    }
+                    break;
+                case 35:
+                    if (this.EnergyEstimationEngine_35 is not null)
+                    {
+                        var ed = ParseEnergyEstimationEnginePayload_35(timestamp, eventRecordPtr, cache);
+                        if (ed is { } ed_value)
+                        {
+                            this.EnergyEstimationEngine_35.Invoke(in ed_value);
+                        }
+                    }
+                    break;
+                case 37:
+                    if (this.EnergyEstimationEngine_37 is not null)
+                    {
+                        var ed = ParseEnergyEstimationEnginePayload_37(timestamp, eventRecordPtr, cache);
+                        if (ed is { } ed_value)
+                        {
+                            this.EnergyEstimationEngine_37.Invoke(in ed_value);
+                        }
+                    }
+                    break;
+                default:
+                    break;
             }
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.KernelAcpiProviderGuid)
@@ -2602,6 +2692,13 @@ public sealed class EtlFileReader
             OtherEnergy = GetRawProperty<ulong>(eventRecordPtr, "OtherEnergy", cache),
             TimeInMSec = GetRawProperty<uint>(eventRecordPtr, "TimeInMSec", cache),
             UserId = GetRawProperty<ushort>(eventRecordPtr, "UserId", cache),
+            ForInternalUse = GetRawProperty<ulong>(eventRecordPtr, "ForInternalUse", cache),
+            RecordFlags = GetRawProperty<uint>(eventRecordPtr, "RecordFlags", cache),
+            RecordMeasured = GetRawProperty<uint>(eventRecordPtr, "RecordMeasured", cache),
+            InteractivityState = GetRawProperty<uint>(eventRecordPtr, "InteractivityState", cache),
+            Committed = GetRawProperty<uint>(eventRecordPtr, "Committed", cache),
+            WorkOnBehalfCPUEnergy = GetRawProperty<ulong>(eventRecordPtr, "WorkOnBehalfCPUEnergy", cache),
+            AttributedCPUEnergy = GetRawProperty<ulong>(eventRecordPtr, "AttributedCPUEnergy", cache),
         };
 
         return e3;
@@ -2646,6 +2743,26 @@ public sealed class EtlFileReader
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
             Component = GetRawProperty<uint>(eventRecordPtr, "Component", cache),
             EnergyDelta = GetRawProperty<ulong>(eventRecordPtr, "EnergyDelta", cache),
+        };
+    }
+
+    private unsafe EnergyEstimationEngineEventInfo_35? ParseEnergyEstimationEnginePayload_35(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        return new EnergyEstimationEngineEventInfo_35
+        {
+            Timestamp = timestamp,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            LastStandbyTotal = GetRawProperty<ulong>(eventRecordPtr, "LastStandbyTotal", cache),
+            CurrStandbyTotal = GetRawProperty<ulong>(eventRecordPtr, "CurrStandbyTotal", cache),
+            DeltaStandbyTotal = GetRawProperty<ulong>(eventRecordPtr, "DeltaStandbyTotal", cache),
+            LastDripsTotal = GetRawProperty<ulong>(eventRecordPtr, "LastDripsTotal", cache),
+            CurrDripsTotal = GetRawProperty<ulong>(eventRecordPtr, "CurrDripsTotal", cache),
+            DeltaDripsTotal = GetRawProperty<ulong>(eventRecordPtr, "DeltaDripsTotal", cache),
+            LastActivationTotal = GetRawProperty<ulong>(eventRecordPtr, "LastActivationTotal", cache),
+            CurrActivationTotal = GetRawProperty<ulong>(eventRecordPtr, "CurrActivationTotal", cache),
+            DeltaActivationTotal = GetRawProperty<ulong>(eventRecordPtr, "DeltaActivationTotal", cache),
         };
     }
 
@@ -3010,12 +3127,17 @@ public sealed class EtlFileReader
 
     private InterruptEventInfo? ProcessInterruptEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
     {
+        // 依官方 ISR MOF class 定義 (https://learn.microsoft.com/windows/win32/etw/isr)：
+        // InitialTime(8 bytes) + Routine(pointer) + ReturnValue(uint8) + Vector(uint8) + Reserved(uint16)。
+        // ReturnValue 與 Vector 各佔 1 byte，不可合併當成單一 uint32 讀取，否則會讀出錯誤的合成值且遺漏 Vector。
         var pointerSize = GetPointerSize(in header);
         const int InitialTimeSize = sizeof(ulong);
-        const int ReturnValueSize = sizeof(uint);
+        const int ReturnValueSize = sizeof(byte);
+        const int VectorSize = sizeof(byte);
         int routineOffset = InitialTimeSize;
         int returnValueOffset = routineOffset + (int)pointerSize;
-        int requiredLength = returnValueOffset + ReturnValueSize;
+        int vectorOffset = returnValueOffset + ReturnValueSize;
+        int requiredLength = vectorOffset + VectorSize;
         if (userData == 0 || userDataLength < requiredLength)
         {
             return null;
@@ -3023,7 +3145,8 @@ public sealed class EtlFileReader
 
         ulong initialTime = unchecked((ulong)Marshal.ReadInt64(userData, 0));
         ulong routine = ReadPointer(userData, routineOffset, pointerSize);
-        uint returnValue = unchecked((uint)Marshal.ReadInt32(userData, returnValueOffset));
+        byte returnValue = Marshal.ReadByte(userData, returnValueOffset);
+        byte vector = Marshal.ReadByte(userData, vectorOffset);
 
         return new InterruptEventInfo
         {
@@ -3035,6 +3158,7 @@ public sealed class EtlFileReader
             InitialTime = initialTime,
             Routine = routine,
             ReturnValue = returnValue,
+            Vector = vector,
         };
     }
 
