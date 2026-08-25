@@ -1485,7 +1485,7 @@ public sealed class EtlFileReader
     public event ThreadStartStopEventHandler? ThreadDCStart;
     public event ThreadStartStopEventHandler? ThreadDCStop;
 
-    public delegate void ProcessEventHandler(ProcessInfo process);
+    public delegate void ProcessEventHandler(in ProcessInfo process);
     public event ProcessEventHandler? ProcessStart;
     public event ProcessEventHandler? ProcessStop;
 
@@ -1517,16 +1517,16 @@ public sealed class EtlFileReader
     public event ImageLoadEventHandler? ImageDCStart;
     public event ImageLoadEventHandler? ImageDCStop;
 
-    public delegate void KernelAcpiTemperatureNotificationEventHandler(KernelAcpiEventInfo_TemperatureNotification data);
+    public delegate void KernelAcpiTemperatureNotificationEventHandler(in KernelAcpiEventInfo_TemperatureNotification data);
     public event KernelAcpiTemperatureNotificationEventHandler? KernelAcpiTemperatureNotification;
 
-    public delegate void KernelAcpiAmlMethodTraceEventHandler(KernelAcpiEventInfo_AmlMethodTrace data);
+    public delegate void KernelAcpiAmlMethodTraceEventHandler(in KernelAcpiEventInfo_AmlMethodTrace data);
     public event KernelAcpiAmlMethodTraceEventHandler? KernelAcpiAmlMethodTrace;
 
-    public delegate void KernelAcpiTemperatureChangeEventHandler(KernelAcpiEventInfo_TemperatureChange data);
+    public delegate void KernelAcpiTemperatureChangeEventHandler(in KernelAcpiEventInfo_TemperatureChange data);
     public event KernelAcpiTemperatureChangeEventHandler? KernelAcpiTemperatureChange;
 
-    public delegate void KernelAcpiFrequentAmlMethodEventHandler(KernelAcpiEventInfo_FrequentAmlMethod data);
+    public delegate void KernelAcpiFrequentAmlMethodEventHandler(in KernelAcpiEventInfo_FrequentAmlMethod data);
     public event KernelAcpiFrequentAmlMethodEventHandler? KernelAcpiFrequentAmlMethod;
 
     public delegate void KernelPowerEventHandler(KernelPowerEventInfo data);
@@ -1972,24 +1972,36 @@ public sealed class EtlFileReader
             switch ((KernelAcpiEventId)eventRecordPtr->EventHeader.EventDescriptor.Id)
             {
                 case KernelAcpiEventId.TemperatureNotification:
-                    var temperatureNotification = ProcessKernelAcpiTemperatureNotificationEvent(timestamp, eventRecordPtr, cache);
-                    if (temperatureNotification is { } temperatureNotificationValue)
-                        KernelAcpiTemperatureNotification?.Invoke(temperatureNotificationValue);
+                    if(KernelAcpiTemperatureNotification is not null)
+                    {
+                        var temperatureNotification = ProcessKernelAcpiTemperatureNotificationEvent(timestamp, eventRecordPtr, cache);
+                        if (temperatureNotification is { } temperatureNotificationValue)
+                            KernelAcpiTemperatureNotification(in temperatureNotificationValue);
+                    }
                     break;
                 case KernelAcpiEventId.AmlMethodTrace:
-                    var amlMethodTrace = ProcessKernelAcpiAmlMethodTraceEvent(timestamp, eventRecordPtr, cache);
-                    if (amlMethodTrace is { } amlMethodTraceValue)
-                        KernelAcpiAmlMethodTrace?.Invoke(amlMethodTraceValue);
+                    if(KernelAcpiAmlMethodTrace is not null)
+                    {
+                        var amlMethodTrace = ProcessKernelAcpiAmlMethodTraceEvent(timestamp, eventRecordPtr, cache);
+                        if (amlMethodTrace is { } amlMethodTraceValue)
+                            KernelAcpiAmlMethodTrace(in amlMethodTraceValue);
+                    }
                     break;
                 case KernelAcpiEventId.TemperatureChange:
-                    var temperatureChange = ProcessKernelAcpiTemperatureChangeEvent(timestamp, eventRecordPtr, cache);
-                    if (temperatureChange is { } temperatureChangeValue)
-                        KernelAcpiTemperatureChange?.Invoke(temperatureChangeValue);
+                    if(KernelAcpiTemperatureChange is not null)
+                    {
+                        var temperatureChange = ProcessKernelAcpiTemperatureChangeEvent(timestamp, eventRecordPtr, cache);
+                        if (temperatureChange is { } temperatureChangeValue)
+                            KernelAcpiTemperatureChange(in temperatureChangeValue);
+                    }
                     break;
                 case KernelAcpiEventId.FrequentAmlMethod:
-                    var frequentAmlMethod = ProcessKernelAcpiFrequentAmlMethodEvent(timestamp, eventRecordPtr, cache);
-                    if (frequentAmlMethod is { } frequentAmlMethodValue)
-                        KernelAcpiFrequentAmlMethod?.Invoke(frequentAmlMethodValue);
+                    if(KernelAcpiFrequentAmlMethod is not null)
+                    {
+                        var frequentAmlMethod = ProcessKernelAcpiFrequentAmlMethodEvent(timestamp, eventRecordPtr, cache);
+                        if (frequentAmlMethod is { } frequentAmlMethodValue)
+                            KernelAcpiFrequentAmlMethod(in frequentAmlMethodValue);
+                    }
                     break;
                 default:
                     var strb = new StringBuilder();
@@ -2037,10 +2049,13 @@ public sealed class EtlFileReader
                     }
                     break;
                 case 4:
-                    var powerneter_4 = ProcessPowerMeterPollingEvent_4(timestamp, eventRecordPtr, cache);
                     if (PowerMeterPollingEventInfo_4 is not null)
                     {
-                        PowerMeterPollingEventInfo_4(powerneter_4);
+                        var powerneter_4 = ProcessPowerMeterPollingEvent_4(timestamp, eventRecordPtr, cache);
+                        if (powerneter_4 is { } powerneter_4Value)
+                        {
+                            PowerMeterPollingEventInfo_4(in powerneter_4Value);
+                        }
                     }
                     break;
                 default:
@@ -2669,6 +2684,7 @@ public sealed class EtlFileReader
 
     private unsafe EnergyEstimationEngineEventInfo_37? ParseEnergyEstimationEnginePayload_37(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
+        if (eventRecordPtr == null) return null;
         uint processId = eventRecordPtr->EventHeader.ProcessId;
 
         var e3 = new EnergyEstimationEngineEventInfo_37
@@ -2706,6 +2722,7 @@ public sealed class EtlFileReader
 
     private unsafe EnergyEstimationEngineEventInfo_33? ParseEnergyEstimationEnginePayload_33(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
+        if (eventRecordPtr == null) return null;
         return new EnergyEstimationEngineEventInfo_33
         {
             Timestamp = timestamp,
@@ -2720,6 +2737,7 @@ public sealed class EtlFileReader
 
     private unsafe EnergyEstimationEngineEventInfo_14? ParseEnergyEstimationEnginePayload_14(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
+        if (eventRecordPtr == null) return null;
         return new EnergyEstimationEngineEventInfo_14
         {
             Timestamp = timestamp,
@@ -2735,6 +2753,7 @@ public sealed class EtlFileReader
 
     private unsafe EnergyEstimationEngineEventInfo_18? ParseEnergyEstimationEnginePayload_18(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
+        if (eventRecordPtr == null) return null;
         return new EnergyEstimationEngineEventInfo_18
         {
             Timestamp = timestamp,
@@ -2748,6 +2767,7 @@ public sealed class EtlFileReader
 
     private unsafe EnergyEstimationEngineEventInfo_35? ParseEnergyEstimationEnginePayload_35(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
+        if (eventRecordPtr == null) return null;
         return new EnergyEstimationEngineEventInfo_35
         {
             Timestamp = timestamp,
@@ -2870,6 +2890,7 @@ public sealed class EtlFileReader
 
     unsafe private FileIoEventInfo? ProcessFileIoEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
+        if (eventRecordPtr == null) return null;
         return new FileIoEventInfo
         {
             Timestamp = timestamp,
@@ -2884,10 +2905,7 @@ public sealed class EtlFileReader
 
     private unsafe KernelAcpiEventInfo_TemperatureNotification? ProcessKernelAcpiTemperatureNotificationEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr is null) return null;
         return new KernelAcpiEventInfo_TemperatureNotification
         {
             Timestamp = timestamp,
@@ -2917,10 +2935,7 @@ public sealed class EtlFileReader
 
     private unsafe KernelAcpiEventInfo_AmlMethodTrace? ProcessKernelAcpiAmlMethodTraceEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr is null) return null;
         return new KernelAcpiEventInfo_AmlMethodTrace
         {
             Timestamp = timestamp,
@@ -2938,10 +2953,7 @@ public sealed class EtlFileReader
 
     private unsafe KernelAcpiEventInfo_TemperatureChange? ProcessKernelAcpiTemperatureChangeEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
         return new KernelAcpiEventInfo_TemperatureChange
         {
             Timestamp = timestamp,
@@ -2959,10 +2971,7 @@ public sealed class EtlFileReader
 
     private unsafe KernelAcpiEventInfo_FrequentAmlMethod? ProcessKernelAcpiFrequentAmlMethodEvent(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null)
-        {
-            return null;
-        }
+        if (eventRecordPtr == null) return null;
         return new KernelAcpiEventInfo_FrequentAmlMethod
         {
             Timestamp = timestamp,
@@ -2974,22 +2983,6 @@ public sealed class EtlFileReader
             AmlMethodNameLength = GetRawProperty<ushort>(eventRecordPtr, "AmlMethodNameLength", schema),
             AmlMethodName = GetRawPropertyString(eventRecordPtr, "AmlMethodName", schema),
             Frequency = GetRawProperty<ulong>(eventRecordPtr, "Frequency", schema),
-        };
-    }
-
-
-
-
-    private KernelPowerEventInfo ProcessKernelPowerEvent(DateTime timestamp, in EVENT_HEADER header)
-    {
-        return new KernelPowerEventInfo
-        {
-            Timestamp = timestamp,
-            EventId = header.EventDescriptor.Id,
-            Version = header.EventDescriptor.Version,
-            Opcode = header.EventDescriptor.Opcode,
-            ProcessId = header.ProcessId,
-            ThreadId = header.ThreadId,
         };
     }
 
@@ -3008,8 +3001,9 @@ public sealed class EtlFileReader
         };
     }
 
-    private unsafe PowerMeterPollingEventInfo_4 ProcessPowerMeterPollingEvent_4(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    private unsafe PowerMeterPollingEventInfo_4? ProcessPowerMeterPollingEvent_4(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
+        if (eventRecordPtr is null) return null;
         return new PowerMeterPollingEventInfo_4
         {
             Timestamp = timestamp,
@@ -3022,8 +3016,9 @@ public sealed class EtlFileReader
         };
     }
 
-    private unsafe PowerMeterPollingEventInfo_3 ProcessPowerMeterPollingEvent_3(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    private unsafe PowerMeterPollingEventInfo_3? ProcessPowerMeterPollingEvent_3(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
+        if (eventRecordPtr is null) return null;
         return new PowerMeterPollingEventInfo_3
         {
             Timestamp = timestamp,
@@ -3212,25 +3207,7 @@ public sealed class EtlFileReader
         };
     }
 
-    private readonly record struct ProfilePayloadInfo(ulong InstructionPointer);
     private readonly record struct DpcPayloadInfo(ulong InitialTime, ulong Routine);
-    private readonly record struct InterruptPayloadInfo(ulong InitialTime, ulong Routine, uint ReturnValue, IReadOnlyDictionary<string, string> Properties);
-
-    private DpcPayloadInfo? ParseDpcPayload(nint userData, int userDataLength, uint pointerSize)
-    {
-        const int InitialTimeSize = sizeof(ulong);
-        int requiredLength = InitialTimeSize + (int)pointerSize;
-        if (userData == 0 || userDataLength < requiredLength)
-        {
-            return null;
-        }
-
-        ulong initialTime = unchecked((ulong)Marshal.ReadInt64(userData, 0));
-        ulong routine = ReadPointer(userData, InitialTimeSize, pointerSize);
-        return new DpcPayloadInfo(
-            initialTime,
-            routine);
-    }
 
     private ulong ReadPointer(nint address, int offset, uint pointerSize)
     {

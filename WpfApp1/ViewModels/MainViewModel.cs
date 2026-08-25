@@ -187,6 +187,7 @@ public partial class MainViewModel : ObservableObject
                     TraceSessionBuilder.SystemMemoryWorkingSetKeyword |
                     TraceSessionBuilder.SystemMemoryVirtualAllocKeyword)
                 .WithProvider(TraceSessionBuilder.PowerMeterPollingProviderGuid, TraceSessionBuilder.PowerMeterPollingFiveSecondKeyword)
+                .WithProvider(TraceSessionBuilder.DxgKrnlProviderGuid)
                 .WithOutputPath(ResolveCapturePath())
                 .WithEtwFileCompression()
                 .Build();

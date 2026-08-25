@@ -204,7 +204,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         }
     }
 
-    protected virtual void OnProcessStart(ProcessInfo process)
+    protected virtual void OnProcessStart(in ProcessInfo process)
     {
         TrackEventTimestamp(process.TimeStamp);
         m_ProcessStartedAts[process.ProcessId] = process.TimeStamp;
@@ -217,7 +217,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WriteProcessMemoryCounter(in data);
     }
 
-    protected virtual void OnProcessStop(ProcessInfo process)
+    protected virtual void OnProcessStop(in ProcessInfo process)
     {
         DateTime processStoppedAt = process.TimeStamp;
         TrackEventTimestamp(processStoppedAt);
@@ -386,25 +386,25 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WritePowerMeterPollingEvent_4(in data);
     }
 
-    private void OnKernelAcpiTemperatureNotification(KernelAcpiEventInfo_TemperatureNotification data)
+    private void OnKernelAcpiTemperatureNotification(in KernelAcpiEventInfo_TemperatureNotification data)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteKernelAcpiTemperatureNotification(in data);
     }
 
-    private void OnKernelAcpiAmlMethodTrace(KernelAcpiEventInfo_AmlMethodTrace data)
+    private void OnKernelAcpiAmlMethodTrace(in KernelAcpiEventInfo_AmlMethodTrace data)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteKernelAcpiAmlMethodTrace(in data);
     }
 
-    private void OnKernelAcpiTemperatureChange(KernelAcpiEventInfo_TemperatureChange data)
+    private void OnKernelAcpiTemperatureChange(in KernelAcpiEventInfo_TemperatureChange data)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteKernelAcpiTemperatureChange(in data);
     }
 
-    private void OnKernelAcpiFrequentAmlMethod(KernelAcpiEventInfo_FrequentAmlMethod data)
+    private void OnKernelAcpiFrequentAmlMethod(in KernelAcpiEventInfo_FrequentAmlMethod data)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteKernelAcpiFrequentAmlMethod(in data);

@@ -34,6 +34,7 @@ using TraceSession session = new TraceSessionBuilder()
         TraceSessionBuilder.SystemMemoryWorkingSetKeyword |
         TraceSessionBuilder.SystemMemoryVirtualAllocKeyword)
     .WithProvider(TraceSessionBuilder.PowerMeterPollingProviderGuid, TraceSessionBuilder.PowerMeterPollingFiveSecondKeyword)
+    .WithProvider(TraceSessionBuilder.DxgKrnlProviderGuid)
     .WithOutputPath(Path.Combine(AppContext.BaseDirectory, $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.etl"))
     .WithEtwFileCompression()
     .Build();

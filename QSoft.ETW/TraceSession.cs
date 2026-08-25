@@ -769,6 +769,7 @@ namespace QSoft.ETW
         public static readonly Guid KernelPowerProviderGuid = new("331c3b3a-2005-44c2-ac5e-77220c37d6b4");
         public static readonly Guid PowerMeterPollingProviderGuid = new("306c4e0b-e148-543d-315b-c618eb93157c");
         public static readonly Guid SystemMemoryProviderGuid = new("82958ca9-b6cd-47f8-a3a8-03ae85a4bc24");
+        public static readonly Guid DxgKrnlProviderGuid = new("802ec45a-1e99-4b83-9920-87c98277ba9d");
         public const ulong PowerMeterPollingFiveSecondKeyword = 0x0000000000000004;
         public const ulong SystemMemoryMemoryInfoKeyword = 0x0000000000000010;
         public const ulong SystemMemoryWorkingSetKeyword = 0x0000000000000100;
