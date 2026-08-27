@@ -79,18 +79,6 @@ public partial class MainViewModel : ObservableObject
         private set => SetProperty(ref databasePath, value);
     }
 
-    //public EtlTableDefinition? SelectedTable
-    //{
-    //    get => selectedTable;
-    //    set
-    //    {
-    //        if (SetProperty(ref selectedTable, value) && !suppressTableLoad && value is not null && !string.IsNullOrWhiteSpace(DatabasePath))
-    //        {
-    //            _ = LoadPageAsync(1);
-    //        }
-    //    }
-    //}
-
     public DataView? TableRows
     {
         get => tableRows;

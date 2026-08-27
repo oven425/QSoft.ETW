@@ -5,48 +5,47 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
-namespace QSoft.ETW
+namespace QSoft.ETW.Legacy
 {
-    public partial class TraceSession : IDisposable
+    public partial class TraceSession_Legacy : IDisposable
     {
         string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         string baseDir;
-        string sessionName;
-        string logFilePath;
+        string userSessionName;
+        string kernelLogFile;
+        string userLogFile;
+        string mergedLogFile;
 
-        ulong sessionHandle = 0;
+        ulong kernelHandle = 0;
+        ulong userHandle = 0;
 
-        EventTraceProperties? sessionProps = null;
+        EventTraceProperties? kernelProps = null;
+        EventTraceProperties? userProps = null;
 
         readonly KernelTraceFlags kernelEnableFlags;
         readonly ProviderConfiguration[] userProviders;
         readonly ProviderConfiguration[] systemProviders;
-        readonly string? outputFileName;
+        readonly string? mergedFileName;
         readonly bool enableFileCompression;
         bool isStarted = false;
         bool isDisposed = false;
 
-        /// <summary>
-        /// The ETL file being recorded to (set on <see cref="Start"/>). <see langword="null"/> before the first
-        /// <see cref="Start"/> call.
-        /// </summary>
-        public string? LogFilePath => logFilePath;
-
-        internal TraceSession(
+        internal TraceSession_Legacy(
             KernelTraceFlags kernelEnableFlags,
             ProviderConfiguration[] userProviders,
             ProviderConfiguration[] systemProviders,
             string baseDir,
-            string? outputFileName = null,
+            string? mergedFileName = null,
             bool enableFileCompression = false)
         {
             this.kernelEnableFlags = kernelEnableFlags;
             this.userProviders = userProviders ?? [];
             this.systemProviders = systemProviders ?? [];
             this.baseDir = string.IsNullOrEmpty(baseDir) ? AppContext.BaseDirectory : baseDir;
-            this.outputFileName = outputFileName;
+            this.mergedFileName = mergedFileName;
             this.enableFileCompression = enableFileCompression;
         }
 
@@ -58,39 +57,58 @@ namespace QSoft.ETW
 
             if (isStarted)
             {
-                throw new InvalidOperationException($"{nameof(TraceSession)} 已經啟動過，請先呼叫 {nameof(Stop)} 再重新啟動，避免 Session 控制代碼遺失而無法停止。");
+                throw new InvalidOperationException($"{nameof(TraceSession_Legacy)} 已經啟動過，請先呼叫 {nameof(Stop)} 再重新啟動，避免 Kernel Logger 控制代碼遺失而無法停止。");
             }
 
             timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            sessionName = $"QSoft-{timestamp}";
-            logFilePath = Path.Combine(baseDir, string.IsNullOrWhiteSpace(outputFileName) ? $"trace_{timestamp}.etl" : outputFileName);
+            userSessionName = $"QSoft-User-{timestamp}";
+            kernelLogFile = Path.Combine(baseDir, $"kernel_{timestamp}.etl");
+            userLogFile = Path.Combine(baseDir, $"user_{timestamp}.etl");
+            mergedLogFile = Path.Combine(baseDir, string.IsNullOrWhiteSpace(mergedFileName) ? $"merged_{timestamp}.etl" : mergedFileName);
 
             try
             {
-                sessionProps = StartSession(sessionName, logFilePath, out sessionHandle);
+                kernelProps = StartKernelTrace(kernelLogFile, kernelEnableFlags, systemProviders, out kernelHandle);
+                userProps = StartUserTrace(userSessionName, userLogFile, userProviders, out userHandle);
             }
             catch
             {
-                if (sessionHandle != 0 && sessionProps is not null)
+                if (userHandle != 0 && userProps is not null)
                 {
-                    _ = ControlTraceW(sessionHandle, null, ref sessionProps.Properties, EVENT_TRACE_CONTROL_STOP);
+                    _ = ControlTraceW(userHandle, null, ref userProps.Properties, EVENT_TRACE_CONTROL_STOP);
                 }
 
-                sessionHandle = 0;
-                sessionProps = null;
+                if (kernelHandle != 0 && kernelProps is not null)
+                {
+                    _ = ControlTraceW(kernelHandle, null, ref kernelProps.Properties, EVENT_TRACE_CONTROL_STOP);
+                }
+
+                userHandle = 0;
+                kernelHandle = 0;
+                userProps = null;
+                kernelProps = null;
                 throw;
             }
 
             isStarted = true;
 
-            if (sessionProps is not null)
+            if (kernelProps is not null)
             {
-                Console.WriteLine($"Session: {sessionName} -> {logFilePath}");
+                Console.WriteLine($"Kernel session: {KERNEL_LOGGER_NAME} -> {kernelLogFile}");
             }
             else
             {
-                Console.WriteLine("Session: 未啟動（未指定任何 EnableFlags 或 Provider）。");
+                Console.WriteLine("Kernel session: 未啟動（未指定任何 EnableFlags）。");
             }
+            if (userProps is not null)
+            {
+                Console.WriteLine($"User session:   {userSessionName} -> {userLogFile}");
+            }
+            else
+            {
+                Console.WriteLine("User session:   未啟動（未指定任何 Provider）。");
+            }
+
         }
 
         public void Stop()
@@ -100,19 +118,65 @@ namespace QSoft.ETW
                 return;
             }
 
-            if (sessionHandle != 0 && sessionProps is not null)
+            if (userHandle != 0 && userProps is not null)
             {
-                _ = ControlTraceW(sessionHandle, null, ref sessionProps.Properties, EVENT_TRACE_CONTROL_STOP);
-                ReportTraceStatistics("Session", in sessionProps.Properties);
-                Console.WriteLine($"追蹤檔案：{logFilePath}");
+                _ = ControlTraceW(userHandle, null, ref userProps.Properties, EVENT_TRACE_CONTROL_STOP);
+                ReportTraceStatistics("User", in userProps.Properties);
+            }
+
+            if (kernelHandle != 0 && kernelProps is not null)
+            {
+                _ = ControlTraceW(kernelHandle, null, ref kernelProps.Properties, EVENT_TRACE_CONTROL_STOP);
+                ReportTraceStatistics("Kernel", in kernelProps.Properties);
+            }
+
+            string[] traceFilesToMerge = [
+                .. kernelProps is not null ? new[] { kernelLogFile } : [],
+                    .. userProps is not null ? new[] { userLogFile } : [],
+                ];
+
+            if (traceFilesToMerge.Length == 0)
+            {
+                Console.WriteLine("Kernel 與 User session 皆未啟動，無追蹤檔案可合併。");
             }
             else
             {
-                Console.WriteLine("Session 未啟動，無追蹤檔案可處理。");
+                Console.WriteLine("正在合併追蹤檔案...");
+                try
+                {
+                    MergeTraceFiles(mergedLogFile, traceFilesToMerge);
+
+                    Console.WriteLine("完成，輸出檔案：");
+                    if (kernelProps is not null)
+                    {
+                        Console.WriteLine($"  Kernel : {kernelLogFile}");
+                    }
+                    if (userProps is not null)
+                    {
+                        Console.WriteLine($"  User   : {userLogFile}");
+                    }
+                    Console.WriteLine($"  Merged : {mergedLogFile}");
+                }
+                catch (Exception ex)
+                {
+                    // 合併僅是附加功能（方便一次分析），即使失敗，個別的 Kernel/User ETL 仍已完整寫入且可獨立解析，
+                    // 因此不應讓合併失敗中斷 Stop() 的其餘清理流程（重置控制代碼、Session 狀態等）。
+                    Console.Error.WriteLine($"警告：合併追蹤檔案失敗（{ex.Message}），請改用個別的 Kernel/User ETL 檔案：");
+                    if (kernelProps is not null)
+                    {
+                        Console.Error.WriteLine($"  Kernel : {kernelLogFile}");
+                    }
+                    if (userProps is not null)
+                    {
+                        Console.Error.WriteLine($"  User   : {userLogFile}");
+                    }
+                }
             }
 
-            sessionHandle = 0;
-            sessionProps = null;
+            kernelHandle = 0;
+            userHandle = 0;
+            kernelProps = null;
+            userProps = null;
             isStarted = false;
         }
 
@@ -235,6 +299,12 @@ namespace QSoft.ETW
                 (enableFileCompression ? EVENT_TRACE_COMPRESSED_MODE : 0);
         }
 
+        uint GetKernelLogFileMode()
+        {
+            return GetLogFileMode() |
+                (systemProviders.Length > 0 ? EVENT_TRACE_SYSTEM_LOGGER_MODE : 0);
+        }
+
         void StopExistingSession(string sessionName, ref EVENT_TRACE_PROPERTIES props)
         {
             _ = ControlTraceW(0, sessionName, ref props, EVENT_TRACE_CONTROL_STOP);
@@ -253,72 +323,54 @@ namespace QSoft.ETW
             }
         }
 
-        EventTraceProperties? StartSession(string sessionName, string logFileName, out ulong sessionHandle)
+        EventTraceProperties? StartKernelTrace(
+            string logFileName,
+            KernelTraceFlags enableFlags,
+            ProviderConfiguration[] systemProviders,
+            out ulong sessionHandle)
         {
             sessionHandle = 0;
 
-            bool needsKernelSession = kernelEnableFlags != KernelTraceFlags.None || systemProviders.Length > 0;
-
-            if (!needsKernelSession && userProviders.Length == 0)
+            if (enableFlags == KernelTraceFlags.None && systemProviders.Length == 0)
             {
                 return null;
             }
 
-            if (needsKernelSession)
-            {
-                EnablePrivilege(SE_SYSTEM_PROFILE_NAME);
-            }
+            EnablePrivilege(SE_SYSTEM_PROFILE_NAME);
 
             (uint minimumBuffers, uint maximumBuffers) = GetRecommendedBufferCounts();
 
-            uint logFileMode = GetLogFileMode() | (needsKernelSession ? EVENT_TRACE_SYSTEM_LOGGER_MODE : 0);
-
             EventTraceProperties eventTraceProperties = AllocateProperties(
-                sessionName, logFileName, Guid.NewGuid(), logFileMode, 0, minimumBuffers, maximumBuffers);
+                KERNEL_LOGGER_NAME,
+                logFileName,
+                SystemTraceControlGuid,
+                GetKernelLogFileMode(),
+                (uint)enableFlags,
+                minimumBuffers,
+                maximumBuffers);
+
+            StopExistingSession(KERNEL_LOGGER_NAME, ref eventTraceProperties.Properties);
+
+            STACK_TRACING_EVENT_ID stackTracingEventId = default;
+            stackTracingEventId.EventGuid = PerfInfoGuid;
+            stackTracingEventId.Type = EVENT_TYPE_SAMPLED_PROFILE;
+
+            ThrowIfError(
+                StartKernelTrace(out sessionHandle, ref eventTraceProperties.Properties, in stackTracingEventId, 1),
+                nameof(StartKernelTrace));
 
             try
             {
-                StopExistingSession(sessionName, ref eventTraceProperties.Properties);
-
-                ThrowIfError(StartTraceW(out sessionHandle, sessionName, ref eventTraceProperties.Properties), nameof(StartTraceW));
-
-                if (needsKernelSession)
-                {
-                    EnableKernelFlags(sessionHandle, kernelEnableFlags);
-                }
-
-                EnableProviders(sessionHandle, [.. systemProviders, .. userProviders]);
-
-                return eventTraceProperties;
+                EnableProviders(sessionHandle, systemProviders);
             }
             catch
             {
-                if (sessionHandle != 0)
-                {
-                    _ = ControlTraceW(sessionHandle, null, ref eventTraceProperties.Properties, EVENT_TRACE_CONTROL_STOP);
-                    sessionHandle = 0;
-                }
-
+                _ = ControlTraceW(sessionHandle, null, ref eventTraceProperties.Properties, EVENT_TRACE_CONTROL_STOP);
+                sessionHandle = 0;
                 throw;
             }
-        }
 
-        // Windows 8 以上，任意命名的 Session（不需要是 "NT Kernel Logger"）只要在啟動時的 LogFileMode 加上
-        // EVENT_TRACE_SYSTEM_LOGGER_MODE，即可在 StartTraceW 之後，透過 TraceSetInformation 補設定 Kernel
-        // 旗標與取樣式效能分析用的呼叫堆疊，讓 Kernel 事件與 User-mode Provider 事件寫進同一個 Session／
-        // 同一個 ETL 檔，不需要事後合併（對照 Microsoft.Diagnostics.Tracing.TraceEventSession 在
-        // EnableKernelProvider 內針對 Windows 8+ 的 systemTraceProvider 分支）。
-        void EnableKernelFlags(ulong sessionHandle, KernelTraceFlags kernelFlags)
-        {
-            var stackTracingEventId = new STACK_TRACING_EVENT_ID { EventGuid = PerfInfoGuid, Type = EVENT_TYPE_SAMPLED_PROFILE };
-            ThrowIfError(
-                TraceSetInformation(sessionHandle, TRACE_INFO_CLASS.TraceStackTracingInfo, in stackTracingEventId, (uint)Unsafe.SizeOf<STACK_TRACING_EVENT_ID>()),
-                nameof(TraceSetInformation));
-
-            ulong enableFlags = (ulong)kernelFlags;
-            ThrowIfError(
-                TraceSetInformation(sessionHandle, TRACE_INFO_CLASS.TraceSystemTraceEnableFlagsInfo, in enableFlags, sizeof(ulong)),
-                nameof(TraceSetInformation));
+            return eventTraceProperties;
         }
 
         void EnableProviders(ulong sessionHandle, ReadOnlySpan<ProviderConfiguration> providers)
@@ -341,6 +393,89 @@ namespace QSoft.ETW
                     $"{nameof(EnableTraceEx2)}({provider.ProviderId})");
             }
         }
+
+        EventTraceProperties? StartUserTrace(string sessionName, string logFileName, ProviderConfiguration[] providers, out ulong sessionHandle)
+        {
+            sessionHandle = 0;
+
+            if (providers is null || providers.Length == 0)
+            {
+                return null;
+            }
+
+            (uint minimumBuffers, uint maximumBuffers) = GetRecommendedBufferCounts();
+
+            EventTraceProperties eventTraceProperties = AllocateProperties(
+                sessionName, logFileName, Guid.NewGuid(), GetLogFileMode(), 0, minimumBuffers, maximumBuffers);
+
+            try
+            {
+                StopExistingSession(sessionName, ref eventTraceProperties.Properties);
+
+                ThrowIfError(StartTraceW(out sessionHandle, sessionName, ref eventTraceProperties.Properties), "StartTraceW(User)");
+
+                EnableProviders(sessionHandle, providers);
+
+                return eventTraceProperties;
+            }
+            catch
+            {
+                if (sessionHandle != 0)
+                {
+                    _ = ControlTraceW(sessionHandle, null, ref eventTraceProperties.Properties, EVENT_TRACE_CONTROL_STOP);
+                }
+
+                throw;
+            }
+        }
+
+
+        private const uint EVENT_TRACE_MERGE_EXTENDED_DATA_IMAGEID = 0x00000001;
+        private const uint EVENT_TRACE_MERGE_EXTENDED_DATA_BUILDINFO = 0x00000002;
+        private const uint EVENT_TRACE_MERGE_EXTENDED_DATA_VOLUME_MAPPING = 0x00000004;
+        private const uint EVENT_TRACE_MERGE_EXTENDED_DATA_WINSAT = 0x00000008;
+        private const uint EVENT_TRACE_MERGE_EXTENDED_DATA_EVENT_METADATA = 0x00000010;
+        private const uint EVENT_TRACE_MERGE_EXTENDED_DATA_NETWORK_INTERFACE = 0x00000040;
+
+        const uint DefaultMergeFlags =
+            EVENT_TRACE_MERGE_EXTENDED_DATA_IMAGEID |
+            EVENT_TRACE_MERGE_EXTENDED_DATA_BUILDINFO |
+            EVENT_TRACE_MERGE_EXTENDED_DATA_VOLUME_MAPPING |
+            EVENT_TRACE_MERGE_EXTENDED_DATA_EVENT_METADATA |
+            EVENT_TRACE_MERGE_EXTENDED_DATA_NETWORK_INTERFACE;
+
+        void MergeTraceFiles(string mergedFileName, string[] traceFiles)
+        {
+            // CreateMergedTraceFile 若目標檔案已存在，或來源 ETL 剛結束寫入、控制代碼尚未完全釋放，
+            // 常會回傳無法明確歸類的 ERROR_UNIDENTIFIED_ERROR (1287)。因此先清除舊的合併輸出檔，
+            // 並在失敗時短暫等待重試，以降低此類暫時性錯誤造成合併失敗的機率。
+            if (File.Exists(mergedFileName))
+            {
+                File.Delete(mergedFileName);
+            }
+
+            const int maxAttempts = 3;
+            int result = ERROR_SUCCESS_LOCAL;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                result = CreateMergedTraceFile(
+                    mergedFileName, traceFiles, (uint)traceFiles.Length, DefaultMergeFlags);
+
+                if (result == ERROR_SUCCESS_LOCAL)
+                {
+                    return;
+                }
+
+                if (attempt < maxAttempts)
+                {
+                    Thread.Sleep(500);
+                }
+            }
+
+            ThrowIfError(result, nameof(CreateMergedTraceFile));
+        }
+
+        const int ERROR_SUCCESS_LOCAL = 0;
 
         public List<(string Name, Guid ProviderGuid, bool IsMof)> GetRegisteredProviders()
         {
@@ -406,6 +541,9 @@ namespace QSoft.ETW
 
             Console.WriteLine($"共列舉出 {providers.Count} 個目前電腦上已註冊的 ETW Provider。");
         }
+
+        static readonly Guid SystemTraceControlGuid = new("9e814aad-3204-11d2-9a82-006008a86939");
+        const string KERNEL_LOGGER_NAME = "NT Kernel Logger";
 
         // PerfInfo Provider（EVENT_TRACE_FLAG_PROFILE 產生的 CPU 取樣事件）；Type 46 為 SampledProfile，
         // 用於 STACK_TRACING_EVENT_ID，讓取樣式效能分析事件附帶呼叫堆疊。
@@ -487,14 +625,6 @@ namespace QSoft.ETW
             public uint ProviderNameOffset;
         }
 
-        // TRACE_INFO_CLASS / TRACE_QUERY_INFO_CLASS（evntrace.h）。此處僅列出 TraceSetInformation 會用到的成員；
-        // 完整列舉定義與數值請參考 https://learn.microsoft.com/windows/win32/api/evntrace/ne-evntrace-trace_query_info_class 。
-        internal enum TRACE_INFO_CLASS : uint
-        {
-            TraceStackTracingInfo = 3,
-            TraceSystemTraceEnableFlagsInfo = 4,
-        }
-
         [StructLayout(LayoutKind.Sequential)]
         internal struct STACK_TRACING_EVENT_ID
         {
@@ -542,11 +672,11 @@ namespace QSoft.ETW
             uint timeout,
             in ENABLE_TRACE_PARAMETERS enableParameters);
 
-        [LibraryImport("advapi32.dll", EntryPoint = "TraceSetInformation")]
-        internal static partial int TraceSetInformation(ulong sessionHandle, TRACE_INFO_CLASS informationClass, in ulong traceInformation, uint informationLength);
+        [LibraryImport("KernelTraceControl.dll", EntryPoint = "StartKernelTrace")]
+        internal static partial int StartKernelTrace(out ulong sessionHandle, ref EVENT_TRACE_PROPERTIES properties, in STACK_TRACING_EVENT_ID stackTracingEventIds, uint stackTracingEventIdCount);
 
-        [LibraryImport("advapi32.dll", EntryPoint = "TraceSetInformation")]
-        internal static partial int TraceSetInformation(ulong sessionHandle, TRACE_INFO_CLASS informationClass, in STACK_TRACING_EVENT_ID traceInformation, uint informationLength);
+        [LibraryImport("KernelTraceControl.dll", EntryPoint = "CreateMergedTraceFile", StringMarshalling = StringMarshalling.Utf16)]
+        internal static partial int CreateMergedTraceFile(string mergedFileName, string[] traceFileNames, uint traceFileCount, uint extendedDataFlags);
 
         [LibraryImport("tdh.dll", EntryPoint = "TdhEnumerateProviders")]
         internal static partial uint TdhEnumerateProviders(byte[]? pBuffer, ref uint pBufferSize);
@@ -646,14 +776,14 @@ namespace QSoft.ETW
         public const ulong SystemMemoryVirtualAllocKeyword = 0x0000000000000400;
 
         internal KernelTraceFlags m_EnableFlags = KernelTraceFlags.None;
-        internal readonly List<TraceSession.ProviderConfiguration> m_UserProviders = [];
-        internal readonly List<TraceSession.ProviderConfiguration> m_SystemProviders = [];
+        internal readonly List<TraceSession_Legacy.ProviderConfiguration> m_UserProviders = [];
+        internal readonly List<TraceSession_Legacy.ProviderConfiguration> m_SystemProviders = [];
         internal string m_BaseDir = AppContext.BaseDirectory;
-        internal string? m_OutputFileName;
+        internal string? m_MergedFileName;
         internal bool m_EnableFileCompression;
 
         /// <summary>
-        /// Configures ETW to compress the ETL file while it is recorded.
+        /// Configures ETW to compress the kernel and user ETL files while they are recorded.
         /// </summary>
         /// <param name="enabled"><see langword="true"/> to enable compression; otherwise, <see langword="false"/>.</param>
         /// <returns>The current builder.</returns>
@@ -677,27 +807,25 @@ namespace QSoft.ETW
 
         public TraceSessionBuilder WithProvider(Guid guid)
         {
-            m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, 0xFFFFFFFFFFFFFFFF));
+            m_UserProviders.Add(new TraceSession_Legacy.ProviderConfiguration(guid, 0xFFFFFFFFFFFFFFFF));
             return this;
         }
 
         public TraceSessionBuilder WithProvider(Guid guid, ulong matchAnyKeyword)
         {
-            m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, matchAnyKeyword));
+            m_UserProviders.Add(new TraceSession_Legacy.ProviderConfiguration(guid, matchAnyKeyword));
             return this;
         }
 
         /// <summary>
-        /// Adds a System Provider. Since Windows 8, System Providers share the same unified Session/ETL file as
-        /// the Kernel flags and User Providers (via System Logger Mode), so this is now functionally equivalent to
-        /// <see cref="WithProvider(Guid, ulong)"/>; kept as a separate method purely for call-site clarity.
+        /// Adds a System Provider to the kernel system-logger session.
         /// </summary>
         /// <param name="guid">The System Provider GUID.</param>
         /// <param name="matchAnyKeyword">The System Provider keyword mask.</param>
         /// <returns>The current builder.</returns>
         public TraceSessionBuilder WithSystemProvider(Guid guid, ulong matchAnyKeyword)
         {
-            m_SystemProviders.Add(new TraceSession.ProviderConfiguration(guid, matchAnyKeyword));
+            m_SystemProviders.Add(new TraceSession_Legacy.ProviderConfiguration(guid, matchAnyKeyword));
             return this;
         }
 
@@ -705,17 +833,12 @@ namespace QSoft.ETW
         {
             foreach (Guid guid in guids)
             {
-                m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, 0));
+                m_UserProviders.Add(new TraceSession_Legacy.ProviderConfiguration(guid, 0));
             }
 
             return this;
         }
 
-        /// <summary>
-        /// Sets where the recorded ETL is written. If <paramref name="path"/> is (or looks like) a directory, only
-        /// the output directory is changed; if it is a file path, its directory becomes the output directory and
-        /// its file name becomes the recorded ETL's file name directly (no merge step is performed).
-        /// </summary>
         public TraceSessionBuilder WithOutputPath(string path)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -742,16 +865,16 @@ namespace QSoft.ETW
                 m_BaseDir = directory;
             }
 
-            m_OutputFileName = fileName;
+            m_MergedFileName = fileName;
             return this;
         }
 
-        public TraceSession Build() => new(
+        public TraceSession_Legacy Build() => new(
             m_EnableFlags,
             [.. m_UserProviders],
             [.. m_SystemProviders],
             m_BaseDir,
-            m_OutputFileName,
+            m_MergedFileName,
             m_EnableFileCompression);
     }
 }
