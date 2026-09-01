@@ -14,6 +14,133 @@ namespace WpfApp1
         private const int AddressBucketShift = 24;
         private const int CpuProfileResolutionBatchSize = 500;
 
+        private const string DropSecondaryIndexesSql = @"
+            DROP INDEX IF EXISTS IX_ImageLoads_ActiveImage;
+            DROP INDEX IF EXISTS IX_ImageLoads_ProcessRecord;
+            DROP INDEX IF EXISTS IX_Processes_ActiveProcess;
+            DROP INDEX IF EXISTS IX_ProcessMemoryCounters_ProcessRecordTimestamp;
+            DROP INDEX IF EXISTS IX_WmiActivityEvents_EventTimestamp;
+            DROP INDEX IF EXISTS IX_WmiActivityEvents_ProcessRecord;
+            DROP INDEX IF EXISTS IX_WmiActivityEvents_11_Namespace;
+            DROP INDEX IF EXISTS IX_WmiActivityEvents_24_Namespace;
+            DROP INDEX IF EXISTS IX_EnergyEstimationEngineEvents_ProcessTimestamp;
+            DROP INDEX IF EXISTS IX_EnergyEstimationEngine_33_Timestamp;
+            DROP INDEX IF EXISTS IX_EnergyEstimationEngine_18_Timestamp;
+            DROP INDEX IF EXISTS IX_EnergyEstimationEngine_14_Timestamp;
+            DROP INDEX IF EXISTS IX_EnergyEstimationEngine_35_Timestamp;
+            DROP INDEX IF EXISTS IX_KernelAcpiTemperatureNotifications_ProcessTimestamp;
+            DROP INDEX IF EXISTS IX_KernelAcpiAmlMethodTraces_ProcessTimestamp;
+            DROP INDEX IF EXISTS IX_KernelAcpiTemperatureChanges_ProcessTimestamp;
+            DROP INDEX IF EXISTS IX_KernelAcpiFrequentAmlMethods_ProcessTimestamp;
+            DROP INDEX IF EXISTS IX_ThreadEvents_ThreadTimestamp;
+            DROP INDEX IF EXISTS IX_ThreadEvents_ProcessRecord;
+            DROP INDEX IF EXISTS IX_CpuProfileSamples_Timestamp;
+            DROP INDEX IF EXISTS IX_CpuProfileSamples_ProcessRecordTimestamp;
+            DROP INDEX IF EXISTS IX_CpuProfileSamples_ProcessTimestamp;
+            DROP INDEX IF EXISTS IX_CpuProfileSamples_ImageLoad;
+            DROP INDEX IF EXISTS IX_ThreadLifetimes_ProcessRecordStarted;
+            DROP INDEX IF EXISTS IX_ThreadLifetimes_ThreadStarted;
+            DROP INDEX IF EXISTS IX_ThreadLifetimes_IsCompleteEnded;
+            DROP INDEX IF EXISTS IX_DpcEvents_RoutineTimestamp;
+            DROP INDEX IF EXISTS IX_DpcEvents_ProcessorTimestamp;
+            DROP INDEX IF EXISTS IX_InterruptEvents_RoutineTimestamp;
+            DROP INDEX IF EXISTS IX_InterruptEvents_ProcessorTimestamp;
+            DROP INDEX IF EXISTS IX_PowerMeterPollingEvents_4_MeterTimestamp;";
+
+        private const string CreateSecondaryIndexesSql = @"
+            CREATE INDEX IF NOT EXISTS IX_ImageLoads_ActiveImage
+            ON ImageLoads (ProcessId, ImageBase, UnloadedAtUtc, LoadedAtUtc DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_ImageLoads_ProcessRecord
+            ON ImageLoads (ProcessRecordId, LoadedAtUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_Processes_ActiveProcess
+            ON Processes (ProcessId, EndedAtUtc, StartedAtUtc DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_ProcessMemoryCounters_ProcessRecordTimestamp
+            ON ProcessMemoryCounters (ProcessRecordId, TimestampUtc DESC, ProcessMemoryCounterId DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_EventTimestamp
+            ON WmiActivityEvents (EventId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_ProcessRecord
+            ON WmiActivityEvents (ProcessRecordId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_11_Namespace
+            ON WmiActivityEvents_11 (NamespaceName, WmiActivityEventId);
+
+            CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_Namespace
+            ON WmiActivityEvents_24 (NamespaceName, WmiActivityEventId);
+
+            CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngineEvents_ProcessTimestamp
+            ON EnergyEstimationEngineEvents (ProcessId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_33_Timestamp
+            ON EnergyEstimationEngine_33 (TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_18_Timestamp
+            ON EnergyEstimationEngine_18 (TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_14_Timestamp
+            ON EnergyEstimationEngine_14 (TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_35_Timestamp
+            ON EnergyEstimationEngine_35 (TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_KernelAcpiTemperatureNotifications_ProcessTimestamp
+            ON KernelAcpiTemperatureNotifications (ProcessId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_KernelAcpiAmlMethodTraces_ProcessTimestamp
+            ON KernelAcpiAmlMethodTraces (ProcessId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_KernelAcpiTemperatureChanges_ProcessTimestamp
+            ON KernelAcpiTemperatureChanges (ProcessId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_KernelAcpiFrequentAmlMethods_ProcessTimestamp
+            ON KernelAcpiFrequentAmlMethods (ProcessId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ThreadTimestamp
+            ON ThreadEvents (ThreadId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ProcessRecord
+            ON ThreadEvents (ProcessRecordId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_Timestamp
+            ON CpuProfileSamples (TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ProcessRecordTimestamp
+            ON CpuProfileSamples (ProcessRecordId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ProcessTimestamp
+            ON CpuProfileSamples (ProcessId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ImageLoad
+            ON CpuProfileSamples (ImageLoadId, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_ProcessRecordStarted
+            ON ThreadLifetimes (ProcessRecordId, StartedAtUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_ThreadStarted
+            ON ThreadLifetimes (ThreadId, StartedAtUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_IsCompleteEnded
+            ON ThreadLifetimes (IsComplete, EndedAtUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_DpcEvents_RoutineTimestamp
+            ON DpcEvents (Routine, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_DpcEvents_ProcessorTimestamp
+            ON DpcEvents (ProcessorNumber, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_InterruptEvents_RoutineTimestamp
+            ON InterruptEvents (Routine, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_InterruptEvents_ProcessorTimestamp
+            ON InterruptEvents (ProcessorNumber, TimestampUtc);
+
+            CREATE INDEX IF NOT EXISTS IX_PowerMeterPollingEvents_4_MeterTimestamp
+            ON PowerMeterPollingEvents_4 (MeterId, TimestampUtc);";
+
         private SqliteConnection? _connection;
         private SqliteTransaction? _transaction;
         private int _batchedWriteCount;
@@ -84,7 +211,10 @@ namespace WpfApp1
                 command.CommandText =
                     @"PRAGMA journal_mode = WAL;
                       PRAGMA synchronous = OFF;
-                      PRAGMA foreign_keys = ON;
+                      PRAGMA foreign_keys = OFF;
+                      PRAGMA cache_size = -65536;
+                      PRAGMA temp_store = MEMORY;
+                      PRAGMA mmap_size = 268435456;
 
                       CREATE TABLE IF NOT EXISTS ImageLoads
                       (
@@ -101,12 +231,6 @@ namespace WpfApp1
                           UnloadedAtUtc INTEGER NULL
                       );
 
-                      CREATE INDEX IF NOT EXISTS IX_ImageLoads_ActiveImage
-                      ON ImageLoads (ProcessId, ImageBase, UnloadedAtUtc, LoadedAtUtc DESC);
-
-                      CREATE INDEX IF NOT EXISTS IX_ImageLoads_ProcessRecord
-                      ON ImageLoads (ProcessRecordId, LoadedAtUtc);
-
                       CREATE TABLE IF NOT EXISTS Processes
                       (
                           ProcessRecordId INTEGER PRIMARY KEY,
@@ -122,9 +246,6 @@ namespace WpfApp1
                           UNIQUE (ProcessId, StartedAtUtc)
                       );
 
-                      CREATE INDEX IF NOT EXISTS IX_Processes_ActiveProcess
-                       ON Processes (ProcessId, EndedAtUtc, StartedAtUtc DESC);
-
                       CREATE TABLE IF NOT EXISTS ProcessMemoryCounters
                       (
                           ProcessMemoryCounterId INTEGER PRIMARY KEY,
@@ -139,9 +260,6 @@ namespace WpfApp1
                           PrivateBytes INTEGER NOT NULL
                       );
 
-                      CREATE INDEX IF NOT EXISTS IX_ProcessMemoryCounters_ProcessRecordTimestamp
-                      ON ProcessMemoryCounters (ProcessRecordId, TimestampUtc DESC, ProcessMemoryCounterId DESC);
-
                        CREATE TABLE IF NOT EXISTS WmiActivityEvents
                        (
                            WmiActivityEventId INTEGER PRIMARY KEY,
@@ -153,12 +271,6 @@ namespace WpfApp1
                            ProcessId INTEGER NOT NULL,
                            ThreadId INTEGER NOT NULL
                        );
-
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_EventTimestamp
-                        ON WmiActivityEvents (EventId, TimestampUtc);
-
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_ProcessRecord
-                        ON WmiActivityEvents (ProcessRecordId, TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS WmiActivityEvents_11
                        (
@@ -175,9 +287,6 @@ namespace WpfApp1
                            NamespaceName TEXT NULL,
                            IsLocal INTEGER NOT NULL
                        );
-
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_11_Namespace
-                       ON WmiActivityEvents_11 (NamespaceName, WmiActivityEventId);
 
                        CREATE TABLE IF NOT EXISTS WmiActivityEvents_12
                        (
@@ -256,9 +365,6 @@ namespace WpfApp1
                            GroupOperationId INTEGER NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_24_Namespace
-                        ON WmiActivityEvents_24 (NamespaceName, WmiActivityEventId);
-
                        CREATE TABLE IF NOT EXISTS WmiActivityEvents_100
                        (
                            WmiActivityEventId INTEGER PRIMARY KEY REFERENCES WmiActivityEvents(WmiActivityEventId) ON DELETE CASCADE,
@@ -330,9 +436,6 @@ namespace WpfApp1
                            AttributedCPUEnergy INTEGER NOT NULL DEFAULT 0
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngineEvents_ProcessTimestamp
-                        ON EnergyEstimationEngineEvents (ProcessId, TimestampUtc);
-
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_33
                        (
                            EnergyEstimationEngine_33Id INTEGER PRIMARY KEY,
@@ -345,9 +448,6 @@ namespace WpfApp1
                            DeviceState INTEGER NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_33_Timestamp
-                       ON EnergyEstimationEngine_33 (TimestampUtc);
-
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_18
                        (
                            EnergyEstimationEngine_18Id INTEGER PRIMARY KEY,
@@ -358,9 +458,6 @@ namespace WpfApp1
                            Component INTEGER NOT NULL,
                            EnergyDelta TEXT NOT NULL
                        );
-
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_18_Timestamp
-                       ON EnergyEstimationEngine_18 (TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_14
                        (
@@ -374,9 +471,6 @@ namespace WpfApp1
                            LastBusyFrequency INTEGER NOT NULL,
                            Energy TEXT NOT NULL
                        );
-
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_14_Timestamp
-                       ON EnergyEstimationEngine_14 (TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS EnergyEstimationEngine_35
                        (
@@ -395,9 +489,6 @@ namespace WpfApp1
                            CurrActivationTotal INTEGER NOT NULL,
                            DeltaActivationTotal INTEGER NOT NULL
                        );
-
-                       CREATE INDEX IF NOT EXISTS IX_EnergyEstimationEngine_35_Timestamp
-                       ON EnergyEstimationEngine_35 (TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS KernelAcpiTemperatureNotifications
                        (
@@ -426,9 +517,6 @@ namespace WpfApp1
                            _CRT INTEGER NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiTemperatureNotifications_ProcessTimestamp
-                       ON KernelAcpiTemperatureNotifications (ProcessId, TimestampUtc);
-
                        CREATE TABLE IF NOT EXISTS KernelAcpiAmlMethodTraces
                        (
                            KernelAcpiAmlMethodTraceId INTEGER PRIMARY KEY,
@@ -444,9 +532,6 @@ namespace WpfApp1
                            AmlElapsedTime TEXT NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiAmlMethodTraces_ProcessTimestamp
-                       ON KernelAcpiAmlMethodTraces (ProcessId, TimestampUtc);
-
                        CREATE TABLE IF NOT EXISTS KernelAcpiTemperatureChanges
                        (
                            KernelAcpiTemperatureChangeId INTEGER PRIMARY KEY,
@@ -461,9 +546,6 @@ namespace WpfApp1
                            Temperature INTEGER NOT NULL
                        );
 
-                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiTemperatureChanges_ProcessTimestamp
-                       ON KernelAcpiTemperatureChanges (ProcessId, TimestampUtc);
-
                        CREATE TABLE IF NOT EXISTS KernelAcpiFrequentAmlMethods
                        (
                            KernelAcpiFrequentAmlMethodId INTEGER PRIMARY KEY,
@@ -477,9 +559,6 @@ namespace WpfApp1
                            AmlMethodName TEXT NOT NULL,
                            Frequency TEXT NOT NULL
                        );
-
-                       CREATE INDEX IF NOT EXISTS IX_KernelAcpiFrequentAmlMethods_ProcessTimestamp
-                       ON KernelAcpiFrequentAmlMethods (ProcessId, TimestampUtc);
 
                        CREATE TABLE IF NOT EXISTS ThreadEvents
                        (
@@ -506,12 +585,6 @@ namespace WpfApp1
                                CpuDurationTicks INTEGER NULL
                            );
 
-                       CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ThreadTimestamp
-                       ON ThreadEvents (ThreadId, TimestampUtc);
-
-                              CREATE INDEX IF NOT EXISTS IX_ThreadEvents_ProcessRecord
-                              ON ThreadEvents (ProcessRecordId, TimestampUtc);
-
                               CREATE TABLE IF NOT EXISTS CpuProfileSamples
                               (
                                   CpuProfileSampleId INTEGER PRIMARY KEY,
@@ -524,18 +597,6 @@ namespace WpfApp1
                                   InstructionPointer INTEGER NULL,
                                   ModuleRva INTEGER NULL
                               );
-
-                              CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_Timestamp
-                              ON CpuProfileSamples (TimestampUtc);
-
-                              CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ProcessRecordTimestamp
-                              ON CpuProfileSamples (ProcessRecordId, TimestampUtc);
-
-                              CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ProcessTimestamp
-                               ON CpuProfileSamples (ProcessId, TimestampUtc);
-
-                              CREATE INDEX IF NOT EXISTS IX_CpuProfileSamples_ImageLoad
-                              ON CpuProfileSamples (ImageLoadId, TimestampUtc);
 
                                CREATE TABLE IF NOT EXISTS ThreadLifetimes
                                (
@@ -554,15 +615,6 @@ namespace WpfApp1
                                    UNIQUE (ProcessId, ThreadId, StartedAtUtc)
                                );
 
-                               CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_ProcessRecordStarted
-                               ON ThreadLifetimes (ProcessRecordId, StartedAtUtc);
-
-                               CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_ThreadStarted
-                               ON ThreadLifetimes (ThreadId, StartedAtUtc);
-
-                               CREATE INDEX IF NOT EXISTS IX_ThreadLifetimes_IsCompleteEnded
-                               ON ThreadLifetimes (IsComplete, EndedAtUtc);
-
                                CREATE TABLE IF NOT EXISTS DpcEvents
                                (
                                    DpcEventId INTEGER PRIMARY KEY,
@@ -574,12 +626,6 @@ namespace WpfApp1
                                    InitialTime INTEGER NULL,
                                    Routine INTEGER NULL
                                );
-
-                               CREATE INDEX IF NOT EXISTS IX_DpcEvents_RoutineTimestamp
-                               ON DpcEvents (Routine, TimestampUtc);
-
-                               CREATE INDEX IF NOT EXISTS IX_DpcEvents_ProcessorTimestamp
-                               ON DpcEvents (ProcessorNumber, TimestampUtc);
 
                                CREATE TABLE IF NOT EXISTS InterruptEvents
                                (
@@ -595,27 +641,27 @@ namespace WpfApp1
                                    Vector INTEGER NULL
                                );
 
-                               CREATE INDEX IF NOT EXISTS IX_InterruptEvents_RoutineTimestamp
-                               ON InterruptEvents (Routine, TimestampUtc);
+                               CREATE TABLE IF NOT EXISTS PowerMeterPollingEvents_4
+                               (
+                                   PowerMeterPollingEvent4Id INTEGER PRIMARY KEY,
+                                   TimestampUtc TEXT NOT NULL,
+                                   EventId INTEGER NOT NULL,
+                                   Version INTEGER NOT NULL,
+                                   Opcode INTEGER NOT NULL,
+                                   MeterId TEXT NOT NULL,
+                                   AbsoluteEnergy INTEGER NOT NULL,
+                                   AbsoluteTime TEXT NOT NULL
+                               );";
 
-                               CREATE INDEX IF NOT EXISTS IX_InterruptEvents_ProcessorTimestamp
-                              ON InterruptEvents (ProcessorNumber, TimestampUtc);
-
-                              CREATE TABLE IF NOT EXISTS PowerMeterPollingEvents_4
-                              (
-                                  PowerMeterPollingEvent4Id INTEGER PRIMARY KEY,
-                                  TimestampUtc TEXT NOT NULL,
-                                  EventId INTEGER NOT NULL,
-                                  Version INTEGER NOT NULL,
-                                  Opcode INTEGER NOT NULL,
-                                  MeterId TEXT NOT NULL,
-                                  AbsoluteEnergy INTEGER NOT NULL,
-                                  AbsoluteTime TEXT NOT NULL
-                              );
-
-                              CREATE INDEX IF NOT EXISTS IX_PowerMeterPollingEvents_4_MeterTimestamp
-                              ON PowerMeterPollingEvents_4 (MeterId, TimestampUtc);";
                        command.ExecuteNonQuery();
+            }
+
+            using (SqliteCommand dropIndexesCommand = connection.CreateCommand())
+            {
+                // 寫入階段先移除次要索引(僅保留 PRIMARY KEY/UNIQUE)，等 Complete() 提交後再一次重建，
+                // 讓大量 INSERT 不必即時維護這些 B-tree(見 RebuildSecondaryIndexes)。
+                dropIndexesCommand.CommandText = DropSecondaryIndexesSql;
+                dropIndexesCommand.ExecuteNonQuery();
             }
 
             SqliteTransaction transaction = connection.BeginTransaction();
@@ -1236,7 +1282,20 @@ namespace WpfApp1
             //ResolveCpuProfileSampleProcesses();
             //ResolveCpuProfileSampleModules();
             _transaction?.Commit();
+            RebuildSecondaryIndexes();
             Close();
+        }
+
+        /// <summary>
+        /// Open() 為了加速大量 INSERT 已把次要索引砍掉(見 DropSecondaryIndexesSql)，
+        /// 資料全部提交後在這裡一次重建，讓 Reader 端(ProcessHierarchyReader 等)查詢時索引仍然齊全。
+        /// </summary>
+        private void RebuildSecondaryIndexes()
+        {
+            SqliteConnection connection = _connection ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = CreateSecondaryIndexesSql;
+            command.ExecuteNonQuery();
         }
 
         public void Fail()

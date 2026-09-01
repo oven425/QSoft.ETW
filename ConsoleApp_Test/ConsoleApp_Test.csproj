@@ -14,4 +14,12 @@
     <ProjectReference Include="..\QSoft.ETW\QSoft.ETW.csproj" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.EventTracing.Processing.All" Version="1.12.10" />
+  </ItemGroup>
+
 </Project>
