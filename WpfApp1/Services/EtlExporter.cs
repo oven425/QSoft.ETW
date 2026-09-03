@@ -2,17 +2,24 @@ using QSoft.ETW;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using WpfApp1.Models;
 
 namespace WpfApp1.Services;
 
-
-
-internal class SQLiteExport(DataBase_SQLite db)
+/// <summary>
+/// 將 <see cref="EtlFileReader"/> 解析出的事件寫入 SQLite。CSwitch 事件量極大,預設不再逐筆保留或輸出,
+/// 改用 <see cref="CSwitchBucketAggregator"/> 以固定時間桶(預設 100ms,可用 <paramref name="cSwitchBucketSize"/> 調整)
+/// 串流彙總後寫入 CSwitchThreadBuckets/CSwitchProcessorBuckets;需要逐筆明細做深度追查時,
+/// 可將 <paramref name="enableRawCSwitchCsv"/> 設為 true 另外輸出 .cswitch.csv。
+/// </summary>
+internal class SQLiteExport(DataBase_SQLite db, TimeSpan? cSwitchBucketSize = null, bool enableRawCSwitchCsv = false)
 {
-    public int UnmatchedCpuIntervalCount { get; private set; }
+    private readonly CSwitchBucketAggregator m_CSwitchAggregator = CreateCSwitchAggregator(db, cSwitchBucketSize);
 
-    public int IncompleteCpuIntervalCount { get; private set; }
+    public int UnmatchedCpuIntervalCount => m_CSwitchAggregator.UnmatchedCpuIntervalCount;
+
+    public int IncompleteCpuIntervalCount => m_CSwitchAggregator.IncompleteCpuIntervalCount;
 
     public void Export(EtlFileReader reader, string etlPath)
     {
@@ -38,20 +45,21 @@ internal class SQLiteExport(DataBase_SQLite db)
     protected virtual void BeginExport(string etlPath)
     {
         CloseCSwitchCsvWriter(deleteFile: true);
-        m_ThreadCSwitchs.Clear();
+        m_CSwitchAggregator.Reset();
         m_ThreadStartedAts.Clear();
         m_ThreadProcessIds.Clear();
         m_RunningThreadIdsByProcessor.Clear();
-        m_ProcessThreadCpuSummaries.Clear();
+        m_ProcessCpuAccumulators.Clear();
         m_ProcessStartedAts.Clear();
         m_LastEventTimestamp = null;
-        UnmatchedCpuIntervalCount = 0;
-        IncompleteCpuIntervalCount = 0;
 
-        m_CSwitchCsvPath = Path.ChangeExtension(etlPath, ".cswitch.csv");
-        FileStream stream = new(m_CSwitchCsvPath, FileMode.Create, FileAccess.Write, FileShare.Read, 64 * 1024, FileOptions.SequentialScan);
-        m_CSwitchCsvWriter = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 64 * 1024);
-        m_CSwitchCsvWriter.WriteLine("TimestampUtc,ProcessorNumber,NewThreadId,OldThreadId,NewProcessId,OldProcessId,NewThreadPriority,OldThreadPriority,PreviousCState,OldThreadWaitReason,OldThreadWaitMode,OldThreadState,OldThreadWaitIdealProcessor,NewThreadWaitTime");
+        if (enableRawCSwitchCsv)
+        {
+            m_CSwitchCsvPath = Path.ChangeExtension(etlPath, ".cswitch.csv");
+            FileStream stream = new(m_CSwitchCsvPath, FileMode.Create, FileAccess.Write, FileShare.Read, 64 * 1024, FileOptions.SequentialScan);
+            m_CSwitchCsvWriter = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 64 * 1024);
+            m_CSwitchCsvWriter.WriteLine("TimestampUtc,ProcessorNumber,NewThreadId,OldThreadId,NewProcessId,OldProcessId,NewThreadPriority,OldThreadPriority,PreviousCState,OldThreadWaitReason,OldThreadWaitMode,OldThreadState,OldThreadWaitIdealProcessor,NewThreadWaitTime");
+        }
     }
 
     protected virtual void CompleteExport()
@@ -74,11 +82,10 @@ internal class SQLiteExport(DataBase_SQLite db)
         }
     }
 
-    private readonly Dictionary<uint, List<CSwitchEventInfo>> m_ThreadCSwitchs = [];
     private readonly Dictionary<uint, DateTime> m_ThreadStartedAts = [];
     private readonly Dictionary<uint, uint> m_ThreadProcessIds = [];
     private readonly Dictionary<byte, uint> m_RunningThreadIdsByProcessor = [];
-    private readonly Dictionary<uint, List<ThreadCpuSummary>> m_ProcessThreadCpuSummaries = [];
+    private readonly Dictionary<uint, ProcessCpuAccumulator> m_ProcessCpuAccumulators = [];
     private readonly Dictionary<uint, DateTime> m_ProcessStartedAts = [];
     private StreamWriter? m_CSwitchCsvWriter;
     private string? m_CSwitchCsvPath;
@@ -88,16 +95,12 @@ internal class SQLiteExport(DataBase_SQLite db)
     {
         TrackEventTimestamp(data.Timestamp);
         m_RunningThreadIdsByProcessor[data.ProcessorNumber] = data.NewThreadId;
-        WriteCSwitchCsvRow(data);
-        if (m_ThreadCSwitchs.TryGetValue(data.OldThreadId, out List<CSwitchEventInfo>? threadCSwitchs))
+        if (enableRawCSwitchCsv)
         {
-            threadCSwitchs.Add(data);
+            WriteCSwitchCsvRow(data);
         }
 
-        if (m_ThreadCSwitchs.TryGetValue(data.NewThreadId, out List<CSwitchEventInfo>? threadCSwitchs1))
-        {
-            threadCSwitchs1.Add(data);
-        }
+        m_CSwitchAggregator.OnCSwitch(in data);
     }
 
     private void WriteCSwitchCsvRow(in CSwitchEventInfo data)
@@ -161,7 +164,7 @@ internal class SQLiteExport(DataBase_SQLite db)
     {
         TrackEventTimestamp(data.Timestamp);
         db.WriteThreadEvent(in data);
-        m_ThreadCSwitchs[data.ThreadId] = [];
+        m_CSwitchAggregator.RegisterThread(data.ThreadId, data.ProcessId);
         m_ThreadStartedAts[data.ThreadId] = data.Timestamp;
         m_ThreadProcessIds[data.ThreadId] = data.ProcessId;
     }
@@ -169,27 +172,20 @@ internal class SQLiteExport(DataBase_SQLite db)
     protected virtual void OnThreadStop(in ThreadStartStopEventInfo data)
     {
         TrackEventTimestamp(data.Timestamp);
-        m_ThreadCSwitchs.Remove(data.ThreadId, out List<CSwitchEventInfo>? threadCSwitchs);
+        ThreadCpuUsage? cpuUsage = m_CSwitchAggregator.CloseThread(data.ThreadId, data.Timestamp);
         bool hasThreadStartedAt = m_ThreadStartedAts.Remove(data.ThreadId, out DateTime threadStartedAt);
         m_ThreadProcessIds.Remove(data.ThreadId);
-        ThreadCpuSummary? cpuSummary = threadCSwitchs is null
-            ? null
-            : CreateCpuSummary(
-                data.ThreadId,
-                hasThreadStartedAt ? threadStartedAt : null,
-                data.Timestamp,
-                threadCSwitchs);
 
-        if (cpuSummary is ThreadCpuSummary summary)
+        if (cpuUsage is ThreadCpuUsage usage && usage.DurationTicks is long durationTicks)
         {
-            AddProcessThreadCpuSummary(data.ProcessId, summary);
+            AddProcessThreadCpuUsage(data.ProcessId, durationTicks);
         }
 
         db.WriteThreadEvent(
             in data,
-            cpuSummary?.StartedAt,
-            cpuSummary?.EndedAt,
-            cpuSummary?.DurationTicks);
+            cpuUsage?.StartedAt,
+            cpuUsage?.EndedAt,
+            cpuUsage?.DurationTicks);
 
         if (hasThreadStartedAt)
         {
@@ -198,8 +194,7 @@ internal class SQLiteExport(DataBase_SQLite db)
                 data.ThreadId,
                 threadStartedAt,
                 data.Timestamp,
-                cpuSummary,
-                threadCSwitchs,
+                cpuUsage,
                 isComplete: true);
         }
     }
@@ -239,21 +234,13 @@ internal class SQLiteExport(DataBase_SQLite db)
 
         foreach (uint threadId in activeThreadIds)
         {
-            m_ThreadCSwitchs.Remove(threadId, out List<CSwitchEventInfo>? threadCSwitchs);
+            ThreadCpuUsage? cpuUsage = m_CSwitchAggregator.CloseThread(threadId, processStoppedAt);
             bool hasThreadStartedAt = m_ThreadStartedAts.Remove(threadId, out DateTime threadStartedAt);
             m_ThreadProcessIds.Remove(threadId);
 
-            ThreadCpuSummary? threadCpuSummary = threadCSwitchs is null
-                ? null
-                : CreateCpuSummary(
-                    threadId,
-                    hasThreadStartedAt ? threadStartedAt : null,
-                    processStoppedAt,
-                    threadCSwitchs);
-
-            if (threadCpuSummary is ThreadCpuSummary summary)
+            if (cpuUsage is ThreadCpuUsage usage && usage.DurationTicks is long durationTicks)
             {
-                AddProcessThreadCpuSummary(process.ProcessId, summary);
+                AddProcessThreadCpuUsage(process.ProcessId, durationTicks);
             }
 
             if (hasThreadStartedAt)
@@ -263,14 +250,13 @@ internal class SQLiteExport(DataBase_SQLite db)
                     threadId,
                     threadStartedAt,
                     processStoppedAt,
-                    threadCpuSummary,
-                    threadCSwitchs,
+                    cpuUsage,
                     isComplete: false);
             }
         }
 
-        m_ProcessThreadCpuSummaries.Remove(process.ProcessId, out List<ThreadCpuSummary>? threadCpuSummaries);
-        ProcessCpuSummary? cpuSummary = CreateProcessCpuSummary(processStartedAt, processStoppedAt, threadCpuSummaries);
+        m_ProcessCpuAccumulators.Remove(process.ProcessId, out ProcessCpuAccumulator? accumulator);
+        ProcessCpuSummary? cpuSummary = CreateProcessCpuSummary(processStartedAt, processStoppedAt, accumulator);
         db.WriteProcessStop(process, processStartedAt, cpuSummary?.DurationTicks, cpuSummary?.CpuUsagePercent);
     }
 
@@ -372,14 +358,6 @@ internal class SQLiteExport(DataBase_SQLite db)
         db.WriteWmiActivity(in data);
     }
 
-    protected virtual void OnProfile(ProfileEventInfo data)
-    {
-        TrackEventTimestamp(data.Timestamp);
-        uint sampledThreadId = m_RunningThreadIdsByProcessor.GetValueOrDefault(data.ProcessorNumber, data.ThreadId);
-        uint sampledProcessId = m_ThreadProcessIds.GetValueOrDefault(sampledThreadId, data.ProcessId);
-        db.WriteCpuProfileSample(data, sampledProcessId, sampledThreadId);
-    }
-
     private void OnPowerMeterPollingEvent_4(in PowerMeterPollingEventInfo_4 data)
     {
         TrackEventTimestamp(data.Timestamp);
@@ -446,7 +424,6 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.EnergyEstimationEngine_18 += OnEnergyEstimationEngine_18;
         reader.EnergyEstimationEngine_33 += OnEnergyEstimationEngine_33;
         reader.EnergyEstimationEngine_35 += OnEnergyEstimationEngine_35;
-        reader.PerfInfoProfile += OnProfile;
         reader.PowerMeterPollingEventInfo_4 += OnPowerMeterPollingEvent_4;
         reader.KernelAcpiTemperatureNotification += OnKernelAcpiTemperatureNotification;
         reader.KernelAcpiAmlMethodTrace += OnKernelAcpiAmlMethodTrace;
@@ -519,7 +496,6 @@ internal class SQLiteExport(DataBase_SQLite db)
         reader.EnergyEstimationEngine_33 -= OnEnergyEstimationEngine_33;
         reader.EnergyEstimationEngine_35 -= OnEnergyEstimationEngine_35;
         reader.ImageDCStart -= OnImageLoad;
-        reader.PerfInfoProfile -= OnProfile;
         reader.PowerMeterPollingEventInfo_4 -= OnPowerMeterPollingEvent_4;
         reader.KernelAcpiTemperatureNotification -= OnKernelAcpiTemperatureNotification;
         reader.KernelAcpiAmlMethodTrace -= OnKernelAcpiAmlMethodTrace;
@@ -537,31 +513,30 @@ internal class SQLiteExport(DataBase_SQLite db)
 
         foreach ((uint threadId, uint processId) in activeThreads)
         {
-            m_ThreadCSwitchs.Remove(threadId, out List<CSwitchEventInfo>? threadCSwitchs);
             bool hasThreadStartedAt = m_ThreadStartedAts.Remove(threadId, out DateTime threadStartedAt);
             m_ThreadProcessIds.Remove(threadId);
 
             if (!hasThreadStartedAt)
             {
+                m_CSwitchAggregator.CloseThread(threadId, m_LastEventTimestamp ?? DateTime.UtcNow);
                 continue;
             }
 
             DateTime endedAt = m_LastEventTimestamp is DateTime lastEventTimestamp && lastEventTimestamp >= threadStartedAt
                 ? lastEventTimestamp
                 : threadStartedAt;
-            ThreadCpuSummary? cpuSummary = threadCSwitchs is null
-                ? null
-                : CreateCpuSummary(threadId, threadStartedAt, endedAt, threadCSwitchs);
+            ThreadCpuUsage? cpuUsage = m_CSwitchAggregator.CloseThread(threadId, endedAt);
 
             WriteThreadLifetime(
                 processId,
                 threadId,
                 threadStartedAt,
                 endedAt,
-                cpuSummary,
-                threadCSwitchs,
+                cpuUsage,
                 isComplete: false);
         }
+
+        m_CSwitchAggregator.FlushRemainingProcessorBuckets();
     }
 
     private void WriteThreadLifetime(
@@ -569,8 +544,7 @@ internal class SQLiteExport(DataBase_SQLite db)
         uint threadId,
         DateTime startedAt,
         DateTime endedAt,
-        ThreadCpuSummary? cpuSummary,
-        List<CSwitchEventInfo>? threadCSwitchs,
+        ThreadCpuUsage? cpuUsage,
         bool isComplete)
     {
         db.WriteThreadLifetime(
@@ -578,13 +552,12 @@ internal class SQLiteExport(DataBase_SQLite db)
             threadId,
             startedAt,
             endedAt,
-            cpuSummary?.StartedAt,
-            cpuSummary?.EndedAt,
-            cpuSummary?.DurationTicks,
-            threadCSwitchs?.Count ?? 0,
+            cpuUsage?.StartedAt,
+            cpuUsage?.EndedAt,
+            cpuUsage?.DurationTicks,
+            cpuUsage?.ContextSwitchCount ?? 0,
             isComplete,
-            "");
-            //JsonSerializer.Serialize(threadCSwitchs ?? []));
+            ""); // 逐筆 CSwitch 明細已改由 CSwitchThreadBuckets/CSwitchProcessorBuckets 分桶保存,此欄位不再使用。
     }
 
     private void TrackEventTimestamp(DateTime timestamp)
@@ -596,124 +569,72 @@ internal class SQLiteExport(DataBase_SQLite db)
     }
 
 
-    private ThreadCpuSummary? CreateCpuSummary(
-        uint threadId,
-        DateTime? threadStartedAt,
-        DateTime threadStoppedAt,
-        List<CSwitchEventInfo> threadCSwitchs)
+    private void AddProcessThreadCpuUsage(uint processId, long durationTicks)
     {
-        Dictionary<byte, DateTime> startedAtByProcessor = [];
-        DateTime? cpuStartedAt = null;
-        DateTime? cpuEndedAt = null;
-        long durationTicks = 0;
-
-        foreach (CSwitchEventInfo cSwitch in threadCSwitchs)
+        if (!m_ProcessCpuAccumulators.TryGetValue(processId, out ProcessCpuAccumulator? accumulator))
         {
-            if (cSwitch.NewThreadId == threadId)
-            {
-                if (!startedAtByProcessor.TryAdd(cSwitch.ProcessorNumber, cSwitch.Timestamp))
-                {
-                    IncompleteCpuIntervalCount++;
-                    startedAtByProcessor[cSwitch.ProcessorNumber] = cSwitch.Timestamp;
-                }
-            }
-
-            if (cSwitch.OldThreadId == threadId)
-            {
-                if (startedAtByProcessor.Remove(cSwitch.ProcessorNumber, out DateTime startedAt) &&
-                    cSwitch.Timestamp >= startedAt)
-                {
-                    AddCpuInterval(startedAt, cSwitch.Timestamp, ref cpuStartedAt, ref cpuEndedAt, ref durationTicks);
-                }
-                else
-                {
-                    UnmatchedCpuIntervalCount++;
-                }
-            }
+            accumulator = new ProcessCpuAccumulator();
+            m_ProcessCpuAccumulators.Add(processId, accumulator);
         }
 
-        foreach (DateTime startedAt in startedAtByProcessor.Values)
-        {
-            if (threadStoppedAt >= startedAt)
-            {
-                AddCpuInterval(startedAt, threadStoppedAt, ref cpuStartedAt, ref cpuEndedAt, ref durationTicks);
-            }
-            else
-            {
-                UnmatchedCpuIntervalCount++;
-            }
-        }
-
-        if (cpuStartedAt is null)
-        {
-            return null;
-        }
-
-        long lifetimeTicks = threadStartedAt is null ? 0 : (threadStoppedAt - threadStartedAt.Value).Ticks;
-        double cpuUsagePercent = lifetimeTicks > 0
-            ? durationTicks * 100.0 / lifetimeTicks
-            : 0;
-
-        return new ThreadCpuSummary(
-            cpuStartedAt.Value,
-            cpuEndedAt!.Value,
-            durationTicks,
-            cpuUsagePercent);
+        accumulator.TotalDurationTicks = checked(accumulator.TotalDurationTicks + durationTicks);
+        accumulator.ThreadCount++;
     }
-
-    private static void AddCpuInterval(
-        DateTime startedAt,
-        DateTime endedAt,
-        ref DateTime? cpuStartedAt,
-        ref DateTime? cpuEndedAt,
-        ref long durationTicks)
-    {
-        cpuStartedAt = cpuStartedAt is null || startedAt < cpuStartedAt ? startedAt : cpuStartedAt;
-        cpuEndedAt = cpuEndedAt is null || endedAt > cpuEndedAt ? endedAt : cpuEndedAt;
-        durationTicks = checked(durationTicks + (endedAt - startedAt).Ticks);
-    }
-
-    private void AddProcessThreadCpuSummary(uint processId, in ThreadCpuSummary summary)
-    {
-        if (!m_ProcessThreadCpuSummaries.TryGetValue(processId, out List<ThreadCpuSummary>? summaries))
-        {
-            summaries = [];
-            m_ProcessThreadCpuSummaries.Add(processId, summaries);
-        }
-
-        summaries.Add(summary);
-    }
-
 
     private static ProcessCpuSummary? CreateProcessCpuSummary(
         DateTime processStartedAt,
         DateTime processStoppedAt,
-        List<ThreadCpuSummary>? threadCpuSummaries)
+        ProcessCpuAccumulator? accumulator)
     {
-        if (threadCpuSummaries is null || threadCpuSummaries.Count == 0)
+        if (accumulator is null || accumulator.ThreadCount == 0)
         {
             return null;
         }
 
-        long durationTicks = 0;
-        foreach (ThreadCpuSummary summary in threadCpuSummaries)
-        {
-            durationTicks = checked(durationTicks + summary.DurationTicks);
-        }
-
         long lifetimeTicks = (processStoppedAt - processStartedAt).Ticks;
         double cpuUsagePercent = lifetimeTicks > 0
-            ? durationTicks * 100.0 / lifetimeTicks
+            ? accumulator.TotalDurationTicks * 100.0 / lifetimeTicks
             : 0;
 
-        return new ProcessCpuSummary(durationTicks, cpuUsagePercent);
+        return new ProcessCpuSummary(accumulator.TotalDurationTicks, cpuUsagePercent);
     }
 
-    private readonly record struct ThreadCpuSummary(
-        DateTime StartedAt,
-        DateTime EndedAt,
-        long DurationTicks,
-        double CpuUsagePercent);
+    /// <summary>
+    /// 建立串流分桶彙總器,並將沖出的執行緒桶/CPU 核心桶事件直接接到 SQLite 寫入方法。
+    /// 使用 static 方法(只透過參數捕捉 db,不捕捉 this)可在主建構函式欄位初始設定式中安全呼叫。
+    /// </summary>
+    private static CSwitchBucketAggregator CreateCSwitchAggregator(DataBase_SQLite db, TimeSpan? bucketSize)
+    {
+        CSwitchBucketAggregator aggregator = new(bucketSize ?? TimeSpan.FromMilliseconds(100));
+        aggregator.ThreadBucketFlushed += bucket => db.WriteCSwitchThreadBucket(
+            bucket.ProcessId,
+            bucket.ThreadId,
+            bucket.BucketStartUtc,
+            bucket.BucketEndUtc,
+            bucket.SwitchInCount,
+            bucket.SwitchOutCount,
+            bucket.RunDurationTicks,
+            bucket.MinPriority,
+            bucket.MaxPriority,
+            bucket.IdealProcessorMismatchCount,
+            JsonSerializer.Serialize(bucket.WaitReasonHistogram));
+        aggregator.ProcessorBucketFlushed += bucket => db.WriteCSwitchProcessorBucket(
+            bucket.ProcessorNumber,
+            bucket.BucketStartUtc,
+            bucket.BucketEndUtc,
+            bucket.ContextSwitchCount,
+            bucket.DistinctThreadCount,
+            bucket.BusyDurationTicks,
+            bucket.IdleDurationTicks);
+        return aggregator;
+    }
+
+    private sealed class ProcessCpuAccumulator
+    {
+        public long TotalDurationTicks { get; set; }
+
+        public int ThreadCount { get; set; }
+    }
 
     private readonly record struct ProcessCpuSummary(long DurationTicks, double CpuUsagePercent);
 }

@@ -222,7 +222,8 @@
                     <TextBlock Grid.Row="0" Margin="0,0,0,6" Text="{Binding EnergyConsumerStatus}" TextWrapping="Wrap"/>
 
                     <DataGrid Grid.Row="1" ItemsSource="{Binding EnergyConsumers}" AutoGenerateColumns="False" IsReadOnly="True"
-                              CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal">
+                              CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                              RowDetailsVisibilityMode="VisibleWhenSelected">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="名稱" Binding="{Binding AppName}" Width="200">
                                 <DataGridTextColumn.ElementStyle>
@@ -245,6 +246,29 @@
                             <DataGridTextColumn Header="事件數" Binding="{Binding EventCount}" Width="70"/>
                             <DataGridTextColumn Header="實測比例" Binding="{Binding MeasuredRatio, StringFormat={}{0:P0}}" Width="80"/>
                         </DataGrid.Columns>
+                        <DataGrid.RowDetailsTemplate>
+                            <DataTemplate DataType="{x:Type models:EnergyConsumerSummary}">
+                                <StackPanel Margin="24,4,4,4">
+                                    <TextBlock Margin="0,0,0,4" TextWrapping="Wrap" FontStyle="Italic"
+                                               Text="Display 能耗成因分解：依前景/可見/最小化狀態拆解。若能耗集中在 Focus/Visible 且螢幕開啟比例接近 100%，代表主因是「畫面長時間顯示」的正常時間成本；若 Minimized 狀態下仍有能耗，可能是背景阻止螢幕休眠或視窗殘留可見狀態的異常，值得深查。"/>
+                                    <DataGrid ItemsSource="{Binding InteractivityBreakdown}" MaxHeight="200" AutoGenerateColumns="False"
+                                              IsReadOnly="True" CanUserSortColumns="True" CanUserAddRows="False"
+                                              GridLinesVisibility="Horizontal" HeadersVisibility="Column">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="互動狀態" Binding="{Binding InteractivityState}" Width="150"/>
+                                            <DataGridTextColumn Header="事件數" Binding="{Binding EventCount}" Width="70"/>
+                                            <DataGridTextColumn Header="總時長(ms)" Binding="{Binding TotalTimeInMSec, StringFormat={}{0:N0}}" Width="100"/>
+                                            <DataGridTextColumn Header="Display能耗" Binding="{Binding TotalDisplayEnergy, StringFormat={}{0:N0}}" Width="100"/>
+                                            <DataGridTextColumn Header="CPU能耗" Binding="{Binding TotalCpuEnergy, StringFormat={}{0:N0}}" Width="90"/>
+                                            <DataGridTextColumn Header="GPU能耗" Binding="{Binding TotalGpuEnergy, StringFormat={}{0:N0}}" Width="90"/>
+                                            <DataGridTextColumn Header="螢幕開啟比例" Binding="{Binding MonitorOnRatio, StringFormat={}{0:P0}}" Width="95"/>
+                                            <DataGridTextColumn Header="前景比例" Binding="{Binding ForegroundRatio, StringFormat={}{0:P0}}" Width="80"/>
+                                            <DataGridTextColumn Header="Display實測比例" Binding="{Binding DisplayMeasuredRatio, StringFormat={}{0:P0}}" Width="105"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGrid.RowDetailsTemplate>
                     </DataGrid>
 
                     <TextBlock Grid.Row="2" Margin="0,8,0,4" Text="{Binding EnergyAccuracyStatus}" TextWrapping="Wrap"/>

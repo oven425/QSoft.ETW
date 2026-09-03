@@ -1035,18 +1035,24 @@ public readonly record struct EnergyEstimationEngineEventInfo_37
     public ulong ForInternalUse { get; init; }
 
     /// <summary>
-    /// 位元旗標(map=mapDeviceState):0x1=DC(使用電池)、0x2=MonitorOn(螢幕開啟)、
+    /// 位元旗標(map=mapDeviceState,已用本機 TdhGetEventMapInformation 對 eeprov.dll manifest 驗證無誤):
+    /// 0x1=DC(使用電池)、0x2=MonitorOn(螢幕開啟)、
     /// 0x4=EnergySaver(省電模式)、0x8=LPE(深度低電力狀態)、0x10=Foreground(前景)、0x80=Container。
     /// </summary>
     public uint RecordFlags { get; init; }
 
     /// <summary>
-    /// 位元旗標(map=mapRecordMeasured),標示本筆記錄中哪些能耗分量是「硬體實測」而非估算:
-    /// 0x1=Metadata、0x2=MetadataExt、0x4=Loss、0x8=CPU、0x10=SOC、0x20=Display。
+    /// 位元旗標(map=mapRecordMeasured),標示本筆記錄中哪些能耗分量是「硬體實測」而非估算。
+    /// 已用本機 TdhGetEventMapInformation 對 eeprov.dll manifest 驗證,mapRecordMeasured 實際共 12 個位元:
+    /// 0x1=Metadata、0x2=MetadataExt、0x4=Loss、0x8=CPU、0x10=SOC、0x20=Display、
+    /// 0x40=Disk、0x80=Network、0x100=MBB、0x200=Other、0x400=Internal、0x800=EMI。
     /// </summary>
     public uint RecordMeasured { get; init; }
 
-    /// <summary>應用程式互動狀態(map=mapAppInteractivityState):0=NotUnique、1=Minimized、2=Visible、3=Focus。</summary>
+    /// <summary>
+    /// 應用程式互動狀態(map=mapAppInteractivityState,已用本機 TdhGetEventMapInformation 驗證無誤):
+    /// 0=NotUnique、1=Minimized、2=Visible、3=Focus。
+    /// </summary>
     public uint InteractivityState { get; init; }
 
     /// <summary>本次能耗記錄是否已提交/認可(非 0 表示已提交)。</summary>
@@ -1224,38 +1230,38 @@ public sealed class EtlFileReader
     private readonly Dictionary<SchemaKey, nint> s_schemaCache = [];
     private readonly Dictionary<SchemaKey, CachedSchema?> s_cachedSchemaCache = [];
 
-    // === 即時關聯引擎（Correlation Engine）===
-    // 目的：在 ProcessFile() 單次序列掃描 ETL 的過程中，訂閱自身觸發的 C# 事件，即時建立下列對照表，
-    // 讓 ProcessFile() 執行完成後可直接透過 Result 屬性取得「已關聯好」的物件圖，
-    // 不需要呼叫端自行配對 CSwitch、反查模組——概念上對應 TraceProcessor 的 trace.Process() + IPendingResult&lt;T&gt;.Result。
-    // 實作手法參考自 WpfApp1/Services/EtlExporter.cs(SQLiteExport)已驗證過的作法，
-    // 差別是這裡把結果留在記憶體物件圖，而不是寫進 SQLite。
-    private readonly Dictionary<uint, ProcessRecord> _activeProcessesByPid = [];
-    private readonly Dictionary<uint, uint> _threadToProcess = [];
-    private readonly Dictionary<byte, uint> _runningThreadByProcessor = [];
-    private readonly Dictionary<uint, (byte ProcessorNumber, DateTime StartedAt)> _threadRunStart = [];
-    private readonly Dictionary<uint, EtlProcessCpuSummary> _processCpuSummaries = [];
-    private readonly Dictionary<uint, List<ModuleInfo>> _modulesByProcessId = [];
-    private readonly List<ModuleInfo> _allModulesLoadOrder = [];
-    private readonly Dictionary<ulong, AddressSampleSummary> _profileHotspots = [];
-    private readonly Dictionary<ulong, RoutineEventSummary> _dpcHotspots = [];
-    private readonly Dictionary<ulong, RoutineEventSummary> _interruptHotspots = [];
-    private int _unmatchedCpuIntervalCount;
-
-    public EtlFileReader()
-    {
-        AttachEngineHandlers();
-    }
+    /// <summary>
+    /// 掛上插件才會在 ProcessFile() 過程中執行插件對應的即時關聯／彙總工作(例如內建的 <see cref="EtlAnalysisPlugin"/>)。
+    /// 預設為空集合：ProcessFile() 只單純解析並派送原始事件，不做任何額外配對或彙總計算，
+    /// 適合單純轉存 SQLite 等不需要 <see cref="EtlReadResult.Analysis"/> 的情境；
+    /// 需要分析結果時可呼叫 <see cref="UseBuiltInAnalysis"/>，或自行實作 <see cref="IEtlReaderPlugin"/> 加入本集合。
+    /// </summary>
+    public IList<IEtlReaderPlugin> Plugins { get; } = [];
 
     /// <summary>ProcessFile() 期間實際從 ETW 消費掉的原始事件筆數(每筆 EVENT_RECORD 一次)，可用來評估解析效能(events/sec)。</summary>
     public long TotalEventCount => s_eventCount;
 
     /// <summary>
-    /// 呼叫 <see cref="ProcessFile"/> 完成後，取得已關聯好的整合結果
-    /// （程序清單、CPU 使用彙總、Profile/DPC/Interrupt 熱點...）。
+    /// 呼叫 <see cref="ProcessFile"/> 完成後，取得解析結果。
+    /// 是否含「已關聯好」的程序清單、CPU 使用彙總、Profile/DPC/Interrupt 熱點等資訊，
+    /// 取決於呼叫 ProcessFile() 前是否已透過 <see cref="Plugins"/>(或 <see cref="UseBuiltInAnalysis"/>)掛上對應插件；
+    /// 未掛任何插件時，這些欄位會維持空集合、<see cref="EtlReadResult.Analysis"/> 則維持 null。
     /// 概念上對應 TraceProcessor 的 IPendingResult&lt;T&gt;.Result：在 ProcessFile() 完成前存取會抛例外。
     /// </summary>
     public EtlReadResult Result => _readResult ?? throw new InvalidOperationException("尚未呼叫 ProcessFile()，無法取得解析結果。");
+
+    /// <summary>
+    /// 掛上內建的即時關聯分析插件(<see cref="EtlAnalysisPlugin"/>)：讓 ProcessFile() 完成後，
+    /// <see cref="Result"/> 額外含有已關聯好的程序清單、CPU 使用彙總、Profile/DPC/Interrupt 熱點
+    /// 與 <see cref="EtlReadResult.Analysis"/>，概念上對應 TraceProcessor 的 trace.Process() +
+    /// IPendingResult&lt;T&gt;.Result。單純轉存 SQLite 等情境不需要呼叫本方法。
+    /// </summary>
+    public EtlAnalysisPlugin UseBuiltInAnalysis()
+    {
+        var plugin = new EtlAnalysisPlugin();
+        Plugins.Add(plugin);
+        return plugin;
+    }
 
     public unsafe void ProcessFile(string etlFilePath)
     {
@@ -1268,7 +1274,6 @@ public sealed class EtlFileReader
         s_eventCount = 0;
         s_schemaCache.Clear();
         s_cachedSchemaCache.Clear();
-        ResetEngineState();
         _readResult = new EtlReadResult();
 
         nint logFileNamePtr = 0;
@@ -1277,6 +1282,11 @@ public sealed class EtlFileReader
 
         try
         {
+            foreach (IEtlReaderPlugin plugin in Plugins)
+            {
+                plugin.Attach(this, _readResult);
+            }
+
             logFileNamePtr = Marshal.StringToHGlobalUni(etlFilePath);
             readerHandle = GCHandle.Alloc(this);
 
@@ -1322,12 +1332,18 @@ public sealed class EtlFileReader
 
             _readResult.EventsLost = logfile.EventsLost;
 
-            
-            _readResult.Analysis = Analyze(_readResult);
-            //return _readResult!;
+            foreach (IEtlReaderPlugin plugin in Plugins)
+            {
+                plugin.Complete(_readResult);
+            }
         }
         finally
         {
+            foreach (IEtlReaderPlugin plugin in Plugins)
+            {
+                plugin.Detach(this);
+            }
+
             if (traceHandle != EtwNativeConstants.InvalidProcessTraceHandle)
             {
                 NativeMethods.CloseTrace(traceHandle);
@@ -2546,6 +2562,25 @@ public sealed class EtlFileReader
         }
     }
 
+    /// <summary>
+    /// 依序嘗試多個候選欄位名稱,回傳第一個「目前事件 schema 中實際存在」的欄位值。
+    /// 用途:同一個資料槽位在不同 Event 版本間改過名稱時(例如 Event 37 的 SoC/GPU 能耗欄位,
+    /// Version 0/1 稱為 SocEnergy,Version 2 改名為 GpuEnergy,已用本機 TDH manifest 驗證),
+    /// 避免因為寫死單一名稱查詢,導致舊版本事件的數值被靜默讀成預設值。
+    /// </summary>
+    private static unsafe T GetRawPropertyAny<T>(EVENT_RECORD* eventRecordPtr, CachedSchema cache, T defaultvalue, params string[] propertyNames) where T : unmanaged
+    {
+        foreach (string propertyName in propertyNames)
+        {
+            if (cache.Properties.ContainsKey(propertyName))
+            {
+                return GetRawProperty(eventRecordPtr, propertyName, cache, defaultvalue);
+            }
+        }
+
+        return defaultvalue;
+    }
+
     private static unsafe ulong GetRawPointerProperty(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, ulong defaultvalue = default)
     {
         if (!cache.Properties.ContainsKey(propertyName))
@@ -2757,7 +2792,7 @@ public sealed class EtlFileReader
             ThreadId = eventRecordPtr->EventHeader.ThreadId,
             AppName = GetRawPropertyString(eventRecordPtr, "AppName", cache, ""),
             CpuEnergy = GetRawProperty<ulong>(eventRecordPtr, "CpuEnergy", cache),
-            GpuEnergy = GetRawProperty<ulong>(eventRecordPtr, "GpuEnergy", cache),
+            GpuEnergy = GetRawPropertyAny<ulong>(eventRecordPtr, cache, 0, "GpuEnergy", "SocEnergy"),
             DiskEnergy = GetRawProperty<ulong>(eventRecordPtr, "DiskEnergy", cache),
             DisplayEnergy = GetRawProperty<ulong>(eventRecordPtr, "DisplayEnergy", cache),
             NetworkEnergy = GetRawProperty<ulong>(eventRecordPtr, "NetworkEnergy", cache),
@@ -3312,409 +3347,5 @@ public sealed class EtlFileReader
                 ? Marshal.PtrToStringUni(userData + fileNameOffset) ?? string.Empty
                 : string.Empty,
         };
-    }
-
-    private void ResetEngineState()
-    {
-        _activeProcessesByPid.Clear();
-        _threadToProcess.Clear();
-        _runningThreadByProcessor.Clear();
-        _threadRunStart.Clear();
-        _processCpuSummaries.Clear();
-        _modulesByProcessId.Clear();
-        _allModulesLoadOrder.Clear();
-        _profileHotspots.Clear();
-        _dpcHotspots.Clear();
-        _interruptHotspots.Clear();
-        _unmatchedCpuIntervalCount = 0;
-    }
-
-    /// <summary>
-    /// 於建構函式訂閱自身公開事件一次即可：ThreadCSwitch 的解析僅在有人訂閱時才會啟用(見 OnEventRecord)，
-    /// 訂閱後即自動開始解析，不需要額外修改既有的事件分派程式碼。
-    /// </summary>
-    private void AttachEngineHandlers()
-    {
-        ProcessStart += EngineOnProcessStart;
-        ProcessStop += EngineOnProcessStop;
-        ProcessTerminate += EngineOnProcessTerminate;
-        ThreadStart += EngineOnThreadStart;
-        ThreadDCStart += EngineOnThreadStart;
-        ThreadStop += EngineOnThreadStop;
-        ThreadDCStop += EngineOnThreadStop;
-        ImageLoad += EngineOnImageLoad;
-        ImageDCStart += EngineOnImageLoad;
-        ImageUnload += EngineOnImageUnload;
-        ThreadCSwitch += EngineOnCSwitch;
-        PerfInfoProfile += EngineOnProfile;
-        PerfInfoDPC += EngineOnDpc;
-        PerfInfoThreadedDPC += EngineOnDpc;
-        PerfInfoTimerDPC += EngineOnDpc;
-        PerfInfoISR += EngineOnInterrupt;
-    }
-
-    private void EngineOnProcessStart(in ProcessInfo info)
-    {
-        if (_activeProcessesByPid.TryGetValue(info.ProcessId, out ProcessRecord? existing) && existing.EndTime is null)
-        {
-            // 尚未觀察到對應的 Stop/Terminate 事件就又出現同一個 PID 的 Start，屬防禦性收尾(理論上不應發生，可能為 PID 重用)。
-            existing.EndTime = info.TimeStamp;
-        }
-
-        var record = new ProcessRecord
-        {
-            ProcessId = info.ProcessId,
-            ParentProcessId = info.ParentId,
-            StartTime = info.TimeStamp,
-            ImageFileName = info.ImageFileName,
-            CommandLine = info.CommandLine,
-        };
-
-        _activeProcessesByPid[info.ProcessId] = record;
-        _readResult!.Processes.Add(record);
-    }
-
-    private void EngineOnProcessStop(in ProcessInfo info) => CloseProcess(info.ProcessId, info.TimeStamp);
-
-    private void EngineOnProcessTerminate(in ProcessTerminateInfo info) => CloseProcess(info.ProcessId, info.TimeStamp);
-
-    /// <summary>
-    /// 程序結束時，強制收尾所有仍歸屬於它、但還沒收到 CSwitch(Old)/ThreadStop 的執行緒 CPU 區間，
-    /// 避免程序生命週期最後一段的 CPU 使用時間遺漏(對應 SQLiteExport.WriteIncompleteThreadLifetimes 的概念)。
-    /// </summary>
-    private void CloseProcess(uint processId, DateTime endTime)
-    {
-        _activeProcessesByPid.TryGetValue(processId, out ProcessRecord? record);
-
-        List<uint> orphanedThreadIds = [];
-        foreach ((uint threadId, uint ownerProcessId) in _threadToProcess)
-        {
-            if (ownerProcessId == processId)
-            {
-                orphanedThreadIds.Add(threadId);
-            }
-        }
-
-        foreach (uint threadId in orphanedThreadIds)
-        {
-            CloseRunningInterval(threadId, endTime);
-            _threadToProcess.Remove(threadId);
-        }
-
-        if (record is not null)
-        {
-            record.EndTime = endTime;
-            _activeProcessesByPid.Remove(processId);
-        }
-    }
-
-    private void EngineOnThreadStart(in ThreadStartStopEventInfo info)
-    {
-        _threadToProcess[info.ThreadId] = info.ProcessId;
-    }
-
-    private void EngineOnThreadStop(in ThreadStartStopEventInfo info)
-    {
-        CloseRunningInterval(info.ThreadId, info.Timestamp);
-        _threadToProcess.Remove(info.ThreadId);
-    }
-
-    private void EngineOnImageLoad(in ImageLoadEventInfo info)
-    {
-        if (info.ImageBase is not ulong imageBase || info.ImageSize is not ulong imageSize || imageSize == 0)
-        {
-            return;
-        }
-
-        var module = new ModuleInfo
-        {
-            ProcessId = info.ProcessId,
-            ImageBase = imageBase,
-            ImageSize = imageSize,
-            LoadTime = info.Timestamp,
-            FileName = info.FileName,
-        };
-
-        if (!_modulesByProcessId.TryGetValue(info.ProcessId, out List<ModuleInfo>? modules))
-        {
-            modules = [];
-            _modulesByProcessId[info.ProcessId] = modules;
-        }
-
-        modules.Add(module);
-        _allModulesLoadOrder.Add(module);
-
-        if (_activeProcessesByPid.TryGetValue(info.ProcessId, out ProcessRecord? owner))
-        {
-            owner.Modules.Add(module);
-        }
-        else
-        {
-            // 核心模式模組(驅動程式)或載入當下尚未觀察到對應 ProcessStart，保留在全域清單供 DPC/ISR 反解使用。
-            _readResult!.KernelModules.Add(module);
-        }
-    }
-
-    private void EngineOnImageUnload(in ImageLoadEventInfo info)
-    {
-        if (info.ImageBase is not ulong imageBase)
-        {
-            return;
-        }
-
-        if (_modulesByProcessId.TryGetValue(info.ProcessId, out List<ModuleInfo>? modules))
-        {
-            for (int i = modules.Count - 1; i >= 0; i--)
-            {
-                if (modules[i].ImageBase == imageBase && modules[i].UnloadTime is null)
-                {
-                    modules[i].UnloadTime = info.Timestamp;
-                    break;
-                }
-            }
-        }
-    }
-
-    private void EngineOnCSwitch(in CSwitchEventInfo data)
-    {
-        _runningThreadByProcessor[data.ProcessorNumber] = data.NewThreadId;
-
-        if (_threadRunStart.Remove(data.OldThreadId, out (byte ProcessorNumber, DateTime StartedAt) start) &&
-            start.ProcessorNumber == data.ProcessorNumber &&
-            data.Timestamp >= start.StartedAt)
-        {
-            AttributeCpuInterval(data.OldThreadId, data.ProcessorNumber, start.StartedAt, data.Timestamp, data.OldThreadWaitReason);
-        }
-        else if (_threadToProcess.ContainsKey(data.OldThreadId))
-        {
-            _unmatchedCpuIntervalCount++;
-        }
-
-        _threadRunStart[data.NewThreadId] = (data.ProcessorNumber, data.Timestamp);
-
-        if (_threadToProcess.TryGetValue(data.NewThreadId, out uint newOwnerProcessId))
-        {
-            GetOrCreateProcessCpuSummary(newOwnerProcessId).ScheduledCount++;
-        }
-    }
-
-    private void CloseRunningInterval(uint threadId, DateTime endTime)
-    {
-        if (_threadRunStart.Remove(threadId, out (byte ProcessorNumber, DateTime StartedAt) start) && endTime >= start.StartedAt)
-        {
-            AttributeCpuInterval(threadId, start.ProcessorNumber, start.StartedAt, endTime, oldThreadWaitReason: null);
-        }
-    }
-
-    private void AttributeCpuInterval(uint threadId, byte processorNumber, DateTime startedAt, DateTime endedAt, int? oldThreadWaitReason)
-    {
-        if (!_threadToProcess.TryGetValue(threadId, out uint ownerProcessId))
-        {
-            return;
-        }
-
-        TimeSpan duration = endedAt - startedAt;
-        EtlProcessCpuSummary summary = GetOrCreateProcessCpuSummary(ownerProcessId);
-        summary.EstimatedExecutionTime += duration;
-        summary.DescheduledCount++;
-        summary.ExecutionTimeByProcessor[processorNumber] =
-            summary.ExecutionTimeByProcessor.GetValueOrDefault(processorNumber) + duration;
-        summary.Samples.Add(new EtlTimedSample(startedAt, duration.TotalMilliseconds));
-
-        if (oldThreadWaitReason is int waitReason)
-        {
-            summary.WaitReasonCounts[waitReason] = summary.WaitReasonCounts.GetValueOrDefault(waitReason) + 1;
-        }
-    }
-
-    private EtlProcessCpuSummary GetOrCreateProcessCpuSummary(uint processId)
-    {
-        if (!_processCpuSummaries.TryGetValue(processId, out EtlProcessCpuSummary? summary))
-        {
-            summary = new EtlProcessCpuSummary
-            {
-                ProcessId = processId,
-                ImageFileName = _activeProcessesByPid.TryGetValue(processId, out ProcessRecord? record)
-                    ? record.ImageFileName
-                    : "<未關聯程序>",
-            };
-            _processCpuSummaries[processId] = summary;
-        }
-
-        return summary;
-    }
-
-    private void EngineOnProfile(ProfileEventInfo data)
-    {
-        if (data.InstructionPointer is not ulong address)
-        {
-            return;
-        }
-
-        uint sampledThreadId = _runningThreadByProcessor.GetValueOrDefault(data.ProcessorNumber, data.ThreadId);
-        uint sampledProcessId = _threadToProcess.GetValueOrDefault(sampledThreadId, data.ProcessId);
-
-        if (!_profileHotspots.TryGetValue(address, out AddressSampleSummary? summary))
-        {
-            ResolveModule(sampledProcessId, address, data.Timestamp, out string moduleName, out ulong? rva);
-            summary = new AddressSampleSummary
-            {
-                Address = address,
-                ModuleName = moduleName,
-                ModuleRelativeAddress = rva,
-            };
-            _profileHotspots[address] = summary;
-        }
-
-        summary.SampleCount++;
-        summary.SamplesByProcessor[data.ProcessorNumber] = summary.SamplesByProcessor.GetValueOrDefault(data.ProcessorNumber) + 1;
-    }
-
-    private void EngineOnDpc(in DpcEventInfo data) => AccumulateRoutineHotspot(_dpcHotspots, data.Routine, data.ProcessorNumber, data.Timestamp);
-
-    private void EngineOnInterrupt(in InterruptEventInfo data) => AccumulateRoutineHotspot(_interruptHotspots, data.Routine, data.ProcessorNumber, data.Timestamp);
-
-    private void AccumulateRoutineHotspot(Dictionary<ulong, RoutineEventSummary> hotspots, ulong? routine, byte processorNumber, DateTime timestamp)
-    {
-        ulong key = routine ?? 0;
-        if (!hotspots.TryGetValue(key, out RoutineEventSummary? summary))
-        {
-            ResolveKernelModule(routine, out string moduleName, out ulong? rva);
-            summary = new RoutineEventSummary
-            {
-                Routine = routine,
-                ModuleName = moduleName,
-                ModuleRelativeAddress = rva,
-            };
-            hotspots[key] = summary;
-        }
-
-        summary.EventCount++;
-        summary.EventsByProcessor[processorNumber] = summary.EventsByProcessor.GetValueOrDefault(processorNumber) + 1;
-        summary.Samples.Add(new EtlTimedSample(timestamp, 1));
-    }
-
-    private void ResolveModule(uint processId, ulong address, DateTime at, out string moduleName, out ulong? relativeAddress)
-    {
-        if (_modulesByProcessId.TryGetValue(processId, out List<ModuleInfo>? modules) &&
-            TryFindModule(modules, address, at, out ModuleInfo? found))
-        {
-            moduleName = found.FileName;
-            relativeAddress = address - found.ImageBase;
-            return;
-        }
-
-        ResolveKernelModule(address, out moduleName, out relativeAddress);
-    }
-
-    private void ResolveKernelModule(ulong? address, out string moduleName, out ulong? relativeAddress)
-    {
-        if (address is ulong value && TryFindModule(_allModulesLoadOrder, value, at: null, out ModuleInfo? found))
-        {
-            moduleName = found.FileName;
-            relativeAddress = value - found.ImageBase;
-            return;
-        }
-
-        moduleName = "<未映射>";
-        relativeAddress = null;
-    }
-
-    /// <summary>
-    /// 依位址是否落在模組的 [ImageBase, ImageBase+ImageSize) 範圍內比對所屬模組。
-    /// 模組數量通常僅數十至數百筆，線性掃描即可，不需要額外的排序/二分搜尋結構
-    /// (對應 DataBase_SQLite.ResolveCpuProfileSampleModules 的位址分桶手法，這裡改用簡化版本)。
-    /// </summary>
-    private static bool TryFindModule(List<ModuleInfo> modules, ulong address, DateTime? at, [NotNullWhen(true)] out ModuleInfo? found)
-    {
-        foreach (ModuleInfo module in modules)
-        {
-            if (address < module.ImageBase || address >= module.ImageBase + module.ImageSize)
-            {
-                continue;
-            }
-
-            if (at is DateTime timestamp && (timestamp < module.LoadTime || (module.UnloadTime is DateTime unloadTime && timestamp > unloadTime)))
-            {
-                continue;
-            }
-
-            found = module;
-            return true;
-        }
-
-        found = null;
-        return false;
-    }
-
-    /// <summary>
-    /// 追蹤結束時，強制收尾所有仍在執行中、尚未配對到 CSwitch(Old)的執行緒區間，
-    /// 以及仍未收到 Stop/Terminate 事件的程序，避免遺漏追蹤末段的資料(對應 TraceProcessor 對整個追蹤範圍的收尾語意)。
-    /// </summary>
-    private void FinalizeOpenIntervals(EtlReadResult result)
-    {
-        DateTime cutoff = result.TraceEndTime ?? DateTime.UtcNow;
-
-        foreach (uint threadId in _threadRunStart.Keys.ToList())
-        {
-            CloseRunningInterval(threadId, cutoff);
-        }
-
-        foreach (ProcessRecord process in result.Processes)
-        {
-            process.EndTime ??= cutoff;
-        }
-    }
-
-    private EtlAnalysisResult Analyze(EtlReadResult result)
-    {
-        FinalizeOpenIntervals(result);
-
-        var analysis = new EtlAnalysisResult();
-        if (result.BuffersLost > 0)
-        {
-            analysis.DataQualityWarnings.Add($"ETL 遺失 {result.BuffersLost} 個緩衝區，統計結果可能不完整。");
-        }
-
-        if (result.EventsLost > 0)
-        {
-            analysis.DataQualityWarnings.Add($"讀取 ETL 時回報遺失 {result.EventsLost} 筆事件，統計結果可能不完整。");
-        }
-
-        analysis.UnmatchedCpuIntervals = _unmatchedCpuIntervalCount;
-        if (analysis.UnmatchedCpuIntervals > 0)
-        {
-            analysis.DataQualityWarnings.Add($"有 {analysis.UnmatchedCpuIntervals} 個 CPU 執行區間未能安全配對，未納入估計 CPU 時間。");
-        }
-
-        if (analysis.UnmatchedDiskIoEvents > 0)
-        {
-            analysis.DataQualityWarnings.Add($"有 {analysis.UnmatchedDiskIoEvents} 筆 Disk I/O 未能以明確識別碼配對，未納入延遲統計。");
-        }
-
-        if (analysis.UnattributedEnergyEventCount > 0)
-        {
-            analysis.DataQualityWarnings.Add($"有 {analysis.UnattributedEnergyEventCount} 筆能源估算事件無法關聯至程序生命週期，已保留為系統或未關聯資料。");
-        }
-
-        if (analysis.EnergyEventsWithoutRecognizedMetrics > 0)
-        {
-            analysis.DataQualityWarnings.Add($"有 {analysis.EnergyEventsWithoutRecognizedMetrics} 筆能源估算事件未含可辨識的能源或電源數值欄位。");
-        }
-
-        if (analysis.PowerMeterEventsWithoutRecognizedMetrics > 0)
-        {
-            analysis.DataQualityWarnings.Add($"有 {analysis.PowerMeterEventsWithoutRecognizedMetrics} 筆硬體電錶事件未含可辨識的電源數值欄位。");
-        }
-
-        // ProcessIoSummaries / ProcessEnergySummaries / PowerMeterMetricSummaries 尚未實作：
-        // 需要額外的 DiskIo Init/Completion 配對與 EnergyEstimationEngine 數值欄位分類邏輯，
-        // 超出本次「補完 CPU/Profile/DPC/Interrupt 關聯引擎」的範圍，先保留為空集合。
-        analysis.ProcessCpuSummaries.AddRange(_processCpuSummaries.Values.OrderByDescending(s => s.EstimatedExecutionTime));
-        analysis.ProfileHotspots.AddRange(_profileHotspots.Values.OrderByDescending(s => s.SampleCount));
-        analysis.DpcHotspots.AddRange(_dpcHotspots.Values.OrderByDescending(s => s.EventCount));
-        analysis.InterruptHotspots.AddRange(_interruptHotspots.Values.OrderByDescending(s => s.EventCount));
-
-        return analysis;
     }
 }

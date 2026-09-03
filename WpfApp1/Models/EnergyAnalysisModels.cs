@@ -40,6 +40,48 @@ public sealed record EnergyConsumerSummary
 
     /// <summary>由其他行程轉嫁歸屬到本行程的 CPU 能耗加總,僅供參考,不計入 TotalEnergy。</summary>
     public double TotalAttributedCPUEnergy { get; init; }
+
+    /// <summary>
+    /// 依 Event 37 的 InteractivityState(前景/可見/最小化)拆解本 AppName 的能耗成因,用來判斷
+    /// DisplayEnergy 是否主要發生在畫面可見/前景期間(預期行為),或在最小化時仍被計入(異常,值得深查)。
+    /// 若擷取的資料庫版本較舊(缺少 RecordFlags/RecordMeasured/InteractivityState 欄位)則恆為空集合。
+    /// </summary>
+    public IReadOnlyList<EnergyInteractivityBreakdown> InteractivityBreakdown { get; init; } = [];
+}
+
+/// <summary>
+/// 同一 AppName 依 Event 37 的 InteractivityState 分組後的能耗與情境旗標統計,是分析 DisplayEnergy
+/// 耗能原因的核心資料:E3 的 Display 分量本質上是「畫面可見/前景時間 × 顯示器耗電模型」的估算值,
+/// 而非直接量測渲染負載,因此本分解著重呈現「能耗發生當下,應用程式是否為前景/可見、螢幕是否開啟」。
+/// </summary>
+public sealed record EnergyInteractivityBreakdown
+{
+    /// <summary>依 mapAppInteractivityState 轉換後的顯示文字,例如 Focus(前景/焦點)、Visible(可見/非焦點)、Minimized(最小化)。</summary>
+    public required string InteractivityState { get; init; }
+
+    public int EventCount { get; init; }
+
+    /// <summary>本狀態下,Event 37 估算週期涵蓋的時間加總(毫秒)。</summary>
+    public long TotalTimeInMSec { get; init; }
+
+    public double TotalDisplayEnergy { get; init; }
+    public double TotalCpuEnergy { get; init; }
+    public double TotalGpuEnergy { get; init; }
+
+    /// <summary>RecordFlags 含 MonitorOn(0x2)位元的筆數,即記錄當下螢幕為開啟狀態。</summary>
+    public int MonitorOnCount { get; init; }
+
+    /// <summary>RecordFlags 含 Foreground(0x10)位元的筆數,即記錄當下本應用程式為前景。</summary>
+    public int ForegroundCount { get; init; }
+
+    /// <summary>RecordMeasured 含 Display(0x20)位元的筆數,即 Display 分量為硬體實測而非估算。</summary>
+    public int DisplayMeasuredCount { get; init; }
+
+    public double MonitorOnRatio => EventCount == 0 ? 0 : (double)MonitorOnCount / EventCount;
+
+    public double ForegroundRatio => EventCount == 0 ? 0 : (double)ForegroundCount / EventCount;
+
+    public double DisplayMeasuredRatio => EventCount == 0 ? 0 : (double)DisplayMeasuredCount / EventCount;
 }
 
 /// <summary>

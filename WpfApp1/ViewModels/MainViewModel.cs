@@ -404,7 +404,7 @@ public partial class MainViewModel : ObservableObject
 
         EnergyConsumerStatus = EnergyConsumers.Count == 0
             ? "SQLite 中沒有 E3 (Event 37) 能耗資料。"
-            : $"已載入 {EnergyConsumers.Count:N0} 個能耗來源，依總估算能耗排序（含應用程式與系統/硬體遙測，如 EMI_RAPL）。";
+            : $"已載入 {EnergyConsumers.Count:N0} 個能耗來源，依總估算能耗排序（含應用程式與系統/硬體遙測，如 EMI_RAPL）。點選資料列可展開檢視 Display 能耗依前景/可見/最小化狀態的成因分解。";
 
         EnergyAccuracyStatus = EnergyAccuracyMeters.Count == 0
             ? "SQLite 中沒有電表 (PowerMeterPollingEvents_4) 資料，無法比對 E3 估算準確度。"

@@ -7,7 +7,7 @@ using System.Diagnostics;
 using System.Text;
 
 Console.OutputEncoding = Encoding.UTF8;
-
+var ees = TdhManifestMapReader.QueryEnergyEstimateEventInfo();
 int durationSeconds = 30;
 if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSeconds > 0)
 {
@@ -108,11 +108,13 @@ return 0;
 /// 優點：零外部相依、可 Native AOT/Trimming 發佈；缺點：每新增一種要支援的事件，
 /// 都得手刻對應的 struct、delegate 與 TDH 解析程式碼，EtlFileReader.cs 因此累積超過三千行。
 ///
-/// 補充：EtlFileReader 內建了一套即時關聯引擎（於建構函式訂閱自身事件，在 ProcessFile() 執行過程中
-/// 即時配對 CSwitch New/Old、並以 InstructionPointer/Routine 反查模組），執行完成後可透過
-/// <see cref="EtlFileReader.Result"/> 直接取得已關聯好的 <see cref="EtlReadResult"/>
-/// （程序清單、CPU 使用彙總、Profile/DPC/Interrupt 熱點），概念上對應下方 TraceProcessor 示範的
-/// trace.Process() + IPendingResult&lt;T&gt;.Result，但完全不依賴 SQLite 或任何外部套件。
+/// 補充：EtlFileReader 透過插件(<see cref="IEtlReaderPlugin"/>)提供即時關聯引擎，預設不會啟用──
+/// 單純轉存 SQLite 等情境不需要這些額外的關聯/彙總計算。呼叫 <see cref="EtlFileReader.UseBuiltInAnalysis"/>
+/// 掛上內建的 <see cref="EtlAnalysisPlugin"/> 後(於 ProcessFile() 執行過程中即時配對 CSwitch New/Old、
+/// 並以 InstructionPointer/Routine 反查模組)，執行完成後即可透過 <see cref="EtlFileReader.Result"/>
+/// 直接取得已關聯好的 <see cref="EtlReadResult"/>（程序清單、CPU 使用彙總、Profile/DPC/Interrupt 熱點），
+/// 概念上對應下方 TraceProcessor 示範的 trace.Process() + IPendingResult&lt;T&gt;.Result，但完全不依賴
+/// SQLite 或任何外部套件。
 /// </summary>
 static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
 {
@@ -126,6 +128,7 @@ static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
     int wmiActivityCount = 0;
 
     EtlFileReader reader = new();
+    reader.UseBuiltInAnalysis();
     reader.ProcessStart += (in ProcessInfo info) => processStartCount++;
     reader.ImageLoad += (in ImageLoadEventInfo info) => imageLoadCount++;
     reader.ThreadCSwitch += (in CSwitchEventInfo info) => cswitchCount++;
