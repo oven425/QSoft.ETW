@@ -286,6 +286,12 @@ internal class SQLiteExport(DataBase_SQLite db, TimeSpan? cSwitchBucketSize = nu
         db.WriteImageUnLoad(data);
     }
 
+    protected virtual void OnServiceStatusChange(in ServiceStatusChangeEventInfo data)
+    {
+        TrackEventTimestamp(data.Timestamp);
+        db.WriteServiceStatusChange(in data);
+    }
+
     protected virtual void OnWmiActivity_24(in WmiActivityEventInfo_24 data)
     {
         TrackEventTimestamp(data.Timestamp);
@@ -407,6 +413,7 @@ internal class SQLiteExport(DataBase_SQLite db, TimeSpan? cSwitchBucketSize = nu
         reader.ImageLoad += OnImageLoad;
         reader.ImageUnload += OnImageUnload;
         reader.ImageDCStart += OnImageLoad;
+        reader.ServiceStatusChange += OnServiceStatusChange;
         reader.WmiActivity_24 += OnWmiActivity_24;
         reader.WmiActivity_11 += OnWmiActivity_11;
         reader.WmiActivity_12 += OnWmiActivity_12;
@@ -478,6 +485,7 @@ internal class SQLiteExport(DataBase_SQLite db, TimeSpan? cSwitchBucketSize = nu
         reader.ProcessTerminate -= OnProcessTerminate;
         reader.ImageLoad -= OnImageLoad;
         reader.ImageUnload -= OnImageUnload;
+        reader.ServiceStatusChange -= OnServiceStatusChange;
         reader.WmiActivity_24 -= OnWmiActivity_24;
         reader.WmiActivity_11 -= OnWmiActivity_11;
         reader.WmiActivity_12 -= OnWmiActivity_12;

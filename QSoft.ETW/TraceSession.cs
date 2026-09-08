@@ -13,8 +13,8 @@ namespace QSoft.ETW
     {
         string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         string baseDir;
-        string sessionName;
-        string logFilePath;
+        string? sessionName;
+        string? logFilePath;
 
         ulong sessionHandle = 0;
 
@@ -25,14 +25,17 @@ namespace QSoft.ETW
         readonly ProviderConfiguration[] systemProviders;
         readonly string? outputFileName;
         readonly bool enableFileCompression;
+        readonly string sessionNamePrefix;
+        readonly STACK_TRACING_EVENT_ID[] stackTracingEventIds;
+        readonly TextWriter? statusWriter;
         bool isStarted = false;
         bool isDisposed = false;
 
-        /// <summary>
-        /// The ETL file being recorded to (set on <see cref="Start"/>). <see langword="null"/> before the first
-        /// <see cref="Start"/> call.
-        /// </summary>
+        TextWriter Status => statusWriter ?? Console.Out;
+
         public string? LogFilePath => logFilePath;
+
+        public string? SessionName => sessionName;
 
         internal TraceSession(
             KernelTraceFlags kernelEnableFlags,
@@ -40,7 +43,10 @@ namespace QSoft.ETW
             ProviderConfiguration[] systemProviders,
             string baseDir,
             string? outputFileName = null,
-            bool enableFileCompression = false)
+            bool enableFileCompression = false,
+            string sessionNamePrefix = "QSoft",
+            STACK_TRACING_EVENT_ID[]? stackTracingEventIds = null,
+            TextWriter? statusWriter = null)
         {
             this.kernelEnableFlags = kernelEnableFlags;
             this.userProviders = userProviders ?? [];
@@ -48,9 +54,17 @@ namespace QSoft.ETW
             this.baseDir = string.IsNullOrEmpty(baseDir) ? AppContext.BaseDirectory : baseDir;
             this.outputFileName = outputFileName;
             this.enableFileCompression = enableFileCompression;
+            this.sessionNamePrefix = string.IsNullOrWhiteSpace(sessionNamePrefix) ? "QSoft" : sessionNamePrefix;
+            this.stackTracingEventIds = stackTracingEventIds ?? [];
+            this.statusWriter = statusWriter;
         }
 
-        internal readonly record struct ProviderConfiguration(Guid ProviderId, ulong MatchAnyKeyword);
+        internal readonly record struct ProviderConfiguration(
+            Guid ProviderId,
+            ulong MatchAnyKeyword,
+            byte Level = TRACE_LEVEL_VERBOSE,
+            bool CaptureStateOnEnable = false,
+            bool CaptureStateOnStop = false);
 
         public void Start()
         {
@@ -62,7 +76,7 @@ namespace QSoft.ETW
             }
 
             timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            sessionName = $"QSoft-{timestamp}";
+            sessionName = $"{sessionNamePrefix}_{Environment.ProcessId}_{timestamp}";
             logFilePath = Path.Combine(baseDir, string.IsNullOrWhiteSpace(outputFileName) ? $"trace_{timestamp}.etl" : outputFileName);
 
             try
@@ -85,11 +99,11 @@ namespace QSoft.ETW
 
             if (sessionProps is not null)
             {
-                Console.WriteLine($"Session: {sessionName} -> {logFilePath}");
+                Status.WriteLine($"Session: {sessionName} -> {logFilePath}");
             }
             else
             {
-                Console.WriteLine("Session: 未啟動（未指定任何 EnableFlags 或 Provider）。");
+                Status.WriteLine("Session: 未啟動（未指定任何 EnableFlags 或 Provider）。");
             }
         }
 
@@ -102,13 +116,14 @@ namespace QSoft.ETW
 
             if (sessionHandle != 0 && sessionProps is not null)
             {
+                CaptureProvidersStateOnStop(sessionHandle);
                 _ = ControlTraceW(sessionHandle, null, ref sessionProps.Properties, EVENT_TRACE_CONTROL_STOP);
                 ReportTraceStatistics("Session", in sessionProps.Properties);
-                Console.WriteLine($"追蹤檔案：{logFilePath}");
+                Status.WriteLine($"追蹤檔案：{logFilePath}");
             }
             else
             {
-                Console.WriteLine("Session 未啟動，無追蹤檔案可處理。");
+                Status.WriteLine("Session 未啟動，無追蹤檔案可處理。");
             }
 
             sessionHandle = 0;
@@ -135,7 +150,7 @@ namespace QSoft.ETW
             return principal.IsInRole(WindowsBuiltInRole.Administrator);
         }
 
-        static void ThrowIfError(int win32Error, string apiName)
+        internal static void ThrowIfError(int win32Error, string apiName)
         {
             if (win32Error != 0)
             {
@@ -310,16 +325,26 @@ namespace QSoft.ETW
         // EnableKernelProvider 內針對 Windows 8+ 的 systemTraceProvider 分支）。
         void EnableKernelFlags(ulong sessionHandle, KernelTraceFlags kernelFlags)
         {
-            var stackTracingEventId = new STACK_TRACING_EVENT_ID { EventGuid = PerfInfoGuid, Type = EVENT_TYPE_SAMPLED_PROFILE };
-            ThrowIfError(
-                TraceSetInformation(sessionHandle, TRACE_INFO_CLASS.TraceStackTracingInfo, in stackTracingEventId, (uint)Unsafe.SizeOf<STACK_TRACING_EVENT_ID>()),
-                nameof(TraceSetInformation));
+            if (stackTracingEventIds.Length > 0)
+            {
+                // TraceSetInformation(TraceStackTracingInfo) accepts a variable-length array of
+                // CLASSIC_EVENT_ID entries (one per (ProviderGuid, EventType) pair to stackwalk);
+                // InformationLength is the total byte size, decoupled from a single struct's size.
+                ThrowIfError(
+                    TraceSetInformation(
+                        sessionHandle,
+                        TRACE_INFO_CLASS.TraceStackTracingInfo,
+                        in stackTracingEventIds[0],
+                        (uint)(Unsafe.SizeOf<STACK_TRACING_EVENT_ID>() * stackTracingEventIds.Length)),
+                    nameof(TraceSetInformation));
+            }
 
             ulong enableFlags = (ulong)kernelFlags;
             ThrowIfError(
                 TraceSetInformation(sessionHandle, TRACE_INFO_CLASS.TraceSystemTraceEnableFlagsInfo, in enableFlags, sizeof(ulong)),
                 nameof(TraceSetInformation));
         }
+
 
         void EnableProviders(ulong sessionHandle, ReadOnlySpan<ProviderConfiguration> providers)
         {
@@ -333,16 +358,51 @@ namespace QSoft.ETW
                         sessionHandle,
                         in providerId,
                         EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                        TRACE_LEVEL_VERBOSE,
+                        provider.Level,
                         matchAnyKeyword: provider.MatchAnyKeyword,
                         matchAllKeyword: 0,
                         timeout: 0,
                         in enableParams),
                     $"{nameof(EnableTraceEx2)}({provider.ProviderId})");
+
+                if (provider.CaptureStateOnEnable)
+                {
+                    CaptureProviderState(sessionHandle, providerId);
+                }
             }
         }
 
-        public List<(string Name, Guid ProviderGuid, bool IsMof)> GetRegisteredProviders()
+        void CaptureProviderState(ulong sessionHandle, Guid providerId)
+        {
+            var enableParams = new ENABLE_TRACE_PARAMETERS { Version = ENABLE_TRACE_PARAMETERS_VERSION_2 };
+
+            ThrowIfError(
+                EnableTraceEx2(
+                    sessionHandle,
+                    in providerId,
+                    EVENT_CONTROL_CODE_CAPTURE_STATE,
+                    level: 0,
+                    matchAnyKeyword: 0,
+                    matchAllKeyword: 0,
+                    timeout: 0,
+                    in enableParams),
+                $"{nameof(EnableTraceEx2)}({providerId}, CaptureState)");
+
+            Status.WriteLine($"CaptureState sent to {providerId:B}.");
+        }
+
+        void CaptureProvidersStateOnStop(ulong sessionHandle)
+        {
+            foreach (ProviderConfiguration provider in userProviders)
+            {
+                if (provider.CaptureStateOnStop)
+                {
+                    CaptureProviderState(sessionHandle, provider.ProviderId);
+                }
+            }
+        }
+
+        public static List<(string Name, Guid ProviderGuid, bool IsMof)> GetRegisteredProviders()
         {
             const int ProviderEnumerationHeaderSize = 8; // NumberOfProviders (4 bytes) + Reserved (4 bytes)
             int traceProviderInfoSize = Unsafe.SizeOf<TRACE_PROVIDER_INFO>();
@@ -407,10 +467,60 @@ namespace QSoft.ETW
             Console.WriteLine($"共列舉出 {providers.Count} 個目前電腦上已註冊的 ETW Provider。");
         }
 
-        // PerfInfo Provider（EVENT_TRACE_FLAG_PROFILE 產生的 CPU 取樣事件）；Type 46 為 SampledProfile，
-        // 用於 STACK_TRACING_EVENT_ID，讓取樣式效能分析事件附帶呼叫堆疊。
-        static readonly Guid PerfInfoGuid = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
-        const byte EVENT_TYPE_SAMPLED_PROFILE = 46;
+        /// <summary>
+        /// EventSource-based providers that don't specify an explicit GUID derive one deterministically
+        /// from their name (RFC 4122 name-based UUID, namespace <c>482C2DB2-C390-47C8-87F8-1A15BFC130FB</c>).
+        /// This reproduces that exact convention, matching
+        /// <c>Microsoft.Diagnostics.Tracing.Session.TraceEventProviders.GetEventSourceGuidFromName</c>
+        /// bit-for-bit, so QSoft-collected sessions can enable such providers by name too. Names are
+        /// case-insensitive; a leading <c>'*'</c> (a common EventSource-name marker) is stripped if present.
+        /// </summary>
+        public static Guid GetEventSourceGuidFromName(string name)
+        {
+            if (name.StartsWith('*'))
+            {
+                name = name[1..];
+            }
+
+            name = name.ToUpperInvariant();
+
+            // Build a 16-byte namespace prefix + the UTF-16BE encoded name, per RFC 4122's name-based UUID
+            // guidance, then SHA-1 hash it and patch in the version/variant bits.
+            var bytes = new byte[name.Length * 2 + 16];
+            uint namespace1 = 0x482C2DB2;
+            uint namespace2 = 0xC39047c8;
+            uint namespace3 = 0x87F81A15;
+            uint namespace4 = 0xBFC130FB;
+            for (int i = 3; i >= 0; --i)
+            {
+                bytes[i] = (byte)namespace1;
+                namespace1 >>= 8;
+                bytes[i + 4] = (byte)namespace2;
+                namespace2 >>= 8;
+                bytes[i + 8] = (byte)namespace3;
+                namespace3 >>= 8;
+                bytes[i + 12] = (byte)namespace4;
+                namespace4 >>= 8;
+            }
+
+            for (int i = 0; i < name.Length; i++)
+            {
+                bytes[2 * i + 16 + 1] = (byte)name[i];
+                bytes[2 * i + 16] = (byte)(name[i] >> 8);
+            }
+
+            // CodeQL [SM02196] The EventSource name to GUID protocol requires a SHA1 hash.
+            // CodeQL [SM03938] The EventSource name to GUID protocol requires a SHA1 hash.
+            // CodeQL [SM03939] The EventSource name to GUID protocol requires a SHA1 hash.
+            byte[] hash = System.Security.Cryptography.SHA1.HashData(bytes);
+
+            int a = (((((hash[3] << 8) + hash[2]) << 8) + hash[1]) << 8) + hash[0];
+            short b = (short)((hash[5] << 8) + hash[4]);
+            short c = (short)((hash[7] << 8) + hash[6]);
+            c = (short)((c & 0x0FFF) | 0x5000); // Set high 4 bits of octet 7 to 5, as per RFC 4122.
+
+            return new Guid(a, b, c, hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]);
+        }
 
 
 
@@ -428,6 +538,7 @@ namespace QSoft.ETW
         const uint DefaultBufferSizeKb = 64;
         const uint EVENT_TRACE_CONTROL_STOP = 1;
         const uint EVENT_CONTROL_CODE_ENABLE_PROVIDER = 1;
+        const uint EVENT_CONTROL_CODE_CAPTURE_STATE = 2;
         const byte TRACE_LEVEL_VERBOSE = 5;
         const uint ENABLE_TRACE_PARAMETERS_VERSION_2 = 2;
 
@@ -630,6 +741,20 @@ namespace QSoft.ETW
         EVENT_TRACE_FLAG_EXTENSION = 0x80000000, // Indicates more flags
     }
 
+    /// <summary>
+    /// Kernel event types that can carry a call stack (via <see cref="TraceSessionBuilder.WithKernelStackTracing"/>).
+    /// Each target maps to one (ProviderGuid, EventType) pair registered with
+    /// TraceSetInformation(TraceStackTracingInfo).
+    /// </summary>
+    public enum KernelStackTraceTarget
+    {
+        /// <summary>Thread/CSwitch (context switch) events.</summary>
+        ContextSwitch,
+
+        /// <summary>PerfInfo/SampledProfile (CPU sampling) events.</summary>
+        Profile,
+    }
+
     public class TraceSessionBuilder
     {
         public static readonly Guid KernelProcessProviderGuid = new("22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716");
@@ -640,10 +765,37 @@ namespace QSoft.ETW
         public static readonly Guid PowerMeterPollingProviderGuid = new("306c4e0b-e148-543d-315b-c618eb93157c");
         public static readonly Guid SystemMemoryProviderGuid = new("82958ca9-b6cd-47f8-a3a8-03ae85a4bc24");
         public static readonly Guid DxgKrnlProviderGuid = new("802ec45a-1e99-4b83-9920-87c98277ba9d");
+        /// <summary>
+        /// Microsoft-Windows-Kernel-Memory(現代 manifest-based 提供者)。與 <see cref="SystemMemoryProviderGuid"/>
+        /// 是兩個不同的提供者:後者(System Memory Provider)僅是啟用用的控制平面 GUID,依官方文件其輸出事件
+        /// 不會標示為該 GUID,已實測驗證單獨啟用 SystemMemoryProviderGuid 並不會產生任何記憶體用量事件。
+        /// 本 GUID 搭配 <see cref="KernelMemoryMemInfoKeyword"/> 才會觸發 Event Id=1 Version=1(MemInfo)
+        /// 系統記憶體用量快照,是 <see cref="EtlFileReader.MemoryUtilization"/> 的資料來源。
+        /// </summary>
+        public static readonly Guid KernelMemoryProviderGuid = new("d1d93ef7-e1f2-4f45-9943-03d245fe6c00");
+        /// <summary>
+        /// Microsoft-Windows-Services(SCM 診斷提供者,由 services.exe 發出)。EventId=105(task=ServiceStatusChange,
+        /// opcode=101 StatusChange)含 ServiceName/ImageName/PID/CurrentState/StartType 欄位,
+        /// 是 TraceProcessor IServiceDataSource 背後對應的資料來源之一(已用 Get-WinEvent -ListProvider 查證 template)。
+        /// </summary>
+        public static readonly Guid ServicesProviderGuid = new("0063715b-eeda-4007-9429-ad526f62696e");
         public const ulong PowerMeterPollingFiveSecondKeyword = 0x0000000000000004;
         public const ulong SystemMemoryMemoryInfoKeyword = 0x0000000000000010;
         public const ulong SystemMemoryWorkingSetKeyword = 0x0000000000000100;
         public const ulong SystemMemoryVirtualAllocKeyword = 0x0000000000000400;
+
+        /// <summary>Microsoft-Windows-Kernel-Memory 的 KERNEL_MEM_KEYWORD_MEMINFO,已用 logman query providers 查證。</summary>
+        public const ulong KernelMemoryMemInfoKeyword = 0x0000000000000020;
+
+        // Thread Provider（NT Kernel Logger 的 Thread/CSwitch 事件）；Type 36 為 CSwitch，用於
+        // STACK_TRACING_EVENT_ID，讓 Context Switch 事件附帶呼叫堆疊（見 WithKernelStackTracing）。
+        public static readonly Guid ContextSwitchEventGuid = new("3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c");
+        public const byte ContextSwitchEventType = 36;
+
+        // PerfInfo Provider（EVENT_TRACE_FLAG_PROFILE 產生的 CPU 取樣事件）；Type 46 為 SampledProfile，用於
+        // STACK_TRACING_EVENT_ID，讓取樣式效能分析事件附帶呼叫堆疊（見 WithKernelStackTracing）。
+        public static readonly Guid PerfInfoGuid = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
+        public const byte ProfileEventType = 46;
 
         internal KernelTraceFlags m_EnableFlags = KernelTraceFlags.None;
         internal readonly List<TraceSession.ProviderConfiguration> m_UserProviders = [];
@@ -651,6 +803,9 @@ namespace QSoft.ETW
         internal string m_BaseDir = AppContext.BaseDirectory;
         internal string? m_OutputFileName;
         internal bool m_EnableFileCompression;
+        internal string m_SessionNamePrefix = "QSoft";
+        internal readonly List<TraceSession.STACK_TRACING_EVENT_ID> m_StackTracingEventIds = [];
+        internal TextWriter? m_StatusWriter;
 
         /// <summary>
         /// Configures ETW to compress the ETL file while it is recorded.
@@ -685,6 +840,77 @@ namespace QSoft.ETW
         {
             m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, matchAnyKeyword));
             return this;
+        }
+
+        /// <summary>
+        /// Adds a user-mode provider identified by GUID, with an explicit trace level and optional
+        /// CaptureState requests (a rundown/state-dump request sent to the provider right after it is
+        /// enabled, and/or right before the session stops — mirrors
+        /// Microsoft.Diagnostics.Tracing.Session.TraceEventSession.CaptureState(Guid)).
+        /// </summary>
+        /// <param name="providerGuid">The provider GUID.</param>
+        /// <param name="level">The ETW trace level (e.g. 5 = Verbose).</param>
+        /// <param name="matchAnyKeyword">The provider keyword mask.</param>
+        /// <param name="captureStateOnEnable">If true, requests a state-dump immediately after enabling.</param>
+        /// <param name="captureStateOnStop">If true, requests a state-dump right before the session stops.</param>
+        /// <returns>The current builder.</returns>
+        public TraceSessionBuilder WithProvider(Guid providerGuid, byte level, ulong matchAnyKeyword, bool captureStateOnEnable = false, bool captureStateOnStop = false)
+        {
+            m_UserProviders.Add(new TraceSession.ProviderConfiguration(providerGuid, matchAnyKeyword, level, captureStateOnEnable, captureStateOnStop));
+            return this;
+        }
+
+        /// <summary>
+        /// Adds a user-mode provider identified by name, with an explicit trace level and optional
+        /// CaptureState requests. See <see cref="WithProvider(Guid, byte, ulong, bool, bool)"/> for the
+        /// CaptureState semantics.
+        /// </summary>
+        /// <remarks>
+        /// Resolution order mirrors
+        /// <c>Microsoft.Diagnostics.Tracing.Session.TraceEventSession.EnableProvider(string, ...)</c>:
+        /// (1) if <paramref name="providerName"/> is itself a GUID string, that GUID is used directly;
+        /// (2) otherwise, the system's registered provider manifests are searched by name (see
+        /// <see cref="TraceSession.GetRegisteredProviders"/>); (3) otherwise, the GUID is derived from the
+        /// name using the EventSource name-to-GUID convention (see
+        /// <see cref="TraceSession.GetEventSourceGuidFromName"/>), since EventSource-based providers don't
+        /// register a manifest on the system.
+        /// </remarks>
+        /// <param name="providerName">The provider name (e.g. "Microsoft-Windows-WMI-Activity") or GUID string.</param>
+        /// <param name="level">The ETW trace level (e.g. 5 = Verbose).</param>
+        /// <param name="matchAnyKeyword">The provider keyword mask.</param>
+        /// <param name="captureStateOnEnable">If true, requests a state-dump immediately after enabling.</param>
+        /// <param name="captureStateOnStop">If true, requests a state-dump right before the session stops.</param>
+        /// <returns>The current builder.</returns>
+        public TraceSessionBuilder WithProvider(string providerName, byte level, ulong matchAnyKeyword, bool captureStateOnEnable = false, bool captureStateOnStop = false)
+        {
+            if (string.IsNullOrWhiteSpace(providerName))
+            {
+                throw new ArgumentException("Provider 名稱不可為空。", nameof(providerName));
+            }
+
+            Guid providerGuid = ResolveProviderGuidByName(providerName);
+            m_UserProviders.Add(new TraceSession.ProviderConfiguration(providerGuid, matchAnyKeyword, level, captureStateOnEnable, captureStateOnStop));
+            return this;
+        }
+
+        static Guid ResolveProviderGuidByName(string providerName)
+        {
+            if (Guid.TryParse(providerName, out Guid parsedGuid))
+            {
+                return parsedGuid;
+            }
+
+            foreach ((string name, Guid providerGuid, _) in TraceSession.GetRegisteredProviders())
+            {
+                if (string.Equals(name, providerName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return providerGuid;
+                }
+            }
+
+            // Not a registered (manifest-published) provider; assume it's an EventSource-based provider
+            // and derive its GUID via the same convention EventSource itself uses.
+            return TraceSession.GetEventSourceGuidFromName(providerName);
         }
 
         /// <summary>
@@ -746,12 +972,49 @@ namespace QSoft.ETW
             return this;
         }
 
+        public TraceSessionBuilder WithStatusWriter(TextWriter writer)
+        {
+            m_StatusWriter = writer ?? throw new ArgumentNullException(nameof(writer));
+            return this;
+        }
+
+        public TraceSessionBuilder WithSessionNamePrefix(string prefix)
+        {
+            if (string.IsNullOrWhiteSpace(prefix))
+            {
+                throw new ArgumentException("Session 名稱前綴不可為空。", nameof(prefix));
+            }
+
+            m_SessionNamePrefix = prefix;
+            return this;
+        }
+
+        public TraceSessionBuilder WithKernelStackTracing(KernelStackTraceTarget target)
+        {
+            (Guid eventGuid, byte eventType) = target switch
+            {
+                KernelStackTraceTarget.ContextSwitch => (ContextSwitchEventGuid, ContextSwitchEventType),
+                KernelStackTraceTarget.Profile => (PerfInfoGuid, ProfileEventType),
+                _ => throw new ArgumentOutOfRangeException(nameof(target), target, "未知的 KernelStackTraceTarget。"),
+            };
+
+            if (!m_StackTracingEventIds.Any(e => e.EventGuid == eventGuid && e.Type == eventType))
+            {
+                m_StackTracingEventIds.Add(new TraceSession.STACK_TRACING_EVENT_ID { EventGuid = eventGuid, Type = eventType });
+            }
+
+            return this;
+        }
+
         public TraceSession Build() => new(
             m_EnableFlags,
             [.. m_UserProviders],
             [.. m_SystemProviders],
             m_BaseDir,
             m_OutputFileName,
-            m_EnableFileCompression);
+            m_EnableFileCompression,
+            m_SessionNamePrefix,
+            [.. m_StackTracingEventIds],
+            m_StatusWriter);
     }
 }

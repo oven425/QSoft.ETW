@@ -169,6 +169,7 @@ public partial class MainViewModel : ObservableObject
                 .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
                 .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
                 .WithProvider(TraceSessionBuilder.KernelPowerProviderGuid)
+                .WithProvider(TraceSessionBuilder.ServicesProviderGuid)
                 .WithSystemProvider(
                     TraceSessionBuilder.SystemMemoryProviderGuid,
                     TraceSessionBuilder.SystemMemoryMemoryInfoKeyword |

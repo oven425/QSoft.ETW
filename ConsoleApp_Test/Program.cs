@@ -2,11 +2,13 @@
 using Microsoft.Windows.EventTracing.Cpu;
 using Microsoft.Windows.EventTracing.Events;
 using Microsoft.Windows.EventTracing.Processes;
+using Microsoft.Windows.EventTracing.Services;
 using QSoft.ETW;
 using System.Diagnostics;
 using System.Text;
 
 Console.OutputEncoding = Encoding.UTF8;
+var pppps = TdhManifestMapReader.QueryManifestEventInfo(Guid.Parse("{0F67E49F-FE51-4E9F-B490-6F2948CC6027}"));
 var ees = TdhManifestMapReader.QueryEnergyEstimateEventInfo();
 int durationSeconds = 30;
 if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSeconds > 0)
@@ -24,6 +26,7 @@ using TraceSession session = new TraceSessionBuilder()
     .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROFILE)
     .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DPC)
     .WithProvider(TraceSessionBuilder.WmiActivityProviderGuid)
+    .WithProvider(TraceSessionBuilder.ServicesProviderGuid)
     .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
     .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
     .WithProvider(TraceSessionBuilder.KernelPowerProviderGuid)
@@ -34,6 +37,9 @@ using TraceSession session = new TraceSessionBuilder()
         TraceSessionBuilder.SystemMemoryVirtualAllocKeyword)
     .WithProvider(TraceSessionBuilder.PowerMeterPollingProviderGuid, TraceSessionBuilder.PowerMeterPollingFiveSecondKeyword)
     .WithProvider(TraceSessionBuilder.DxgKrnlProviderGuid)
+    // SystemMemoryProviderGuid 只是啟用用的控制平面 GUID，實際的 MemInfo 事件由 Microsoft-Windows-Kernel-Memory
+    // 提供者(搭配 MEMINFO 關鍵字)發出，兩者須同時啟用，UseMemoryUtilizationData()/MemoryUtilization 才會有資料。
+    .WithProvider(TraceSessionBuilder.KernelMemoryProviderGuid, TraceSessionBuilder.KernelMemoryMemInfoKeyword)
     .WithOutputPath(Path.Combine(AppContext.BaseDirectory, $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.etl"))
     .WithEtwFileCompression()
     .Build();
@@ -129,6 +135,12 @@ static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
 
     EtlFileReader reader = new();
     reader.UseBuiltInAnalysis();
+    var pendingProcesses = reader.UseProcesses();
+    var pendingServices = reader.UseServices();
+    var pendingEnergy = reader.UseEnergyEstimationData();
+    var pendingEnergyMeter = reader.UseEnergyMeterData();
+    var pendingInterruptHandling = reader.UseInterruptHandlingData();
+    var pendingMemoryUtilization = reader.UseMemoryUtilizationData();
     reader.ProcessStart += (in ProcessInfo info) => processStartCount++;
     reader.ImageLoad += (in ImageLoadEventInfo info) => imageLoadCount++;
     reader.ThreadCSwitch += (in CSwitchEventInfo info) => cswitchCount++;
@@ -156,7 +168,49 @@ static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
     EtlAnalysisResult analysis = result.Analysis!;
 
     Console.WriteLine();
-    Console.WriteLine($"[Result] 程序數: {result.Processes.Count} 個（ProcessRecord 已含 PID、映像檔名、命令列、父程序、存續時間，免自行組裝）");
+    Console.WriteLine($"[Result] 程序數: {pendingProcesses.Result.Processes.Count} 個（ProcessRecord 已含 PID、映像檔名、命令列、父程序、存續時間，免自行組裝）");
+    Console.WriteLine($"[Result] 服務數: {pendingServices.Result.Services.Count} 個（ServiceRecord 來自 Microsoft-Windows-Services 的 EventId=105 StatusChange，含 PID/CurrentState/StartType，對應 TraceProcessor 的 IServiceDataSource）");
+    foreach (ServiceRecord svc in pendingServices.Result.Services.Take(5))
+    {
+        Console.WriteLine($"  {svc.ServiceName} ({svc.ImageFileName}): PID={svc.ProcessId?.ToString() ?? "?"} 狀態={svc.CurrentState}");
+    }
+
+    IReadOnlyList<EnergyEstimationInterval> energyIntervals = pendingEnergy.Result.Intervals;
+    Console.WriteLine($"[Result] Energy Estimation 週期數: {energyIntervals.Count} 筆（EnergyEstimationInterval 每筆對應一次 E3 估算週期，含 CPU/Disk/Display/Network/SoC 等分項能耗）");
+    var topEnergyConsumers = energyIntervals
+        .GroupBy(interval => interval.ProcessId)
+        .Select(group => new
+        {
+            ProcessId = group.Key,
+            ImageName = group.First().ImageName,
+            TotalMilliJoules = group.Sum(interval => (double)interval.TotalEnergy),
+        })
+        .OrderByDescending(item => item.TotalMilliJoules)
+        .Take(5);
+
+    Console.WriteLine("[Result] 估計耗能前 5 名（依 ProcessId 加總 TotalEnergy）：");
+    foreach (var item in topEnergyConsumers)
+    {
+        Console.WriteLine($"  PID={item.ProcessId} {item.ImageName}: {item.TotalMilliJoules:F1} mJ");
+    }
+
+    IReadOnlyList<EnergyMeasurementInterval> energyMeterIntervals = pendingEnergyMeter.Result.Intervals;
+    Console.WriteLine($"[Result] Energy Meter(EMI)區間數: {energyMeterIntervals.Count} 筆（EnergyMeasurementInterval 每筆對應硬體計量通道相鄰兩次讀數之間的耗能，僅在裝置支援 EMI 時才會有資料）");
+    var topEnergyMeterChannels = energyMeterIntervals
+        .GroupBy(interval => interval.ChannelName)
+        .Select(group => new
+        {
+            ChannelName = group.Key,
+            TotalMilliJoules = group.Sum(interval => interval.TotalEnergy),
+        })
+        .OrderByDescending(item => item.TotalMilliJoules)
+        .Take(5);
+
+    Console.WriteLine("[Result] 硬體電錶耗能前 5 個通道（依 ChannelName 加總 TotalEnergy）：");
+    foreach (var item in topEnergyMeterChannels)
+    {
+        Console.WriteLine($"  {item.ChannelName}: {item.TotalMilliJoules:F1} mJ");
+    }
 
     Console.WriteLine("[Result] 估計 CPU 執行時間前 5 名（由內建引擎配對 CSwitch New/Old 累加而得）：");
     foreach (EtlProcessCpuSummary cpu in analysis.ProcessCpuSummaries.Take(5))
@@ -177,6 +231,79 @@ static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
         {
             Console.WriteLine($"  - {warning}");
         }
+    }
+
+    // === UseInterruptHandlingData()：對應 TraceProcessor 的 trace.UseInterruptHandlingData() ===
+    IReadOnlyList<InterruptServiceRoutineInterval> isrIntervals = pendingInterruptHandling.Result.InterruptServiceRoutines;
+    IReadOnlyList<DeferredProcedureCallInterval> dpcIntervals = pendingInterruptHandling.Result.DeferredProcedureCalls;
+    Console.WriteLine();
+    Console.WriteLine($"[Result] ISR 區間數: {isrIntervals.Count} 筆，DPC 區間數: {dpcIntervals.Count} 筆" +
+        "（IInterruptServiceRoutineInterval/IDeferredProcedureCallInterval 對等，StartTime 由 StopTime 往前推 ElapsedTimeMSec 推算）");
+    Console.WriteLine("  [已知限制] 實測比對 TraceProcessor 後確認：筆數與所屬模組完全一致、可放心採信；" +
+        "但耗時是由 QPC→FILETIME 的線上回歸換算而來，統計上會系統性低估（詳見程式碼註解），" +
+        "下方的耗時加總僅供參考，精確數值請以 TraceProcessor 的結果為準。");
+
+    var isrByModule = isrIntervals
+        .GroupBy(isr => isr.HandlerModuleName)
+        .Select(group => new
+        {
+            Module = group.Key,
+            Count = group.Count(),
+            TotalMilliseconds = group.Sum(item => item.DurationMSec),
+        })
+        .OrderByDescending(item => item.TotalMilliseconds)
+        .Take(5);
+
+    Console.WriteLine("[Result] ISR 執行時間前 5 名模組（依 HandlerModuleName 分組）：");
+    foreach (var item in isrByModule)
+    {
+        Console.WriteLine($"  {item.Module}: {item.Count} 次，共 {item.TotalMilliseconds:F3} ms");
+    }
+
+    var dpcByModule = dpcIntervals
+        .GroupBy(dpc => dpc.HandlerModuleName)
+        .Select(group => new
+        {
+            Module = group.Key,
+            Count = group.Count(),
+            TotalMilliseconds = group.Sum(item => item.DurationMSec),
+        })
+        .OrderByDescending(item => item.TotalMilliseconds)
+        .Take(5);
+
+    Console.WriteLine("[Result] DPC 執行時間前 5 名模組（依 HandlerModuleName 分組）：");
+    foreach (var item in dpcByModule)
+    {
+        Console.WriteLine($"  {item.Module}: {item.Count} 次，共 {item.TotalMilliseconds:F3} ms");
+    }
+
+    var dpcByType = dpcIntervals
+        .GroupBy(dpc => dpc.CallType == EtlDeferredProcedureCallType.ThreadedDpc ? EtlDeferredProcedureCallType.Normal : dpc.CallType)
+        .Select(group => new { CallType = group.Key, Count = group.Count() });
+
+    Console.WriteLine("[Result] DPC 依 CallType 統計（ThreadedDpc 已併入 Normal，才能與 TraceProcessor 對等比較）：");
+    foreach (var item in dpcByType)
+    {
+        Console.WriteLine($"  {item.CallType}: {item.Count} 次");
+    }
+
+    // === UseMemoryUtilizationData()：對應 TraceProcessor 的 trace.UseMemoryUtilizationData() ===
+    IReadOnlyList<MemoryUtilizationEventInfo> memorySnapshots = pendingMemoryUtilization.Result.Snapshots;
+    Console.WriteLine($"[Result] 系統記憶體用量快照數: {memorySnapshots.Count} 筆" +
+        "（對應 IMemoryUtilizationSnapshot，來源為 Microsoft-Windows-Kernel-Memory 的 MemInfo 事件）");
+    if (memorySnapshots.Count > 0)
+    {
+        MemoryUtilizationEventInfo lastSnapshot = memorySnapshots[^1];
+        static double ToMb(long pageCount) => pageCount * MemoryUtilizationEventInfo.PageSizeBytes / 1024.0 / 1024.0;
+
+        Console.WriteLine($"  最後一筆快照 @ {lastSnapshot.Timestamp:HH:mm:ss.fff}：");
+        Console.WriteLine($"    ZeroListSize={ToMb(lastSnapshot.ZeroPageCount):F2} MB, FreeListSize={ToMb(lastSnapshot.FreePageCount):F2} MB");
+        Console.WriteLine($"    ModifiedListSize={ToMb(lastSnapshot.ModifiedPageCount):F2} MB, ModifiedNoWriteListSize={ToMb(lastSnapshot.ModifiedNoWritePageCount):F2} MB, BadListSize={ToMb(lastSnapshot.BadPageCount):F2} MB");
+        Console.WriteLine($"    StandbyListSize={ToMb(lastSnapshot.StandbyTotalPageCount):F2} MB");
+        Console.WriteLine($"    RepurposedPageCount(累計計數器，非清單大小，詳見型別文件註解)={ToMb(lastSnapshot.RepurposedTotalPageCount):F2} MB");
+        Console.WriteLine($"    ModifiedPageFileDataSize={ToMb(lastSnapshot.ModifiedPageFilePageCount):F2} MB, PagedPoolCommitSize={ToMb(lastSnapshot.PagedPoolPageCount):F2} MB, NonPagedPoolSize={ToMb(lastSnapshot.NonPagedPoolPageCount):F2} MB");
+        Console.WriteLine($"    MemoryDescriptorListAllocationsSize={ToMb(lastSnapshot.MdlPageCount):F2} MB, CommitSize={ToMb(lastSnapshot.CommitPageCount):F2} MB");
+        Console.WriteLine("    （TraceProcessor 另有 InUseListSize/NonSuperfetchStandbyListSize 兩個推算欄位，本專案未提供對應數值，原因見 MemoryUtilizationEventInfo 文件註解）");
     }
 
     return stopwatch.Elapsed;
@@ -204,10 +331,14 @@ static TimeSpan RunTraceProcessorDemo(string etlFilePath)
     using ITraceProcessor trace = TraceProcessor.Create(etlFilePath, settings);
     
     // 想要哪些資料，就掛上對應的 UseXxx()；實際解析與關聯在 trace.Process() 執行時才會發生。
-    IPendingResult<IProcessDataSource> pendingProcesses = trace.UseProcesses();
-    IPendingResult<ICpuSampleDataSource> pendingCpuSamples = trace.UseCpuSamplingData();
-    IPendingResult<IGenericEventDataSource> pendingGenericEvents = trace.UseGenericEvents();
-
+    Microsoft.Windows.EventTracing.IPendingResult<Microsoft.Windows.EventTracing.Processes.IProcessDataSource> pendingProcesses = trace.UseProcesses();
+    Microsoft.Windows.EventTracing.IPendingResult<Microsoft.Windows.EventTracing.Services.IServiceDataSource> pendingServices = trace.UseServices();
+    Microsoft.Windows.EventTracing.IPendingResult<ICpuSampleDataSource> pendingCpuSamples = trace.UseCpuSamplingData();
+    Microsoft.Windows.EventTracing.IPendingResult<IGenericEventDataSource> pendingGenericEvents = trace.UseGenericEvents();
+    var energys = trace.UseEnergyEstimationData();
+    var energyMeters = trace.UseEnergyMeterData();
+    var interruptHandling = trace.UseInterruptHandlingData();
+    var memoryUtilization = trace.UseMemoryUtilizationData();
     long memoryBefore = GC.GetTotalMemory(forceFullCollection: true);
     Stopwatch stopwatch = Stopwatch.StartNew();
     trace.Process();
@@ -219,6 +350,14 @@ static TimeSpan RunTraceProcessorDemo(string etlFilePath)
 
     IReadOnlyList<IProcess> processes = pendingProcesses.Result.Processes;
     Console.WriteLine($"程序數: {processes.Count} 個（單一 IProcess 已含 PID、映像檔名、命令列、父程序、存續時間等，免自行組裝）");
+
+    IReadOnlyList<IService> services = pendingServices.Result.Services;
+    Console.WriteLine($"服務數: {services.Count} 個（IService 已依 ServiceName 分組，StateChanges 內含每次啟停與所在 PID）");
+    foreach (IService svc in services.Take(5))
+    {
+        IServiceStateChange? lastState = svc.StateChanges.Count > 0 ? svc.StateChanges[^1] : null;
+        Console.WriteLine($"  {svc.Name}: PID={(lastState is not null ? lastState.ProcessId.ToString() : "?")} 狀態={(lastState is not null ? lastState.State.ToString() : "?")}");
+    }
 
     var cpuTop5 = pendingCpuSamples.Result.Samples
         .Where(sample => sample.Process is not null)
@@ -276,6 +415,111 @@ static TimeSpan RunTraceProcessorDemo(string etlFilePath)
         {
             Console.WriteLine("  （此環境下 TraceProcessor 無法解析出此事件的欄位資料，Fields 為 null/空集合）");
         }
+    }
+
+    var energyIntervals = energys.Result.Intervals;
+    Console.WriteLine($"Energy Estimation Engine 週期數: {energyIntervals.Count} 筆（IEnergyEstimationInterval 每筆代表一次估算週期，需自行依 ConsumerId 加總才能得到單一程序總能耗）");
+    var topEnergyConsumers = energyIntervals
+        .GroupBy(interval => interval.ConsumerId)
+        .Select(group => new
+        {
+            ConsumerId = group.Key,
+            ImageName = group.First().ImageName,
+            TotalMilliJoules = group.Sum(interval => interval.TotalEnergy.TotalMillijoules),
+        })
+        .OrderByDescending(item => item.TotalMilliJoules)
+        .Take(5);
+
+    Console.WriteLine("估計耗能前 5 名（依 ConsumerId 加總 TotalEnergy）：");
+    foreach (var item in topEnergyConsumers)
+    {
+        Console.WriteLine($"  {item.ImageName} ({item.ConsumerId}): {item.TotalMilliJoules:F1} mJ");
+    }
+
+    var energyMeterIntervals = energyMeters.Result.Intervals;
+    Console.WriteLine($"Energy Meter(EMI)區間數: {energyMeterIntervals.Count} 筆（IEnergyMeasurementInterval 每筆代表硬體計量通道相鄰兩次讀數之間的耗能，僅在裝置支援 EMI 時才會有資料）");
+    var topEnergyMeterChannels = energyMeterIntervals
+        .GroupBy(interval => interval.ChannelName)
+        .Select(group => new
+        {
+            ChannelName = group.Key,
+            TotalMilliJoules = group.Sum(interval => interval.TotalEnergy.TotalMillijoules),
+        })
+        .OrderByDescending(item => item.TotalMilliJoules)
+        .Take(5);
+
+    Console.WriteLine("硬體電錶耗能前 5 個通道（依 ChannelName 加總 TotalEnergy）：");
+    foreach (var item in topEnergyMeterChannels)
+    {
+        Console.WriteLine($"  {item.ChannelName}: {item.TotalMilliJoules:F1} mJ");
+    }
+
+    // === trace.UseInterruptHandlingData()：一次到位取得已配對好 StartTime/StopTime/HandlerImage 的 ISR/DPC 區間 ===
+    var isrIntervals = interruptHandling.Result.InterruptServiceRoutines;
+    var dpcIntervals = interruptHandling.Result.DeferredProcedureCalls;
+    Console.WriteLine();
+    Console.WriteLine($"ISR(中斷服務常式)區間數: {isrIntervals.Count} 筆，DPC(延遲程序呼叫)區間數: {dpcIntervals.Count} 筆" +
+        "（IInterruptServiceRoutineInterval/IDeferredProcedureCallInterval 已含 StartTime/StopTime/HandlerImage，免自行配對或反查模組）");
+
+    var isrByModule = isrIntervals
+        .GroupBy(isr => isr.HandlerImage?.FileName ?? "<未知模組>")
+        .Select(group => new
+        {
+            Module = group.Key,
+            Count = group.Count(),
+            TotalMilliseconds = group.Sum(item => (double)(item.StopTime - item.StartTime).TotalMilliseconds),
+        })
+        .OrderByDescending(item => item.TotalMilliseconds)
+        .Take(5);
+
+    Console.WriteLine("ISR 執行時間前 5 名模組（依 HandlerImage 分組）：");
+    foreach (var item in isrByModule)
+    {
+        Console.WriteLine($"  {item.Module}: {item.Count} 次，共 {item.TotalMilliseconds:F3} ms");
+    }
+
+    var dpcByModule = dpcIntervals
+        .GroupBy(dpc => dpc.HandlerImage?.FileName ?? "<未知模組>")
+        .Select(group => new
+        {
+            Module = group.Key,
+            Count = group.Count(),
+            TotalMilliseconds = group.Sum(item => (double)(item.StopTime - item.StartTime).TotalMilliseconds),
+        })
+        .OrderByDescending(item => item.TotalMilliseconds)
+        .Take(5);
+
+    Console.WriteLine("DPC 執行時間前 5 名模組（依 HandlerImage 分組）：");
+    foreach (var item in dpcByModule)
+    {
+        Console.WriteLine($"  {item.Module}: {item.Count} 次，共 {item.TotalMilliseconds:F3} ms");
+    }
+
+    var dpcByType = dpcIntervals
+        .GroupBy(dpc => dpc.CallType)
+        .Select(group => new { group.Key, Count = group.Count() });
+
+    Console.WriteLine("DPC 依 CallType 統計（Normal/Timer；TraceProcessor 不像 EtlFileReader 額外區分 ThreadedDpc）：");
+    foreach (var item in dpcByType)
+    {
+        Console.WriteLine($"  {item.Key}: {item.Count} 次");
+    }
+
+    // === trace.UseMemoryUtilizationData()：一次到位取得已換算成 DataSize 的系統記憶體用量快照 ===
+    var memorySnapshots = memoryUtilization.Result.Snapshots;
+    Console.WriteLine($"系統記憶體用量快照數: {memorySnapshots.Count} 筆（IMemoryUtilizationSnapshot 每筆對應一次 Kernel-Memory MemInfo 事件）");
+    if (memorySnapshots.Count > 0)
+    {
+        var lastSnapshot = memorySnapshots[^1];
+        Console.WriteLine($"  最後一筆快照 @ {lastSnapshot.Timestamp.DateTimeOffset:HH:mm:ss.fff}：");
+        Console.WriteLine($"    ZeroListSize={lastSnapshot.ZeroListSize.TotalMegabytes:F2} MB, FreeListSize={lastSnapshot.FreeListSize.TotalMegabytes:F2} MB, InUseListSize={lastSnapshot.InUseListSize.TotalMegabytes:F2} MB");
+        Console.WriteLine($"    ModifiedListSize={lastSnapshot.ModifiedListSize.TotalMegabytes:F2} MB, ModifiedNoWriteListSize={lastSnapshot.ModifiedNoWriteListSize.TotalMegabytes:F2} MB, BadListSize={lastSnapshot.BadListSize.TotalMegabytes:F2} MB");
+        Console.WriteLine($"    StandbyListSize={lastSnapshot.StandbyListSize.TotalMegabytes:F2} MB, NonSuperfetchStandbyListSize={lastSnapshot.NonSuperfetchStandbyListSize.TotalMegabytes:F2} MB, RepurposedListSize={lastSnapshot.RepurposedListSize.TotalMegabytes:F2} MB");
+        Console.WriteLine($"    ModifiedPageFileDataSize={lastSnapshot.ModifiedPageFileDataSize.TotalMegabytes:F2} MB, PagedPoolCommitSize={lastSnapshot.PagedPoolCommitSize.TotalMegabytes:F2} MB, NonPagedPoolSize={lastSnapshot.NonPagedPoolSize.TotalMegabytes:F2} MB");
+        Console.WriteLine($"    MemoryDescriptorListAllocationsSize={lastSnapshot.MemoryDescriptorListAllocationsSize.TotalMegabytes:F2} MB, CommitSize={lastSnapshot.CommitSize.TotalMegabytes:F2} MB");
+        Console.WriteLine("    （InUseListSize/NonSuperfetchStandbyListSize 是 TraceProcessor 內部推算欄位，MemInfo 事件本身沒有對應的原始欄位可解析，EtlFileReader 端故意不提供這兩項，避免以未經證實的猜測值冒充真實資料）");
+        Console.WriteLine("    （RepurposedListSize 經比對後發現不宜與 EtlFileReader 的 RepurposedTotalPageCount 直接對照：後者是原始事件裡單調遞增的累計計數器，" +
+            "TraceProcessor 疑似對其做了「相鄰快照差值」之類的內部換算才得到這種數十 MB、會隨時間起伏的數值，但確切公式未公開，還原後仍有約 5% 誤差，故不採用）");
     }
 
     return stopwatch.Elapsed;

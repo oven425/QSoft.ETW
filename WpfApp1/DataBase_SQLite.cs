@@ -16,6 +16,8 @@ namespace WpfApp1
             DROP INDEX IF EXISTS IX_ImageLoads_ProcessRecord;
             DROP INDEX IF EXISTS IX_Processes_ActiveProcess;
             DROP INDEX IF EXISTS IX_ProcessMemoryCounters_ProcessRecordTimestamp;
+            DROP INDEX IF EXISTS IX_ServiceStatusChanges_ServiceNameTimestamp;
+            DROP INDEX IF EXISTS IX_ServiceStatusChanges_ProcessRecord;
             DROP INDEX IF EXISTS IX_WmiActivityEvents_EventTimestamp;
             DROP INDEX IF EXISTS IX_WmiActivityEvents_ProcessRecord;
             DROP INDEX IF EXISTS IX_WmiActivityEvents_11_Namespace;
@@ -55,6 +57,12 @@ namespace WpfApp1
 
             CREATE INDEX IF NOT EXISTS IX_ProcessMemoryCounters_ProcessRecordTimestamp
             ON ProcessMemoryCounters (ProcessRecordId, TimestampUtc DESC, ProcessMemoryCounterId DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_ServiceStatusChanges_ServiceNameTimestamp
+            ON ServiceStatusChanges (ServiceName, TimestampUtc DESC, ServiceStatusChangeId DESC);
+
+            CREATE INDEX IF NOT EXISTS IX_ServiceStatusChanges_ProcessRecord
+            ON ServiceStatusChanges (ProcessRecordId, TimestampUtc);
 
             CREATE INDEX IF NOT EXISTS IX_WmiActivityEvents_EventTimestamp
             ON WmiActivityEvents (EventId, TimestampUtc);
@@ -142,6 +150,7 @@ namespace WpfApp1
         private SqliteCommand? _writeProcessStartCommand;
         private SqliteCommand? _writeProcessStopCommand;
         private SqliteCommand? _writeProcessMemoryCounterCommand;
+        private SqliteCommand? _writeServiceStatusChangeCommand;
         private SqliteCommand? _writeWmiActivityParentCommand;
         private SqliteCommand? _writeWmiActivity11Command;
         private SqliteCommand? _writeWmiActivity12Command;
@@ -252,6 +261,19 @@ namespace WpfApp1
                           VirtualBytes INTEGER NOT NULL,
                           WorkingSetBytes INTEGER NOT NULL,
                           PrivateBytes INTEGER NOT NULL
+                      );
+
+                      CREATE TABLE IF NOT EXISTS ServiceStatusChanges
+                      (
+                          ServiceStatusChangeId INTEGER PRIMARY KEY,
+                          ProcessRecordId INTEGER NULL REFERENCES Processes(ProcessRecordId) ON DELETE RESTRICT,
+                          TimestampUtc INTEGER NOT NULL,
+                          ServiceName TEXT NOT NULL,
+                          ImageName TEXT NOT NULL,
+                          ProcessId INTEGER NOT NULL,
+                          ExecutionPhase INTEGER NOT NULL,
+                          CurrentState INTEGER NOT NULL,
+                          StartType INTEGER NOT NULL
                       );
 
                        CREATE TABLE IF NOT EXISTS WmiActivityEvents
@@ -674,6 +696,7 @@ namespace WpfApp1
             _writeProcessStartCommand = CreateWriteProcessStartCommand(connection, transaction);
             _writeProcessStopCommand = CreateWriteProcessStopCommand(connection, transaction);
             _writeProcessMemoryCounterCommand = CreateWriteProcessMemoryCounterCommand(connection, transaction);
+            _writeServiceStatusChangeCommand = CreateWriteServiceStatusChangeCommand(connection, transaction);
             _writeWmiActivityParentCommand = CreateWriteWmiActivityParentCommand(connection, transaction);
             _writeWmiActivity11Command = CreateWriteWmiActivity11Command(connection, transaction);
             _writeWmiActivity12Command = CreateWriteWmiActivity12Command(connection, transaction);
@@ -1249,6 +1272,21 @@ namespace WpfApp1
             CommitWriteBatchIfNeeded();
         }
 
+        public void WriteServiceStatusChange(in ServiceStatusChangeEventInfo data)
+        {
+            SqliteCommand command = _writeServiceStatusChangeCommand ?? throw new InvalidOperationException("請先開啟 SQLite 資料庫。");
+            command.Parameters["$processRecordId"].Value = ToDbValue(ResolveProcessRecordId(data.ProcessId, data.Timestamp));
+            command.Parameters["$timestampUtc"].Value = ToUtcTicks(data.Timestamp);
+            command.Parameters["$serviceName"].Value = data.ServiceName ?? string.Empty;
+            command.Parameters["$imageName"].Value = data.ImageName ?? string.Empty;
+            command.Parameters["$processId"].Value = Convert.ToInt64(data.ProcessId, CultureInfo.InvariantCulture);
+            command.Parameters["$executionPhase"].Value = Convert.ToInt64(data.ExecutionPhase, CultureInfo.InvariantCulture);
+            command.Parameters["$currentState"].Value = Convert.ToInt64(data.CurrentState, CultureInfo.InvariantCulture);
+            command.Parameters["$startType"].Value = Convert.ToInt64(data.StartType, CultureInfo.InvariantCulture);
+            command.ExecuteNonQuery();
+            CommitWriteBatchIfNeeded();
+        }
+
         public void WriteProcessStop(ProcessInfo process, DateTime startedAt, long? cpuDurationTicks = null, double? cpuUsagePercent = null)
         {
             if ((cpuDurationTicks is null) != (cpuUsagePercent is null))
@@ -1359,6 +1397,8 @@ namespace WpfApp1
             _writeProcessStopCommand = null;
             _writeProcessMemoryCounterCommand?.Dispose();
             _writeProcessMemoryCounterCommand = null;
+            _writeServiceStatusChangeCommand?.Dispose();
+            _writeServiceStatusChangeCommand = null;
             _writeWmiActivityParentCommand?.Dispose();
             _writeWmiActivityParentCommand = null;
             _writeWmiActivity11Command?.Dispose();
@@ -1522,6 +1562,7 @@ namespace WpfApp1
                 _writeProcessStartCommand,
                 _writeProcessStopCommand,
                 _writeProcessMemoryCounterCommand,
+                _writeServiceStatusChangeCommand,
                 _writeWmiActivityParentCommand,
                 _writeWmiActivity11Command,
                 _writeWmiActivity12Command,
@@ -2277,6 +2318,27 @@ namespace WpfApp1
             command.Parameters.Add("$virtualBytes", SqliteType.Integer);
             command.Parameters.Add("$workingSetBytes", SqliteType.Integer);
             command.Parameters.Add("$privateBytes", SqliteType.Integer);
+            command.Prepare();
+            return command;
+        }
+
+        private static SqliteCommand CreateWriteServiceStatusChangeCommand(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                @"INSERT INTO ServiceStatusChanges
+                    (ProcessRecordId, TimestampUtc, ServiceName, ImageName, ProcessId, ExecutionPhase, CurrentState, StartType)
+                  VALUES
+                    ($processRecordId, $timestampUtc, $serviceName, $imageName, $processId, $executionPhase, $currentState, $startType);";
+            command.Parameters.Add("$processRecordId", SqliteType.Integer);
+            command.Parameters.Add("$timestampUtc", SqliteType.Integer);
+            command.Parameters.Add("$serviceName", SqliteType.Text);
+            command.Parameters.Add("$imageName", SqliteType.Text);
+            command.Parameters.Add("$processId", SqliteType.Integer);
+            command.Parameters.Add("$executionPhase", SqliteType.Integer);
+            command.Parameters.Add("$currentState", SqliteType.Integer);
+            command.Parameters.Add("$startType", SqliteType.Integer);
             command.Prepare();
             return command;
         }

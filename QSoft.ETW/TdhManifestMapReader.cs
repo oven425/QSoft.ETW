@@ -65,7 +65,11 @@ public static class TdhManifestMapReader
     public static IReadOnlyList<ManifestEventInfo> QueryEnergyEstimateEventInfo()
         => QueryManifestEventInfo(EnergyEstimationEngineProviderId, EnergyEstimateEventId);
 
-    public static unsafe IReadOnlyList<ManifestEventInfo> QueryManifestEventInfo(Guid providerId, ushort eventId)
+    /// <summary>
+    /// 查詢指定 Provider 的 Manifest 事件資訊。
+    /// <paramref name="eventId"/> 為 null 時不篩選 Event Id,回傳該 Provider 底下的所有事件。
+    /// </summary>
+    public static unsafe IReadOnlyList<ManifestEventInfo> QueryManifestEventInfo(Guid providerId, ushort? eventId = null)
     {
         List<EVENT_DESCRIPTOR> matchingDescriptors = EnumerateMatchingDescriptors(providerId, eventId);
         if (matchingDescriptors.Count == 0)
@@ -123,7 +127,7 @@ public static class TdhManifestMapReader
         return sb.ToString();
     }
 
-    private static unsafe List<EVENT_DESCRIPTOR> EnumerateMatchingDescriptors(Guid providerId, ushort eventId)
+    private static unsafe List<EVENT_DESCRIPTOR> EnumerateMatchingDescriptors(Guid providerId, ushort? eventId)
     {
         List<EVENT_DESCRIPTOR> matches = [];
 
@@ -150,7 +154,7 @@ public static class TdhManifestMapReader
             for (int i = 0; i < header.NumberOfEvents; i++)
             {
                 ref readonly EVENT_DESCRIPTOR descriptor = ref Unsafe.AsRef<EVENT_DESCRIPTOR>((void*)(arrayStart + i * descriptorSize));
-                if (descriptor.Id == eventId)
+                if (eventId is null || descriptor.Id == eventId.Value)
                 {
                     matches.Add(descriptor);
                 }

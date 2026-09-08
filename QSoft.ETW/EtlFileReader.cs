@@ -328,11 +328,11 @@ public sealed class EtlReadResult
     public uint ProcessorCount { get; set; }
     public uint BuffersLost { get; set; }
     public uint EventsLost { get; set; }
+    /// <summary>QueryPerformanceCounter 頻率(ticks/秒),取自 ETL 檔頭(TRACE_LOGFILE_HEADER.PerfFreq),
+    /// 供外部自行換算 DPC/ISR 等事件內嵌的原始 QPC 時間戳記使用。未知時為 0。</summary>
+    public long PerfFreq { get; set; }
     public EtlAnalysisResult? Analysis { get; set; }
-    public List<ProcessRecord> Processes { get; } = [];
     public List<ThreadInfo> Threads { get; } = [];
-    /// <summary>未歸屬於任何使用者程序的模組（例如核心模式驅動程式），供 DPC/ISR 位址反解使用。</summary>
-    public List<ModuleInfo> KernelModules { get; } = [];
     public List<CSwitchEventInfo> CSwitchEvents { get; } = [];
     public List<ProfileEventInfo> ProfileEvents { get; } = [];
     public List<DpcEventInfo> DpcEvents { get; } = [];
@@ -481,6 +481,284 @@ public sealed class ProcessRecord
     public List<ModuleInfo> Modules { get; } = [];
 }
 
+/// <summary>對應 SERVICE_STATUS.dwCurrentState(winsvc.h),由 Microsoft-Windows-Services EventId=105 的 CurrentState 欄位轉換而來。</summary>
+public enum ServiceState : uint
+{
+    Stopped = 1,
+    StartPending = 2,
+    StopPending = 3,
+    Running = 4,
+    ContinuePending = 5,
+    PausePending = 6,
+    Paused = 7,
+}
+
+/// <summary>對應 QUERY_SERVICE_CONFIG.dwStartType(winsvc.h),由 Microsoft-Windows-Services EventId=105 的 StartType 欄位轉換而來。</summary>
+public enum ServiceStartType : uint
+{
+    BootStart = 0,
+    SystemStart = 1,
+    AutoStart = 2,
+    DemandStart = 3,
+    Disabled = 4,
+}
+
+/// <summary>單一次服務狀態變化紀錄,對應 TraceProcessor 的 IServiceStateChange。</summary>
+public readonly record struct ServiceStateChangeRecord(DateTime Timestamp, uint ProcessId, ServiceState State, ServiceStartType StartType, uint ExecutionPhase);
+
+/// <summary>單一服務的存續期間彙總資訊,對應 TraceProcessor 的 IService,由內建關聯引擎於解析過程中依 ServiceName 建立與更新。</summary>
+public sealed class ServiceRecord
+{
+    public required string ServiceName { get; init; }
+    public string ImageFileName { get; set; } = string.Empty;
+    /// <summary>最近一次狀態變化回報的所在 ProcessId(服務可能因 svchost 共用行程而在不同啟動間換過 PID)。</summary>
+    public uint? ProcessId { get; set; }
+    public ServiceState? CurrentState { get; set; }
+    public ServiceStartType? StartType { get; set; }
+    public List<ServiceStateChangeRecord> StateChanges { get; } = [];
+}
+
+/// <summary>
+/// 單一次 Energy Estimation Engine(E3)估算週期紀錄,對應 TraceProcessor 的 IEnergyEstimationInterval,
+/// 由 <see cref="EnergyEstimationEngineEventInfo_37"/>(Event ID 37,EnergyEstimate)直接轉換而來。
+/// 該事件本身就是「本次估算週期內」的累積快照,因此天生就是一段時間區間(StartTime~StopTime),
+/// 而非單一時間點,不需像程序/服務那樣等待配對的結束事件。
+/// </summary>
+public sealed class EnergyEstimationInterval
+{
+    /// <summary>回報此筆能耗的 ProcessId(來自 Event 37 的 EventHeader.ProcessId)。</summary>
+    public required uint ProcessId { get; init; }
+
+    /// <summary>對應 TraceProcessor 的 ImageName;來源事件的 AppName 欄位,可能為空字串。</summary>
+    public string ImageName { get; init; } = string.Empty;
+
+    /// <summary>本次估算週期結束時間,即 Event 37 的 Timestamp。</summary>
+    public required DateTime StartTime { get; init; }
+
+    /// <summary>本次估算週期結束時間(即 Event 37 的 Timestamp);StartTime 則是從此時間往前推 TimeInMSec 毫秒推算而來。</summary>
+    public required DateTime StopTime { get; init; }
+
+    public ulong CpuEnergy { get; init; }
+    public ulong DisplayEnergy { get; init; }
+    public ulong DiskEnergy { get; init; }
+    public ulong NetworkEnergy { get; init; }
+    public ulong MobileBroadbandEnergy { get; init; }
+    public ulong LossEnergy { get; init; }
+    public ulong OtherEnergy { get; init; }
+
+    /// <summary>對應 TraceProcessor 的 SystemOnChipEnergy;來源事件的 GpuEnergy 欄位(新版 manifest 下實際上是 SocEnergy,见 <see cref="EnergyEstimationEngineEventInfo_37.GpuEnergy"/>)。</summary>
+    public ulong SystemOnChipEnergy { get; init; }
+
+    /// <summary>
+    /// 本專案自行加總的總能耗(單位 mJ):CpuEnergy+DisplayEnergy+DiskEnergy+NetworkEnergy+MobileBroadbandEnergy+LossEnergy+OtherEnergy+SystemOnChipEnergy。
+    /// TraceProcessor 內部實際的 TotalEnergy 公式未公開,此處為本專案依可取得欄位重建的近似值。
+    /// </summary>
+    public ulong TotalEnergy { get; init; }
+
+    /// <summary>依 TotalEnergy 除以本次週期時長換算的平均功率(毫瓦,mW);週期時長為 0 時回傳 0。</summary>
+    public double TotalPowerMilliwatts { get; init; }
+
+    /// <summary>解碼自 RecordFlags 位 0x2:本次週期是否使用電池(螢幕開啟)。</summary>
+    public bool IsScreenOn { get; init; }
+
+    /// <summary>解碼自 RecordFlags 位 0x4:本次週期省電模式是否啟用。</summary>
+    public bool IsBatterySaverActive { get; init; }
+
+    /// <summary>解碼自 RecordFlags 位 0x10:本次週期應用程式是否位於前景。</summary>
+    public bool IsApplicationInForeground { get; init; }
+
+    public ushort UserId { get; init; }
+}
+
+/// <summary>
+/// 對應 TraceProcessor 的 IEnergyMeasurementInterval:硬體 Energy Meter Interface(EMI)在同一計量通道(rail)上,
+/// 前後兩次輪詢讀數之間量測到的耗能區間,由 <see cref="PowerMeterPollingEventInfo_4"/>(Event ID 4,EMI 讀數)
+/// 相鄰兩筆依 MeterId 相減而得;ChannelName 則從 <see cref="PowerMeterPollingEventInfo_2"/>(Event ID 2,
+/// EnergyMeterRundown)依 MeterId 查表取得。同一 MeterId 收到第一筆讀數時尚無前一筆可供相減,不會產生區間,
+/// 因此 N 筆讀數只會產生 N-1 個區間,此行為與 TraceProcessor 一致。
+/// </summary>
+public sealed class EnergyMeasurementInterval
+{
+    /// <summary>能源計量通道的穩定識別碼,來自 Event 2/4 共用的 MeterId 欄位,可作為兩者的 join key。</summary>
+    public required ulong MeterId { get; init; }
+
+    /// <summary>
+    /// 對應 TraceProcessor 的 ChannelName;取自 <see cref="PowerMeterPollingEventInfo_2"/> 的 ChannelName
+    /// (例如 SYSTEM_PVBAT、CPU_VCCSA_1)。若尚未收到對應 MeterId 的 Rundown 事件,以 "0x{MeterId:X}" 代替。
+    /// </summary>
+    public required string ChannelName { get; init; }
+
+    /// <summary>本區間起始時間,即前一筆讀數的 Timestamp。</summary>
+    public required DateTime StartTime { get; init; }
+
+    /// <summary>本區間結束時間,即本筆讀數的 Timestamp。</summary>
+    public required DateTime StopTime { get; init; }
+
+    /// <summary>
+    /// 本區間耗能(單位:毫焦耳 mJ),由硬體回報的 AbsoluteEnergy(單位為 picowatt-hours,任意零點)前後兩筆差值換算而來:
+    /// 1 picowatt-hour = 3600 picojoule = 3.6×10⁻⁶ mJ。AbsoluteEnergy 為遞增累加值,理論上不會倒退;
+    /// 若因硬體重置等原因偵測到負差值,此處以 0 計。
+    /// </summary>
+    public required double TotalEnergy { get; init; }
+
+    /// <summary>依 TotalEnergy 除以區間時長換算的平均功率(毫瓦,mW);區間時長為 0 時回傳 0。</summary>
+    public required double TotalPowerMilliwatts { get; init; }
+}
+
+/// <summary>
+/// DPC(Deferred Procedure Call)執行型態,對應 TraceProcessor 的 DeferredProcedureCallType,
+/// 但 TraceProcessor 只有 Normal/Timer 兩種值。EtlFileReader 額外保留 <see cref="ThreadedDpc"/>,
+/// 反映 PerfInfoThreadedDPC(Opcode 66)與 PerfInfoDPC(Opcode 68)實際上是不同 Opcode 的原始事實。
+/// 與 TraceProcessor 比對時,<see cref="ThreadedDpc"/> 應併入 <see cref="Normal"/> 才是對等比較
+/// (見 ConsoleApp_Test 示範程式的比對邏輯)。
+/// </summary>
+public enum EtlDeferredProcedureCallType
+{
+    Normal,
+    Timer,
+    ThreadedDpc,
+}
+
+/// <summary>
+/// 單一次 ISR(Interrupt Service Routine)執行區間,對應 TraceProcessor 的 IInterruptServiceRoutineInterval。
+/// 由 <see cref="EtlReaderPlugins.InterruptHandlingDataSourceExtensions.UseInterruptHandlingData"/> 建立;
+/// 原始資料來自 <see cref="EtlFileReader.PerfInfoISR"/>(<see cref="InterruptEventInfo"/>)。
+/// </summary>
+public sealed class InterruptServiceRoutineInterval
+{
+    /// <summary>ISR 開始執行時間;由 StopTime 往前推 <see cref="InterruptEventInfo.ElapsedTimeMSec"/> 推算,
+    /// 當 ETL 檔頭缺少 PerfFreq 資訊而無法換算耗時時,等於 <see cref="StopTime"/>(耗時視為 0)。</summary>
+    public required DateTime StartTime { get; init; }
+
+    /// <summary>ISR 執行完成時間,即原始事件的 Timestamp(傳統 PerfInfo ISR 事件於執行完成當下才會記錄)。</summary>
+    public required DateTime StopTime { get; init; }
+
+    public required byte Processor { get; init; }
+    public ulong? HandlerRoutineAddress { get; init; }
+
+    /// <summary>依 <see cref="HandlerRoutineAddress"/> 反查得到的模組(驅動程式)檔名;查無對應模組時為 "&lt;未映射&gt;"。</summary>
+    public string HandlerModuleName { get; init; } = "<未映射>";
+
+    public byte? Vector { get; init; }
+    public byte? ReturnValue { get; init; }
+
+    /// <summary>
+    /// 對應 TraceProcessor 以 StopTime-StartTime 換算的耗時(毫秒)。
+    /// 已知限制(實測比對 TraceProcessor 後發現):此值來自 ComputeElapsedTimeMSec() 的線上最小平方回歸估計,
+    /// 因 ISR 真實耗時恆為非負值而回歸法先天存在系統性低估,尤其執行極快的模組(如 storport.sys)可能被低估
+    /// 到接近 0。事件筆數與 HandlerModuleName 不受影響、可放心採信;需要精確耗時數據請改用 TraceProcessor 的
+    /// IInterruptServiceRoutineInterval。詳見 InterruptHandlingDataSourceCollector.ComputeInterval 的說明。
+    /// </summary>
+    public double DurationMSec => (StopTime - StartTime).TotalMilliseconds;
+}
+
+/// <summary>
+/// 單一次 DPC(Deferred Procedure Call)執行區間,對應 TraceProcessor 的 IDeferredProcedureCallInterval。
+/// 由 <see cref="EtlReaderPlugins.InterruptHandlingDataSourceExtensions.UseInterruptHandlingData"/> 建立;
+/// 原始資料來自 <see cref="EtlFileReader.PerfInfoDPC"/>/<see cref="EtlFileReader.PerfInfoThreadedDPC"/>/
+/// <see cref="EtlFileReader.PerfInfoTimerDPC"/>(<see cref="DpcEventInfo"/>)。
+/// </summary>
+public sealed class DeferredProcedureCallInterval
+{
+    /// <summary>DPC 開始執行時間;推算方式同 <see cref="InterruptServiceRoutineInterval.StartTime"/>。</summary>
+    public required DateTime StartTime { get; init; }
+
+    /// <summary>DPC 執行完成時間,即原始事件的 Timestamp。</summary>
+    public required DateTime StopTime { get; init; }
+
+    public required byte Processor { get; init; }
+    public ulong? HandlerRoutineAddress { get; init; }
+    public string HandlerModuleName { get; init; } = "<未映射>";
+    public required EtlDeferredProcedureCallType CallType { get; init; }
+
+    /// <summary>
+    /// 對應 TraceProcessor 以 StopTime-StartTime 換算的耗時(毫秒)。
+    /// 已知限制與 <see cref="InterruptServiceRoutineInterval.DurationMSec"/> 相同:回歸法先天存在系統性低估,
+    /// 事件筆數與 HandlerModuleName 不受影響、可放心採信;需要精確耗時數據請改用 TraceProcessor 的
+    /// IDeferredProcedureCallInterval。
+    /// </summary>
+    public double DurationMSec => (StopTime - StartTime).TotalMilliseconds;
+}
+
+/// <summary>
+/// 單一次系統記憶體用量快照,對應 TraceProcessor 的 IMemoryUtilizationSnapshot。由
+/// <see cref="EtlReaderPlugins.MemoryUtilizationDataSourceExtensions.UseMemoryUtilizationData"/> 建立。
+/// 來源為 Microsoft-Windows-Kernel-Memory 提供者(<see cref="TraceSessionBuilder.KernelMemoryProviderGuid"/>)
+/// Event Id=1 Version=1(MemInfo),須以該 GUID 搭配 <see cref="TraceSessionBuilder.KernelMemoryMemInfoKeyword"/>
+/// 關鍵字擷取才會有此事件——與 <see cref="TraceSessionBuilder.SystemMemoryProviderGuid"/>(System Memory
+/// Provider,僅是啟用用的控制平面 GUID,依官方文件其輸出事件不會標示為該 GUID)是兩個不同的提供者,
+/// 已透過實際擷取驗證(啟用 SystemMemoryProviderGuid 並不會產生本事件)。
+///
+/// 所有 XxxPageCount 皆為「4KB 分頁數」,乘上 <see cref="PageSizeBytes"/> 即為位元組數,對應 TraceProcessor
+/// DataSize 型別欄位的位元組語意。欄位名稱、型別、陣列長度(PriorityLevels)均已用本機實際擷取
+/// (TdhGetPropertySize/TdhGetProperty)驗證,UserDataLength 209 bytes = 1(PriorityLevels)+5×8(單一分頁數
+/// 欄位)+8×8(StandbyPriorityPageCounts)+8×8(RepurposedPriorityPageCounts)+5×8(其餘單一分頁數欄位)。
+///
+/// 注意:TraceProcessor 的 IMemoryUtilizationSnapshot 另有 InUseListSize 與 NonSuperfetchStandbyListSize
+/// 兩個欄位,本類別未提供對應欄位——因為這兩者並非本事件的原始欄位,TraceProcessor 內部實際計算方式並未公開,
+/// 為避免以未經證實的猜測值冒充真實資料,刻意省略(比較 demo 中會保留 TraceProcessor 這兩欄的輸出,但不與
+/// EtlFileReader 端做比較)。
+///
+/// 另一項實測比對後發現的重要落差:<see cref="RepurposedPriorityPageCounts"/>/<see cref="RepurposedTotalPageCount"/>
+/// 雖然欄位名稱與數值皆已用 TdhGetProperty 逐項驗證無誤(確認是 MemInfo 事件裡確實存在、名為 RepurposedPageCounts
+/// 的原始欄位),但實測發現其語意是「自追蹤開始(或開機)以來,依優先權累計的『已重新用途化(repurposed)分頁數』
+/// 計數器」——單調遞增,量級可達數十萬頁(數百 GB 級)，而非一個有界的「目前清單大小」。這與 TraceProcessor 的
+/// RepurposedListSize/RepurposedSubListSizes(數值通常僅數十 MB、且會隨時間增減)明顯是不同的度量;實測交叉比對
+/// 顯示 TraceProcessor 疑似是取「相鄰兩次快照間的差值」等內部換算方式呈現,但確切演算法未公開,嘗試還原後仍有
+/// 約 5% 誤差,故不冒然採用可能有誤的還原公式。因此 RepurposedTotalPageCount 不宣稱等同 RepurposedListSize，
+/// 若需要「repurposed 速率」這類指標,請自行對連續快照的 RepurposedTotalPageCount 取差值,並理解這只是近似值。
+/// </summary>
+public sealed class MemoryUtilizationEventInfo
+{
+    public const long PageSizeBytes = 4096;
+
+    public required DateTime Timestamp { get; init; }
+
+    /// <summary>Standby/Repurposed 分優先權清單的層數,目前 Windows 版本一般為 8(優先權 0~7)。</summary>
+    public required byte PriorityLevels { get; init; }
+
+    public long ZeroPageCount { get; init; }
+    public long FreePageCount { get; init; }
+    public long ModifiedPageCount { get; init; }
+    public long ModifiedNoWritePageCount { get; init; }
+    public long BadPageCount { get; init; }
+
+    /// <summary>依優先權(索引=優先權,0~PriorityLevels-1)分組的 Standby 分頁數;總和即 TraceProcessor 的 StandbyListSize。</summary>
+    public IReadOnlyList<long> StandbyPriorityPageCounts { get; init; } = [];
+
+    /// <summary>
+    /// 依優先權分組、自追蹤開始以來累計的 Repurposed 分頁數(單調遞增的計數器,非目前清單大小)。
+    /// 與 TraceProcessor 的 RepurposedSubListSizes 語意不同,詳見類別註解說明,請勿直接視為等同欄位。
+    /// </summary>
+    public IReadOnlyList<long> RepurposedPriorityPageCounts { get; init; } = [];
+
+    public long ModifiedPageFilePageCount { get; init; }
+    public long PagedPoolPageCount { get; init; }
+    public long NonPagedPoolPageCount { get; init; }
+    public long MdlPageCount { get; init; }
+    public long CommitPageCount { get; init; }
+
+    /// <summary>對應 TraceProcessor 的 StandbyListSize(分頁數):StandbyPriorityPageCounts 各優先權加總。</summary>
+    public long StandbyTotalPageCount => Sum(StandbyPriorityPageCounts);
+
+    /// <summary>
+    /// RepurposedPriorityPageCounts 各優先權加總,即自追蹤開始以來累計的 Repurposed 分頁數(單調遞增)。
+    /// 注意:這不等同 TraceProcessor 的 RepurposedListSize,詳見類別註解說明。
+    /// </summary>
+    public long RepurposedTotalPageCount => Sum(RepurposedPriorityPageCounts);
+
+    private static long Sum(IReadOnlyList<long> values)
+    {
+        long total = 0;
+        foreach (long value in values)
+        {
+            total += value;
+        }
+
+        return total;
+    }
+}
+
 public readonly record struct ProcessInfo
 {
     public UIntPtr UniqueProcessKey { get; init; }
@@ -532,6 +810,22 @@ public readonly record struct ProcessCounterEventInfo
     public ulong QuotaPagedPoolUsage { get; init; }
     public ulong QuotaNonPagedPoolUsage { get; init; }
     public ulong PrivatePageCount { get; init; }
+}
+
+/// <summary>
+/// 對應 Microsoft-Windows-Services provider 的 EventId=105(task=ServiceStatusChange, opcode=101 StatusChange)。
+/// 欄位已用 "Get-WinEvent -ListProvider Microsoft-Windows-Services" 查證其 template,含服務名稱、目前所在的
+/// 映像檔/ProcessId 與狀態,是 TraceProcessor IServiceDataSource 背後對應的資料來源之一。
+/// </summary>
+public readonly record struct ServiceStatusChangeEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public uint ExecutionPhase { get; init; }
+    public uint CurrentState { get; init; }
+    public uint StartType { get; init; }
+    public uint ProcessId { get; init; }
+    public string ServiceName { get; init; }
+    public string ImageName { get; init; }
 }
 
 public sealed class ModuleInfo
@@ -604,9 +898,29 @@ public readonly record struct FileIOEventInfo
 }
 
 
+/// <summary>
+/// 對應 Power Meter Polling 提供者 Event ID 2(EnergyMeterRundown):能源計量通道(rail)的中繼資料,
+/// 包含穩定的 MeterId(可作為與 Event ID 4 <see cref="PowerMeterPollingEventInfo_4"/> 對應的 join key)、
+/// 預設輪詢週期,以及通道名稱(例如 SYSTEM_PVBAT、CPU_VCCSA_1)。
+/// </summary>
+public readonly record struct PowerMeterPollingEventInfo_2
+{
+    public required DateTime Timestamp { get; init; }
+    public byte ProcessorNumber { get; init; }
+    public required ushort EventId { get; init; }
+    public required byte Version { get; init; }
+    public required byte Opcode { get; init; }
+    public ulong MeterId { get; init; }
+    public ulong DefaultSamplingPeriodInMs { get; init; }
+    /// <summary>UTF-16 字元數,含 NUL 結尾字元。</summary>
+    public uint ChannelNameLength { get; init; }
+    public string ChannelName { get; init; }
+}
+
 public readonly record struct PowerMeterPollingEventInfo_4
 {
     public required DateTime Timestamp { get; init; }
+    public byte ProcessorNumber { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
@@ -628,6 +942,7 @@ public readonly record struct PowerMeterPollingEventInfo_3
 public readonly record struct WmiActivityEventInfo_11
 {
     public required DateTime Timestamp { get; init; }
+    public byte ProcessorNumber { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
@@ -649,6 +964,7 @@ public readonly record struct WmiActivityEventInfo_11
 public readonly record struct WmiActivityEventInfo_12
 {
     public required DateTime Timestamp { get; init; }
+    public byte ProcessorNumber { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
@@ -697,6 +1013,7 @@ public readonly record struct WmiActivityEventInfo_20
 public readonly record struct WmiActivityEventInfo_22
 {
     public required DateTime Timestamp { get; init; }
+    public byte ProcessorNumber { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
@@ -796,6 +1113,7 @@ public readonly record struct WmiActivityEventInfo_101
 public readonly record struct WmiActivityEventInfo_13
 {
     public required DateTime Timestamp { get; init; }
+    public byte ProcessorNumber { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
@@ -842,6 +1160,7 @@ public readonly record struct KernelAcpiEventInfo_FrequentAmlMethod
 public readonly record struct KernelAcpiEventInfo_AmlMethodTrace
 {
     public required DateTime Timestamp { get; init; }
+    public byte ProcessorNumber { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
@@ -953,6 +1272,20 @@ public readonly record struct CSwitchEventInfo
     public required int OldThreadState { get; init; }
     public required int OldThreadWaitIdealProcessor { get; init; }
     public required int NewThreadWaitTime { get; init; }
+
+    /// <summary>
+    /// BAM QoS(Bandwidth Allocation Manager Quality of Service)3-bit 原始值(0-7),解碼自
+    /// WMI_CONTEXTSWAP.Flags(offset 0x0D),對應舊執行緒(Old Thread)。僅在 CSwitch 事件 Version 4 以上
+    /// (Windows 10 1709+)才有值;Version &lt; 4 一律為 null,因為該版本不含此欄位,offset 0x0D 整個位元組
+    /// 就是 <see cref="OldThreadWaitMode"/>。
+    /// </summary>
+    public int? OldThreadBamQosLevel { get; init; }
+
+    /// <summary>
+    /// 同 <see cref="OldThreadBamQosLevel"/>,但對應新排程執行緒(New Thread),對應 WPA「CPU Usage (Precise)」/
+    /// 「Process Activity Summary」報表中依 New Thread BamQoSLevel 分組的欄位。
+    /// </summary>
+    public int? NewThreadBamQosLevel { get; init; }
 }
 
 public sealed class InterruptEventInfo
@@ -966,6 +1299,13 @@ public sealed class InterruptEventInfo
     public ulong? Routine { get; init; }
     public byte? ReturnValue { get; init; }
     public byte? Vector { get; init; }
+
+    /// <summary>
+    /// ISR 執行耗時(毫秒),由 <see cref="InitialTime"/>(原始 QPC ticks)換算為與 <see cref="Timestamp"/>
+    /// 相同的 FILETIME 時間軸後相減而得,語意對應 TraceEvent ISRTraceData 的 ElapsedTimeMSec 欄位。
+    /// 當 ETL 檔頭缺少 PerfFreq/BootTime 資訊時為 null。
+    /// </summary>
+    public double? ElapsedTimeMSec { get; init; }
 }
 
 public sealed class ProfileEventInfo
@@ -989,6 +1329,13 @@ public sealed class DpcEventInfo
     public required byte Opcode { get; init; }
     public ulong? InitialTime { get; init; }
     public ulong? Routine { get; init; }
+
+    /// <summary>
+    /// DPC 執行耗時(毫秒),由 <see cref="InitialTime"/>(原始 QPC ticks)換算為與 <see cref="Timestamp"/>
+    /// 相同的 FILETIME 時間軸後相減而得,語意對應 TraceEvent DPCTraceData 的 ElapsedTimeMSec 欄位。
+    /// 當 ETL 檔頭缺少 PerfFreq/BootTime 資訊時為 null。
+    /// </summary>
+    public double? ElapsedTimeMSec { get; init; }
 }
 
 public readonly record struct ImageLoadEventInfo
@@ -1011,6 +1358,7 @@ public readonly record struct ImageLoadEventInfo
 public readonly record struct EnergyEstimationEngineEventInfo_37
 {
     public required DateTime Timestamp { get; init; }
+    public byte ProcessorNumber { get; init; }
     public required ushort EventId { get; init; }
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
@@ -1209,6 +1557,7 @@ public sealed class EtlFileReader
     private readonly Guid s_diskIoProviderId = new("3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c");
     private readonly Guid s_fileIoProviderId = new("90cbdc39-4a3e-11d1-84f4-0000f80464e3");
     private readonly Guid s_perfInfoProviderId = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
+    private readonly Guid s_kernelMemoryProviderId = new("d1d93ef7-e1f2-4f45-9943-03d245fe6c00");
     private const byte CSwitchOpcode = 36;
     private const byte ThreadStartOpcode = 1;
     private const byte ThreadEndOpcode = 2;
@@ -1217,6 +1566,11 @@ public sealed class EtlFileReader
     private const byte SampledProfileOpcode = 46;
     private const byte ThreadDpcOpcode = 66;
     private const byte InterruptOpcode = 67;
+    // 部分現代驅動程式(如 dxgkrnl.sys、storport.sys、ndis.sys,常見於 MSI-X 訊息式中斷)會以
+    // Opcode=50 記錄 ISR 事件,而非傳統(如 acpi.sys 這類舊式線路中斷)使用的 Opcode=67。
+    // 兩者的payload結構完全相同(TraceEvent 原始碼中兩者共用同一個 ISRTraceData 樣板),
+    // 若只比對 67 會導致高頻率中斷(常常是佔比最高的項目)被完全遺漏。
+    private const byte InterruptOpcodeAlt = 50;
     private const byte DpcOpcode = 68;
     private const byte TimerDpcOpcode = 69;
     private const byte ImageUnloadOpcode = 2;
@@ -1225,43 +1579,48 @@ public sealed class EtlFileReader
     private const byte ImageLoadOpcode = 10;
     private long s_eventCount;
 
+    /// <summary>QueryPerformanceCounter 頻率(ticks/秒),取自 TRACE_LOGFILE_HEADER.PerfFreq。</summary>
+    private long _perfFreq;
+
+    // ===== DPC/ISR 耗時換算:線上最小平方回歸校正 =====
+    //
+    // DPC/ISR 事件負載內嵌的 InitialTime 是原始 QPC 時間戳記(KeQueryPerformanceCounter),但事件本身的
+    // EVENT_HEADER.TimeStamp 因為 ProcessFile() 並未啟用 PROCESS_TRACE_MODE_RAW_TIMESTAMP,已被 ETW
+    // 自動換算成 FILETIME。若單純用 TRACE_LOGFILE_HEADER.BootTime + PerfFreq 重建 InitialTime 對應的
+    // FILETIME,實測與作業系統內部實際使用的(未公開、更精確的)QPC↔FILETIME 校正之間,不僅有一個固定
+    // 偏差,兩者換算比例(斜率)也存在極小落差——在 60 秒等級的追蹤內,這個斜率誤差累積起來會造成隨時間
+    // 拉開的耗時誤差(甚至變號),單純扣掉「第一筆事件的固定偏差」不足以修正。
+    //
+    // 改用線上最小平方回歸:每筆 DPC/ISR 事件都同時提供一組 (InitialTime QPC, TimeStamp FILETIME) 樣本,
+    // 由於真實 DPC/ISR 執行時間必定極短(通常僅數微秒,遠小於我們在意的毫秒級精度),樣本雲幾乎全部貼著
+    // 真正的 QPC→FILETIME 換算直線,因此可以用回歸還原出比名目 PerfFreq 更準確的斜率與截距。
+    // 為避免 QPC/FILETIME 數值量級過大(FILETIME ticks since 1601 約 1.3e17,超出 double 可精確表示的
+    // 整數範圍)造成回歸計算的數值不穩定,所有樣本在累加前都先相對於第一筆樣本置中(取差值),使量級縮小到
+    // 追蹤長度等級(通常 <1e10)。
+    private double _calRefX;
+    private long _calRefY;
+    private double _calSumX;
+    private double _calSumY;
+    private double _calSumXY;
+    private double _calSumXX;
+    private long _calCount;
+
+
     private EtlReadResult? _readResult;
 
     private readonly Dictionary<SchemaKey, nint> s_schemaCache = [];
     private readonly Dictionary<SchemaKey, CachedSchema?> s_cachedSchemaCache = [];
 
-    /// <summary>
-    /// 掛上插件才會在 ProcessFile() 過程中執行插件對應的即時關聯／彙總工作(例如內建的 <see cref="EtlAnalysisPlugin"/>)。
-    /// 預設為空集合：ProcessFile() 只單純解析並派送原始事件，不做任何額外配對或彙總計算，
-    /// 適合單純轉存 SQLite 等不需要 <see cref="EtlReadResult.Analysis"/> 的情境；
-    /// 需要分析結果時可呼叫 <see cref="UseBuiltInAnalysis"/>，或自行實作 <see cref="IEtlReaderPlugin"/> 加入本集合。
-    /// </summary>
     public IList<IEtlReaderPlugin> Plugins { get; } = [];
 
-    /// <summary>ProcessFile() 期間實際從 ETW 消費掉的原始事件筆數(每筆 EVENT_RECORD 一次)，可用來評估解析效能(events/sec)。</summary>
     public long TotalEventCount => s_eventCount;
 
-    /// <summary>
-    /// 呼叫 <see cref="ProcessFile"/> 完成後，取得解析結果。
-    /// 是否含「已關聯好」的程序清單、CPU 使用彙總、Profile/DPC/Interrupt 熱點等資訊，
-    /// 取決於呼叫 ProcessFile() 前是否已透過 <see cref="Plugins"/>(或 <see cref="UseBuiltInAnalysis"/>)掛上對應插件；
-    /// 未掛任何插件時，這些欄位會維持空集合、<see cref="EtlReadResult.Analysis"/> 則維持 null。
-    /// 概念上對應 TraceProcessor 的 IPendingResult&lt;T&gt;.Result：在 ProcessFile() 完成前存取會抛例外。
-    /// </summary>
     public EtlReadResult Result => _readResult ?? throw new InvalidOperationException("尚未呼叫 ProcessFile()，無法取得解析結果。");
 
-    /// <summary>
-    /// 掛上內建的即時關聯分析插件(<see cref="EtlAnalysisPlugin"/>)：讓 ProcessFile() 完成後，
-    /// <see cref="Result"/> 額外含有已關聯好的程序清單、CPU 使用彙總、Profile/DPC/Interrupt 熱點
-    /// 與 <see cref="EtlReadResult.Analysis"/>，概念上對應 TraceProcessor 的 trace.Process() +
-    /// IPendingResult&lt;T&gt;.Result。單純轉存 SQLite 等情境不需要呼叫本方法。
-    /// </summary>
-    public EtlAnalysisPlugin UseBuiltInAnalysis()
-    {
-        var plugin = new EtlAnalysisPlugin();
-        Plugins.Add(plugin);
-        return plugin;
-    }
+    // UseBuiltInAnalysis()/UseProcesses()/UseServices()/UseEnergyEstimationData()/UseEnergyMeterData() 皆已改為
+    // EtlFileReader 的擴充方法(extension methods),與各自的 Collector 一併定義於 EtlReaderPlugins.cs——
+    // 呼叫端語法不變(reader.UseXxx()),但新增一種 Use 能力不再需要修改本檔案,比照 TraceProcessor
+    // 將 UseProcesses()/UseServices() 等定義成 ITraceSource 擴充方法(甚至各自獨立成 DLL)的作法。
 
     public unsafe void ProcessFile(string etlFilePath)
     {
@@ -1275,6 +1634,13 @@ public sealed class EtlFileReader
         s_schemaCache.Clear();
         s_cachedSchemaCache.Clear();
         _readResult = new EtlReadResult();
+        _calRefX = 0;
+        _calRefY = 0;
+        _calSumX = 0;
+        _calSumY = 0;
+        _calSumXY = 0;
+        _calSumXX = 0;
+        _calCount = 0;
 
         nint logFileNamePtr = 0;
         ulong traceHandle = EtwNativeConstants.InvalidProcessTraceHandle;
@@ -1284,7 +1650,7 @@ public sealed class EtlFileReader
         {
             foreach (IEtlReaderPlugin plugin in Plugins)
             {
-                plugin.Attach(this, _readResult);
+                plugin.Attach(this);
             }
 
             logFileNamePtr = Marshal.StringToHGlobalUni(etlFilePath);
@@ -1314,6 +1680,8 @@ public sealed class EtlFileReader
             _readResult.TraceEndTime = logfile.LogfileHeader.EndTime == 0
                 ? null
                 : DateTime.FromFileTime(logfile.LogfileHeader.EndTime);
+            _perfFreq = logfile.LogfileHeader.PerfFreq;
+            _readResult.PerfFreq = _perfFreq;
 
             Console.WriteLine("=== ETL 檔頭資訊 ===");
             Console.WriteLine($"處理器數量: {logfile.LogfileHeader.NumberOfProcessors}");
@@ -1563,6 +1931,10 @@ public sealed class EtlFileReader
     public delegate void ProcessCounterEventHandler(in ProcessCounterEventInfo data);
     public event ProcessCounterEventHandler? ProcessCounter;
 
+    /// <summary>對應 Microsoft-Windows-Services 的 EventId=105(StatusChange):服務狀態變化(含目前所在的 ProcessId)。</summary>
+    public delegate void ServiceStatusChangeEventHandler(in ServiceStatusChangeEventInfo data);
+    public event ServiceStatusChangeEventHandler? ServiceStatusChange;
+
     public delegate void PerfInfoDpcEventHandler(in DpcEventInfo data);
     public event PerfInfoDpcEventHandler? PerfInfoThreadedDPC;
     public event PerfInfoDpcEventHandler? PerfInfoDPC;
@@ -1570,6 +1942,14 @@ public sealed class EtlFileReader
 
     public delegate void PerfInfoIsrEventHandler(in InterruptEventInfo data);
     public event PerfInfoIsrEventHandler? PerfInfoISR;
+
+    /// <summary>
+    /// 對應 TraceProcessor 的 trace.UseMemoryUtilizationData():Microsoft-Windows-Kernel-Memory 提供者
+    /// Event Id=1 Version=1(MemInfo)系統記憶體用量快照,須以 <see cref="TraceSessionBuilder.KernelMemoryProviderGuid"/>
+    /// 搭配 <see cref="TraceSessionBuilder.KernelMemoryMemInfoKeyword"/> 關鍵字擷取才會觸發。
+    /// </summary>
+    public delegate void MemoryUtilizationEventHandler(in MemoryUtilizationEventInfo data);
+    public event MemoryUtilizationEventHandler? MemoryUtilization;
 
     public delegate void PerfInfoProfileEventHandler(ProfileEventInfo data);
     public event PerfInfoProfileEventHandler? PerfInfoProfile;
@@ -1637,6 +2017,10 @@ public sealed class EtlFileReader
 
     public delegate void PowerMeterPollingEventInfo_4Handler(in PowerMeterPollingEventInfo_4 data);
     public event PowerMeterPollingEventInfo_4Handler? PowerMeterPollingEventInfo_4;
+
+    /// <summary>PMP Event ID 2(EnergyMeterRundown,通道名稱中繼)。</summary>
+    public delegate void PowerMeterPollingEventInfo_2Handler(in PowerMeterPollingEventInfo_2 data);
+    public event PowerMeterPollingEventInfo_2Handler? PowerMeterPollingEventInfo_2;
     public delegate void DiskIoOperationHandler(DiskIoOperation operation);
     public event DiskIoOperationHandler? DiskIoOperationCompleted;
 
@@ -1646,19 +2030,6 @@ public sealed class EtlFileReader
     {
         s_eventCount++;
 
-        // SystemMemory(Kernel-Memory 的 VirtualAlloc/WorkingSet/MemoryInfo 關鍵字)目前沒有任何
-        // handler 會消費它，但實測發現啟用這些關鍵字時，此 provider 可佔整體原始事件量近 8 成
-        // (10 秒擷取實測:停用後 5,820,362 -> 1,020,362 筆，EventsLost 268,363 -> 0)。
-        // 在計算 timestamp、跑 GUID 比對鏈、查 schema 快取之前就提早短路跳過，避免白白付出這些成本。
-        // 註：實測(同一份 .etl、Release 組態、修正前後對照)顯示此短路對整體 ProcessFile() 時間
-        // 沒有可量測的助益(誤差內)，因為真正的瓶頸在 native→managed callback 轉換本身，而非
-        // 這裡省下的 DateTime 轉換/GUID 比對/schema 快取查找。保留此判斷式是因為語意正確(避免對
-        // 無人訂閱的事件做多餘工作)，但若要真正提速需從別處下手(見效能分析結論)。
-        if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.SystemMemoryProviderGuid)
-        {
-            return;
-        }
-
         DateTime timestamp = DateTime.FromFileTime(eventRecordPtr->EventHeader.TimeStamp);
 
         //Console.WriteLine(
@@ -1666,6 +2037,23 @@ public sealed class EtlFileReader
         //    $"EventId={record.EventHeader.EventDescriptor.Id} Opcode={record.EventHeader.EventDescriptor.Opcode} " +
         //    $"時間={timestamp:yyyy-MM-dd HH:mm:ss.fff} " +
         //    $"PID={record.EventHeader.ProcessId} TID={record.EventHeader.ThreadId}");
+
+        if (eventRecordPtr->EventHeader.ProviderId == s_kernelMemoryProviderId)
+        {
+            if (MemoryUtilization is not null &&
+                eventRecordPtr->EventHeader.EventDescriptor.Id == 1 &&
+                eventRecordPtr->EventHeader.EventDescriptor.Version == 1)
+            {
+                CachedSchema? memorySchema = GetOrAddCachedSchema(eventRecordPtr);
+                if (memorySchema is not null)
+                {
+                    MemoryUtilizationEventInfo memoryEvent = ParseMemoryUtilizationPayload(timestamp, eventRecordPtr, memorySchema);
+                    MemoryUtilization(in memoryEvent);
+                }
+            }
+
+            return;
+        }
 
         if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
         {
@@ -1677,6 +2065,7 @@ public sealed class EtlFileReader
                     CSwitchEventInfo? cswitchEvent = ParseCSwitchPayload(
                     timestamp,
                     eventRecordPtr->BufferContext.ProcessorNumber,
+                    eventRecordPtr->EventHeader.EventDescriptor.Version,
                     eventRecordPtr->UserData,
                     eventRecordPtr->UserDataLength);
                     if (cswitchEvent is { } cswitchEventValue)
@@ -1738,7 +2127,7 @@ public sealed class EtlFileReader
                 return;
             }
 
-            if (perfInfoOpcode == InterruptOpcode)
+            if (perfInfoOpcode is InterruptOpcode or InterruptOpcodeAlt)
             {
                 var interrupt = ProcessInterruptEvent(timestamp, eventRecordPtr->BufferContext.ProcessorNumber, in eventRecordPtr->EventHeader, eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
                 if (interrupt is { } interruptEventValue)
@@ -1984,6 +2373,17 @@ public sealed class EtlFileReader
                     break;
             }
         }
+        else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.ServicesProviderGuid)
+        {
+            if (eventRecordPtr->EventHeader.EventDescriptor.Id == 105 && ServiceStatusChange is not null)
+            {
+                var serviceEvent = ParseServiceStatusChangePayload(timestamp, eventRecordPtr, cache);
+                if (serviceEvent is { } serviceEventValue)
+                {
+                    ServiceStatusChange(in serviceEventValue);
+                }
+            }
+        }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         {
             ushort evtid = eventRecordPtr->EventHeader.EventDescriptor.Id;
@@ -2118,6 +2518,16 @@ public sealed class EtlFileReader
             var evtid = eventRecordPtr->EventHeader.EventDescriptor.Id;
             switch(evtid)
             {
+                case 2:
+                    if (PowerMeterPollingEventInfo_2 is not null)
+                    {
+                        var powermeter_2 = ProcessPowerMeterPollingEvent_2(timestamp, eventRecordPtr, cache);
+                        if (powermeter_2 is { } powermeter_2Value)
+                        {
+                            PowerMeterPollingEventInfo_2(in powermeter_2Value);
+                        }
+                    }
+                    break;
                 case 3:
                     var powerneter = ProcessPowerMeterPollingEvent_3(timestamp, eventRecordPtr, cache);
                     if (PowerMeterPollingEventInfo_4 is not null)
@@ -2303,6 +2713,7 @@ public sealed class EtlFileReader
         return new WmiActivityEventInfo_22
         {
             Timestamp = timestamp,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
@@ -2426,6 +2837,7 @@ public sealed class EtlFileReader
         return new WmiActivityEventInfo_13
         {
             Timestamp = timestamp,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
@@ -2443,6 +2855,7 @@ public sealed class EtlFileReader
         return new WmiActivityEventInfo_11
         {
             Timestamp = timestamp,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
@@ -2468,6 +2881,7 @@ public sealed class EtlFileReader
         return new WmiActivityEventInfo_12
         {
             Timestamp = timestamp,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
@@ -2606,6 +3020,74 @@ public sealed class EtlFileReader
             status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, (byte*)&rawValue);
             return status == EtwNativeConstants.ERROR_SUCCESS ? rawValue : defaultvalue;
         }
+    }
+
+    /// <summary>
+    /// 同 <see cref="GetRawPointerProperty"/>,但用於陣列型欄位的單一元素(例如 MemInfo 事件的
+    /// StandbyPageCounts/RepurposedPageCounts,長度依 PriorityLevels 而定)。透過 TDH 的
+    /// PROPERTY_DATA_DESCRIPTOR.ArrayIndex 指定索引,由 TDH 自行處理陣列元素定址,不需自行計算 byte offset。
+    /// </summary>
+    private static unsafe ulong GetRawPointerPropertyElement(EVENT_RECORD* eventRecordPtr, string propertyName, uint arrayIndex, CachedSchema cache, ulong defaultvalue = default)
+    {
+        if (!cache.Properties.ContainsKey(propertyName))
+        {
+            return defaultvalue;
+        }
+
+        fixed (char* propertyNamePtr = propertyName)
+        {
+            PROPERTY_DATA_DESCRIPTOR descriptor = new()
+            {
+                PropertyName = (ulong)propertyNamePtr,
+                ArrayIndex = arrayIndex,
+            };
+
+            uint status = NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint propertySize);
+            if (status != EtwNativeConstants.ERROR_SUCCESS || propertySize is not sizeof(uint) and not sizeof(ulong))
+            {
+                return defaultvalue;
+            }
+
+            ulong rawValue = 0;
+            status = NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, propertySize, (byte*)&rawValue);
+            return status == EtwNativeConstants.ERROR_SUCCESS ? rawValue : defaultvalue;
+        }
+    }
+
+    /// <summary>
+    /// 解析 Microsoft-Windows-Kernel-Memory Event Id=1 Version=1(MemInfo)負載,詳見
+    /// <see cref="MemoryUtilizationEventInfo"/> 上的欄位對應與驗證方式說明。
+    /// </summary>
+    private static unsafe MemoryUtilizationEventInfo ParseMemoryUtilizationPayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        byte priorityLevels = GetRawProperty<byte>(eventRecordPtr, "PriorityLevels", schema);
+        uint levelCount = priorityLevels > 0 ? priorityLevels : 8u;
+
+        long[] standby = new long[levelCount];
+        long[] repurposed = new long[levelCount];
+        for (uint i = 0; i < levelCount; i++)
+        {
+            standby[i] = unchecked((long)GetRawPointerPropertyElement(eventRecordPtr, "StandbyPageCounts", i, schema));
+            repurposed[i] = unchecked((long)GetRawPointerPropertyElement(eventRecordPtr, "RepurposedPageCounts", i, schema));
+        }
+
+        return new MemoryUtilizationEventInfo
+        {
+            Timestamp = timestamp,
+            PriorityLevels = priorityLevels,
+            ZeroPageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "ZeroPageCount", schema)),
+            FreePageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "FreePageCount", schema)),
+            ModifiedPageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "ModifiedPageCount", schema)),
+            ModifiedNoWritePageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "ModifiedNoWritePageCount", schema)),
+            BadPageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "BadPageCount", schema)),
+            StandbyPriorityPageCounts = standby,
+            RepurposedPriorityPageCounts = repurposed,
+            ModifiedPageFilePageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "ModifiedPageCountPageFile", schema)),
+            PagedPoolPageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "PagedPoolPageCount", schema)),
+            NonPagedPoolPageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "NonPagedPoolPageCount", schema)),
+            MdlPageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "MdlPageCount", schema)),
+            CommitPageCount = unchecked((long)GetRawPointerProperty(eventRecordPtr, "CommitPageCount", schema)),
+        };
     }
 
     private static TdhInType GetExpectedInType<T>() where T : unmanaged
@@ -2785,6 +3267,7 @@ public sealed class EtlFileReader
         var e3 = new EnergyEstimationEngineEventInfo_37
         {
             Timestamp = timestamp,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
@@ -2959,6 +3442,21 @@ public sealed class EtlFileReader
         }
     }
 
+    private unsafe ServiceStatusChangeEventInfo? ParseServiceStatusChangePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    {
+        if (eventRecordPtr == null) return null;
+
+        return new ServiceStatusChangeEventInfo
+        {
+            Timestamp = timestamp,
+            ExecutionPhase = GetRawProperty<uint>(eventRecordPtr, "ExecutionPhase", schema),
+            CurrentState = GetRawProperty<uint>(eventRecordPtr, "CurrentState", schema),
+            StartType = GetRawProperty<uint>(eventRecordPtr, "StartType", schema),
+            ProcessId = GetRawProperty<uint>(eventRecordPtr, "PID", schema),
+            ServiceName = GetRawPropertyString(eventRecordPtr, "ServiceName", schema),
+            ImageName = GetRawPropertyString(eventRecordPtr, "ImageName", schema),
+        };
+    }
 
     private void ProcessDiskIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
@@ -3034,6 +3532,7 @@ public sealed class EtlFileReader
         return new KernelAcpiEventInfo_AmlMethodTrace
         {
             Timestamp = timestamp,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
@@ -3096,12 +3595,30 @@ public sealed class EtlFileReader
         };
     }
 
+    private unsafe PowerMeterPollingEventInfo_2? ProcessPowerMeterPollingEvent_2(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        if (eventRecordPtr is null) return null;
+        return new PowerMeterPollingEventInfo_2
+        {
+            Timestamp = timestamp,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
+            EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
+            MeterId = GetRawPointerProperty(eventRecordPtr, "MeterId", cache),
+            DefaultSamplingPeriodInMs = GetRawProperty<ulong>(eventRecordPtr, "DefaultSamplingPeriodInMs", cache),
+            ChannelNameLength = GetRawProperty<uint>(eventRecordPtr, "ChannelNameLength", cache),
+            ChannelName = GetRawPropertyString(eventRecordPtr, "ChannelName", cache),
+        };
+    }
+
     private unsafe PowerMeterPollingEventInfo_4? ProcessPowerMeterPollingEvent_4(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
     {
         if (eventRecordPtr is null) return null;
         return new PowerMeterPollingEventInfo_4
         {
             Timestamp = timestamp,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
             EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
             Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
             Opcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode,
@@ -3170,6 +3687,7 @@ public sealed class EtlFileReader
             Opcode = header.EventDescriptor.Opcode,
             InitialTime = initialTime,
             Routine = routine,
+            ElapsedTimeMSec = ComputeElapsedTimeMSec(initialTime, timestamp),
         };
     }
 
@@ -3249,24 +3767,88 @@ public sealed class EtlFileReader
             Routine = routine,
             ReturnValue = returnValue,
             Vector = vector,
+            ElapsedTimeMSec = ComputeElapsedTimeMSec(initialTime, timestamp),
         };
     }
+
+    /// <summary>
+    /// 將 DPC/ISR 事件負載中內嵌的原始 QPC 時間戳記(<paramref name="initialTimeQpc"/>,來自
+    /// KeQueryPerformanceCounter)換算為與事件 <paramref name="eventTimestamp"/> 相同單位的耗時(毫秒)。
+    /// 因為 ProcessFile() 並未啟用 PROCESS_TRACE_MODE_RAW_TIMESTAMP,ETW 已將 EVENT_HEADER.TimeStamp
+    /// 自動轉換成 FILETIME,所以需把 QPC-基準的 InitialTime 換算到同一個 FILETIME 時間軸上再相減。
+    /// 換算採用線上最小平方回歸(見類別欄位 _calSumX 等的說明),而非單純依賴 TRACE_LOGFILE_HEADER 的
+    /// BootTime/PerfFreq 重建,以避免固定錨點法在長時間追蹤中因斜率(換算比例)誤差而隨時間漂移失準。
+    /// ETL 檔頭缺少 PerfFreq 資訊時回傳 null。
+    /// </summary>
+    private double? ComputeElapsedTimeMSec(ulong initialTimeQpc, DateTime eventTimestamp)
+    {
+        if (_perfFreq <= 0)
+        {
+            return null;
+        }
+
+        long eventFileTicks = eventTimestamp.ToFileTime();
+
+        if (_calCount == 0)
+        {
+            // 第一筆樣本:記錄為置中基準點(此後所有樣本都相對於它取差值,避免 QPC/FILETIME 原始數值
+            // 量級過大導致回歸計算失去精度)。第一筆事件本身的耗時無法用回歸估計(樣本數不足),因此
+            // 退回用名目 PerfFreq 當斜率、並假設此事件的真實耗時為 0(真實 DPC/ISR 執行時間必定極短,
+            // 這是合理的起始錨點)。
+            _calRefX = initialTimeQpc;
+            _calRefY = eventFileTicks;
+            _calSumX = 0;
+            _calSumY = 0;
+            _calSumXY = 0;
+            _calSumXX = 0;
+            _calCount = 1;
+            return 0.0;
+        }
+
+        double dx = initialTimeQpc - _calRefX;
+        double dy = eventFileTicks - _calRefY;
+
+        double slope;
+        double intercept;
+        double n = _calCount;
+        double meanX = _calSumX / n;
+        double meanY = _calSumY / n;
+        double varX = (_calSumXX / n) - (meanX * meanX);
+        if (_calCount >= 2 && Math.Abs(varX) > 1e-6)
+        {
+            slope = ((_calSumXY / n) - (meanX * meanY)) / varX;
+            intercept = meanY - (slope * meanX);
+        }
+        else
+        {
+            // 樣本仍不足以解回歸(或目前所有樣本的 X 值都相同):退回名目 PerfFreq 當斜率,並讓「目前這筆」
+            // 事件耗時視為 0(等同於重新以這筆事件為錨點),直到累積夠多樣本讓回歸穩定為止。
+            slope = 10_000_000.0 / _perfFreq;
+            intercept = dy - (slope * dx);
+        }
+
+        double predictedDy = intercept + (slope * dx);
+        double elapsedMs = (dy - predictedDy) / 10_000.0;
+
+        _calSumX += dx;
+        _calSumY += dy;
+        _calSumXY += dx * dy;
+        _calSumXX += dx * dx;
+        _calCount++;
+
+        return elapsedMs;
+    }
+
 
     private uint GetPointerSize(in EVENT_HEADER header)
     {
         return (header.Flags & EtwNativeConstants.EVENT_HEADER_FLAG_32_BIT_HEADER) != 0 ? 4u : 8u;
     }
 
-    /// <summary>
-    /// 手動解析 CSwitch 事件的固定版面(Thread_V2_TypeGroup1 CSWITCH 結構,24 bytes),
-    /// 不透過 TDH,以避開本機缺少對應 Version 的 schema(TdhGetEventInformation 回傳 ERROR_NOT_FOUND)的問題。
-    /// 版面(小端序): NewThreadId(u32) OldThreadId(u32) NewThreadPriority(i8) OldThreadPriority(i8)
-    /// PreviousCState(u8) SpareByte(i8) OldThreadWaitReason(i8) OldThreadWaitMode(i8) OldThreadState(i8)
-    /// OldThreadWaitIdealProcessor(i8) NewThreadWaitTime(u32) Reserved(u32)
-    /// </summary>
-    private CSwitchEventInfo? ParseCSwitchPayload(DateTime timestamp, byte processorNumber, nint userData, int userDataLength)
+    private CSwitchEventInfo? ParseCSwitchPayload(DateTime timestamp, byte processorNumber, byte version, nint userData, int userDataLength)
     {
         const int CSwitchPayloadSize = 24;
+        const int FlagsOffset = 13;
         if (userData == 0 || userDataLength < CSwitchPayloadSize)
         {
             return null;
@@ -3278,10 +3860,24 @@ public sealed class EtlFileReader
         sbyte oldThreadPriority = unchecked((sbyte)Marshal.ReadByte(userData, 9));
         byte previousCState = Marshal.ReadByte(userData, 10);
         sbyte oldThreadWaitReason = unchecked((sbyte)Marshal.ReadByte(userData, 12));
-        sbyte oldThreadWaitMode = unchecked((sbyte)Marshal.ReadByte(userData, 13));
+        byte waitModeOrFlags = Marshal.ReadByte(userData, FlagsOffset);
         sbyte oldThreadState = unchecked((sbyte)Marshal.ReadByte(userData, 14));
         sbyte oldThreadWaitIdealProcessor = unchecked((sbyte)Marshal.ReadByte(userData, 15));
         uint newThreadWaitTime = unchecked((uint)Marshal.ReadInt32(userData, 16));
+
+        int oldThreadWaitMode;
+        int? oldThreadBamQosLevel = null;
+        int? newThreadBamQosLevel = null;
+        if (version >= 4)
+        {
+            oldThreadWaitMode = waitModeOrFlags & 0x1;
+            oldThreadBamQosLevel = (waitModeOrFlags >> 1) & 0x7;
+            newThreadBamQosLevel = (waitModeOrFlags >> 4) & 0x7;
+        }
+        else
+        {
+            oldThreadWaitMode = unchecked((sbyte)waitModeOrFlags);
+        }
 
         return new CSwitchEventInfo
         {
@@ -3289,8 +3885,6 @@ public sealed class EtlFileReader
             ProcessorNumber = processorNumber,
             NewThreadId = newThreadId,
             OldThreadId = oldThreadId,
-            //NewProcessId = FindThreadAtTime(_readResult!.Threads, newThreadId, timestamp)?.ProcessId,
-            //OldProcessId = FindThreadAtTime(_readResult.Threads, oldThreadId, timestamp)?.ProcessId,
             NewThreadPriority = newThreadPriority,
             OldThreadPriority = oldThreadPriority,
             PreviousCState = previousCState,
@@ -3299,6 +3893,8 @@ public sealed class EtlFileReader
             OldThreadState = oldThreadState,
             OldThreadWaitIdealProcessor = oldThreadWaitIdealProcessor,
             NewThreadWaitTime = unchecked((int)newThreadWaitTime),
+            OldThreadBamQosLevel = oldThreadBamQosLevel,
+            NewThreadBamQosLevel = newThreadBamQosLevel,
         };
     }
 
