@@ -16,69 +16,9 @@ if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSec
     durationSeconds = parsedSeconds;
 }
 
-using TraceSession session = new TraceSessionBuilder()
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS_COUNTERS)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_IMAGE_LOAD)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_CSWITCH)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_THREAD)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_INTERRUPT)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROFILE)
-    .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DPC)
-    .WithProvider(TraceSessionBuilder.WmiActivityProviderGuid)
-    .WithProvider(TraceSessionBuilder.ServicesProviderGuid)
-    .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
-    .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
-    .WithProvider(TraceSessionBuilder.KernelPowerProviderGuid)
-    .WithSystemProvider(
-        TraceSessionBuilder.SystemMemoryProviderGuid,
-        TraceSessionBuilder.SystemMemoryMemoryInfoKeyword |
-        TraceSessionBuilder.SystemMemoryWorkingSetKeyword |
-        TraceSessionBuilder.SystemMemoryVirtualAllocKeyword)
-    .WithProvider(TraceSessionBuilder.PowerMeterPollingProviderGuid, TraceSessionBuilder.PowerMeterPollingFiveSecondKeyword)
-    .WithProvider(TraceSessionBuilder.DxgKrnlProviderGuid)
-    // SystemMemoryProviderGuid 只是啟用用的控制平面 GUID，實際的 MemInfo 事件由 Microsoft-Windows-Kernel-Memory
-    // 提供者(搭配 MEMINFO 關鍵字)發出，兩者須同時啟用，UseMemoryUtilizationData()/MemoryUtilization 才會有資料。
-    .WithProvider(TraceSessionBuilder.KernelMemoryProviderGuid, TraceSessionBuilder.KernelMemoryMemInfoKeyword)
-    .WithOutputPath(Path.Combine(AppContext.BaseDirectory, $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.etl"))
-    .WithEtwFileCompression()
-    .Build();
-
-if (!session.IsElevated())
+string? capturedEtlPath = await RunTraceSessionCaptureDemo(durationSeconds);
+if (capturedEtlPath is null)
 {
-    Console.Error.WriteLine("此程式需要以系統管理員身分執行才能啟動 ETW Kernel/User Trace。");
-    return 1;
-}
-
-Console.CancelKeyPress += (_, e) =>
-{
-    // 攔截 Ctrl+C，避免行程直接終止導致 finally 未執行、Kernel Logger 未停止而變成孤兒 session。
-    e.Cancel = true;
-    session.Stop();
-    Environment.Exit(1);
-};
-
-try
-{
-    session.Start();
-    Console.WriteLine($"追蹤中，將持續 {durationSeconds} 秒...");
-    await Task.Delay(TimeSpan.FromSeconds(durationSeconds));
-}
-catch (Exception ex)
-{
-    Console.Error.WriteLine($"執行失敗: {ex.Message}");
-    return 1;
-}
-finally
-{
-    session.Stop();
-}
-
-// === ETL 蒐集完成，以下用兩種方式解析同一份檔案，藉由實際輸出對照兩者差異 ===
-string capturedEtlPath = session.LogFilePath ?? string.Empty;
-if (string.IsNullOrEmpty(capturedEtlPath) || !File.Exists(capturedEtlPath))
-{
-    Console.Error.WriteLine("找不到剛完成擷取的 ETL 檔案，略過解析示範。");
     return 1;
 }
 
@@ -86,25 +26,136 @@ long etlFileSizeBytes = new FileInfo(capturedEtlPath).Length;
 double etlFileSizeMb = etlFileSizeBytes / 1024.0 / 1024.0;
 Console.WriteLine($"ETL 檔案大小: {etlFileSizeMb:F2} MB ({capturedEtlPath})");
 
-TimeSpan etlFileReaderElapsed = RunEtlFileReaderDemo(capturedEtlPath);
-TimeSpan traceProcessorElapsed = RunTraceProcessorDemo(capturedEtlPath);
+DemoResult etlFileReaderResult = RunEtlFileReaderDemo(capturedEtlPath);
+DemoResult traceProcessorResult = RunTraceProcessorDemo(capturedEtlPath);
 
 Console.WriteLine();
 Console.WriteLine("=== 效能比較總結（同一份 ETL，兩種解析方式）===");
 Console.WriteLine($"ETL 檔案大小: {etlFileSizeMb:F2} MB");
-Console.WriteLine($"EtlFileReader ProcessFile() 耗時: {etlFileReaderElapsed.TotalMilliseconds:F1} ms（{etlFileSizeMb / etlFileReaderElapsed.TotalSeconds:F2} MB/s）");
-Console.WriteLine($"TraceProcessor trace.Process() 耗時: {traceProcessorElapsed.TotalMilliseconds:F1} ms（{etlFileSizeMb / traceProcessorElapsed.TotalSeconds:F2} MB/s）");
-if (etlFileReaderElapsed < traceProcessorElapsed)
+Console.WriteLine($"EtlFileReader ProcessFile() 耗時: {etlFileReaderResult.Elapsed.TotalMilliseconds:F1} ms（{etlFileSizeMb / etlFileReaderResult.Elapsed.TotalSeconds:F2} MB/s）");
+Console.WriteLine($"TraceProcessor trace.Process() 耗時: {traceProcessorResult.Elapsed.TotalMilliseconds:F1} ms（{etlFileSizeMb / traceProcessorResult.Elapsed.TotalSeconds:F2} MB/s）");
+if (etlFileReaderResult.Elapsed < traceProcessorResult.Elapsed)
 {
-    Console.WriteLine($"EtlFileReader 較快，約為 TraceProcessor 的 {traceProcessorElapsed.TotalMilliseconds / etlFileReaderElapsed.TotalMilliseconds:F2} 倍速度" +
+    Console.WriteLine($"EtlFileReader 較快，約為 TraceProcessor 的 {traceProcessorResult.Elapsed.TotalMilliseconds / etlFileReaderResult.Elapsed.TotalMilliseconds:F2} 倍速度" +
         "（但 TraceProcessor 同時多做了跨程序符號解析等 EtlFileReader 未實作的工作，非完全對等負載）。");
 }
 else
 {
-    Console.WriteLine($"TraceProcessor 較快，約為 EtlFileReader 的 {etlFileReaderElapsed.TotalMilliseconds / traceProcessorElapsed.TotalMilliseconds:F2} 倍速度。");
+    Console.WriteLine($"TraceProcessor 較快，約為 EtlFileReader 的 {etlFileReaderResult.Elapsed.TotalMilliseconds / traceProcessorResult.Elapsed.TotalMilliseconds:F2} 倍速度。");
 }
 
+DemoResultValidator.Validate(etlFileReaderResult, traceProcessorResult);
+
 return 0;
+
+/// <summary>
+/// 將 EtlFileReader 內部以 ulong/uint 儲存的原始位址/遮罩值轉成 long/int，僅重新詮釋位元樣式(unchecked)、
+/// 不做數值判斷，才能與 TraceProcessor 對應屬性(long/int)用 <see cref="ThreadSnapshot"/> 直接比較。
+/// 詳見 <see cref="ThreadSnapshot"/> 型別文件註解。
+/// </summary>
+static long? ToSignedAddress(ulong? value) => value.HasValue ? unchecked((long)value.Value) : null;
+static int? ToSignedId(uint? value) => value.HasValue ? unchecked((int)value.Value) : null;
+
+/// <summary>
+/// 對 <see cref="Microsoft.Windows.EventTracing.Services.IService.StartType"/> 的防禦性存取：
+/// 實測發現(2026-09 調查)本機部分服務(並非全部)存取此屬性時，TraceProcessor 內部的
+/// ServiceFlyweight.get_StartType() 會拋出 InvalidOperationException("The item does not contain a value.")
+/// ——追進 TraceProcessor 組件的堆疊得知是 ServiceTransitionFlyweightEnumerator 對其內部 Transitions
+/// 資料做 FirstOrDefault() 查詢時，某些服務對應不到任何 Transition 記錄而觸發，屬 TraceProcessor 套件本身
+/// 對這類服務的已知限制(並非本專案的錯誤，也無法從本專案端修正)，故在此攔截、以 "&lt;無法取得&gt;" 取代，
+/// 避免單一服務的資料缺陷導致整個比對流程中斷。
+/// </summary>
+static string TryGetStartType(Microsoft.Windows.EventTracing.Services.IService service)
+{
+    try
+    {
+        return service.StartType.ToString();
+    }
+    catch (InvalidOperationException)
+    {
+        return "<無法取得>";
+    }
+}
+
+/// <summary>
+/// 前置作業：本專案 QSoft.ETW 的 <see cref="TraceSession"/>（由 <see cref="TraceSessionBuilder"/> 組裝設定）。
+/// 內部以 P/Invoke 直接呼叫 Advapi32 的 StartTraceW/EnableTraceEx2/ControlTraceW 等「ETW Controller API」，
+/// 建立並啟停一個 Kernel+User 混合 Session，將事件即時寫入磁碟成同一份 ETL 檔——這一步只負責「錄製」，
+/// 不涉及事後解析；錄好的 ETL 才會分別交給下面的 <see cref="RunEtlFileReaderDemo"/> 與
+/// <see cref="RunTraceProcessorDemo"/> 解析比較。獨立成方法是為了和另外兩個 RunXxxDemo() 並列，
+/// 讓「錄製」與「解析」兩種職責在結構上一目了然（純粹重構自原本寫在頂層陳述式的程式碼，行為不變）。
+/// </summary>
+static async Task<string?> RunTraceSessionCaptureDemo(int durationSeconds)
+{
+    Console.WriteLine();
+    Console.WriteLine("=== 前置作業：TraceSession（本專案 P/Invoke 直接呼叫 StartTraceW/ControlTraceW 控制 ETW Session） ===");
+
+    using TraceSession session = new TraceSessionBuilder()
+        .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS)
+        .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS_COUNTERS)
+        .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_IMAGE_LOAD)
+        .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_CSWITCH)
+        .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_THREAD)
+        .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_INTERRUPT)
+        .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_PROFILE)
+        .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DPC)
+        .WithProvider(TraceSessionBuilder.WmiActivityProviderGuid)
+        .WithProvider(TraceSessionBuilder.ServicesProviderGuid)
+        .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
+        .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
+        .WithProvider(TraceSessionBuilder.KernelPowerProviderGuid)
+        .WithSystemProvider(
+            TraceSessionBuilder.SystemMemoryProviderGuid,
+            TraceSessionBuilder.SystemMemoryMemoryInfoKeyword |
+            TraceSessionBuilder.SystemMemoryWorkingSetKeyword |
+            TraceSessionBuilder.SystemMemoryVirtualAllocKeyword)
+        .WithProvider(TraceSessionBuilder.PowerMeterPollingProviderGuid, TraceSessionBuilder.PowerMeterPollingFiveSecondKeyword)
+        .WithProvider(TraceSessionBuilder.DxgKrnlProviderGuid)
+        .WithProvider(TraceSessionBuilder.KernelMemoryProviderGuid, TraceSessionBuilder.KernelMemoryMemInfoKeyword)
+        .WithOutputPath(Path.Combine(AppContext.BaseDirectory, $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.etl"))
+        .WithEtwFileCompression()
+        .Build();
+
+    if (!session.IsElevated())
+    {
+        Console.Error.WriteLine("此程式需要以系統管理員身分執行才能啟動 ETW Kernel/User Trace。");
+        return null;
+    }
+
+    Console.CancelKeyPress += (_, e) =>
+    {
+        // 攔截 Ctrl+C，避免行程直接終止導致 finally 未執行、Kernel Logger 未停止而變成孤兒 session。
+        e.Cancel = true;
+        session.Stop();
+        Environment.Exit(1);
+    };
+
+    try
+    {
+        session.Start();
+        Console.WriteLine($"追蹤中，將持續 {durationSeconds} 秒...");
+        await Task.Delay(TimeSpan.FromSeconds(durationSeconds));
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"執行失敗: {ex.Message}");
+        return null;
+    }
+    finally
+    {
+        session.Stop();
+    }
+
+    // === ETL 蒐集完成，交還路徑給呼叫端分別以 EtlFileReader / TraceProcessor 解析同一份檔案 ===
+    string capturedEtlPath = session.LogFilePath ?? string.Empty;
+    if (string.IsNullOrEmpty(capturedEtlPath) || !File.Exists(capturedEtlPath))
+    {
+        Console.Error.WriteLine("找不到剛完成擷取的 ETL 檔案，略過解析示範。");
+        return null;
+    }
+
+    return capturedEtlPath;
+}
 
 /// <summary>
 /// 方式一：本專案 QSoft.ETW 的 <see cref="EtlFileReader"/>。
@@ -122,7 +173,7 @@ return 0;
 /// 概念上對應下方 TraceProcessor 示範的 trace.Process() + IPendingResult&lt;T&gt;.Result，但完全不依賴
 /// SQLite 或任何外部套件。
 /// </summary>
-static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
+static DemoResult RunEtlFileReaderDemo(string etlFilePath)
 {
     Console.WriteLine();
     Console.WriteLine("=== 方式一：EtlFileReader（本專案手刻 P/Invoke + TDH 解析） ===");
@@ -137,6 +188,7 @@ static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
     reader.UseBuiltInAnalysis();
     var pendingProcesses = reader.UseProcesses();
     var pendingServices = reader.UseServices();
+    var pendingThreads = reader.UseThreads();
     var pendingEnergy = reader.UseEnergyEstimationData();
     var pendingEnergyMeter = reader.UseEnergyMeterData();
     var pendingInterruptHandling = reader.UseInterruptHandlingData();
@@ -173,6 +225,14 @@ static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
     foreach (ServiceRecord svc in pendingServices.Result.Services.Take(5))
     {
         Console.WriteLine($"  {svc.ServiceName} ({svc.ImageFileName}): PID={svc.ProcessId?.ToString() ?? "?"} 狀態={svc.CurrentState}");
+    }
+
+    IReadOnlyList<ThreadRecord> threads = pendingThreads.Result.Threads;
+    int namedThreadCount = threads.Count(t => !string.IsNullOrEmpty(t.Name));
+    Console.WriteLine($"[Result] 執行緒數: {threads.Count} 個（ThreadRecord 對應 TraceProcessor 的 IThread，含建立/結束時間、堆疊範圍、優先權、可執行處理器、啟動位址與名稱），其中具名 {namedThreadCount} 個");
+    foreach (ThreadRecord t in threads.Where(t => !string.IsNullOrEmpty(t.Name)).Take(5))
+    {
+        Console.WriteLine($"  TID={t.ThreadId} PID={t.ProcessId} Name=\"{t.Name}\" BasePriority={t.BasePriority} PagePriority={t.PagePriority} IoPriority={t.IoPriority} StartAddress模組={t.StartAddressModuleName}+0x{t.StartAddressModuleOffset:X}");
     }
 
     IReadOnlyList<EnergyEstimationInterval> energyIntervals = pendingEnergy.Result.Intervals;
@@ -306,7 +366,45 @@ static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
         Console.WriteLine("    （TraceProcessor 另有 InUseListSize/NonSuperfetchStandbyListSize 兩個推算欄位，本專案未提供對應數值，原因見 MemoryUtilizationEventInfo 文件註解）");
     }
 
-    return stopwatch.Elapsed;
+    // === 為了讓 RunTraceProcessorDemo 解析同一份 ETL 後可互相驗證，整理出跨兩種實作共用的比對快照 ===
+    var processSnapshots = pendingProcesses.Result.Processes
+        .Select(p => new ProcessSnapshot(p.ProcessId, p.ParentProcessId, p.ImageFileName, p.StartTime, p.EndTime, p.CommandLine))
+        .ToList();
+    var serviceSnapshots = pendingServices.Result.Services
+        .Select(s => new ServiceSnapshot(s.ServiceName, s.ProcessId, s.CurrentState?.ToString() ?? string.Empty, s.StartType?.ToString() ?? string.Empty))
+        .ToList();
+    var threadSnapshots = threads
+        .Select(t => new ThreadSnapshot(
+            t.ThreadId,
+            t.ProcessId,
+            t.Name ?? string.Empty,
+            t.CreateTime,
+            t.ExitTime,
+            t.BasePriority ?? 0,
+            (int?)t.PagePriority,
+            (int?)t.IoPriority,
+            ToSignedAddress(t.ProcessorAffinity) ?? 0,
+            ToSignedAddress(t.StackBase),
+            ToSignedAddress(t.StackLimit),
+            ToSignedAddress(t.UserStackBase),
+            ToSignedAddress(t.UserStackLimit),
+            ToSignedAddress(t.StartAddress),
+            ToSignedAddress(t.TebBase),
+            ToSignedId(t.ServiceId),
+            t.StartAddressModuleName))
+        .ToList();
+    var interruptModuleSnapshots = DemoResultValidator.BuildInterruptModuleSnapshots(
+        isrIntervals.Select(isr => isr.HandlerModuleName),
+        dpcIntervals.Select(dpc => dpc.HandlerModuleName));
+
+    return new DemoResult(
+        stopwatch.Elapsed,
+        processSnapshots,
+        serviceSnapshots,
+        energyIntervals.Count,
+        energyIntervals.Sum(i => (double)i.TotalEnergy),
+        interruptModuleSnapshots,
+        threadSnapshots);
 }
 
 /// <summary>
@@ -318,7 +416,7 @@ static TimeSpan RunEtlFileReaderDemo(string etlFilePath)
 /// 互斥（已在 csproj 明確改回 true 才能執行本示範），也代表它終究無法真正支援 Native AOT 發佈；
 /// 且只能讀取「已寫入磁碟」的完整 ETL，不像 EtlFileReader 可以掛在即時 Session 上逐筆處理事件。
 /// </summary>
-static TimeSpan RunTraceProcessorDemo(string etlFilePath)
+static DemoResult RunTraceProcessorDemo(string etlFilePath)
 {
     Console.WriteLine();
     Console.WriteLine("=== 方式二：TraceProcessor（Microsoft.Windows.EventTracing.Processing.All） ===");
@@ -333,6 +431,7 @@ static TimeSpan RunTraceProcessorDemo(string etlFilePath)
     // 想要哪些資料，就掛上對應的 UseXxx()；實際解析與關聯在 trace.Process() 執行時才會發生。
     Microsoft.Windows.EventTracing.IPendingResult<Microsoft.Windows.EventTracing.Processes.IProcessDataSource> pendingProcesses = trace.UseProcesses();
     Microsoft.Windows.EventTracing.IPendingResult<Microsoft.Windows.EventTracing.Services.IServiceDataSource> pendingServices = trace.UseServices();
+    Microsoft.Windows.EventTracing.IPendingResult<Microsoft.Windows.EventTracing.Processes.IThreadDataSource> pendingThreads = trace.UseThreads();
     Microsoft.Windows.EventTracing.IPendingResult<ICpuSampleDataSource> pendingCpuSamples = trace.UseCpuSamplingData();
     Microsoft.Windows.EventTracing.IPendingResult<IGenericEventDataSource> pendingGenericEvents = trace.UseGenericEvents();
     var energys = trace.UseEnergyEstimationData();
@@ -357,6 +456,15 @@ static TimeSpan RunTraceProcessorDemo(string etlFilePath)
     {
         IServiceStateChange? lastState = svc.StateChanges.Count > 0 ? svc.StateChanges[^1] : null;
         Console.WriteLine($"  {svc.Name}: PID={(lastState is not null ? lastState.ProcessId.ToString() : "?")} 狀態={(lastState is not null ? lastState.State.ToString() : "?")}");
+    }
+
+    IReadOnlyList<Microsoft.Windows.EventTracing.Processes.IThread> threadsTp = pendingThreads.Result.Threads;
+    int namedThreadCountTp = threadsTp.Count(t => !string.IsNullOrEmpty(t.Name));
+    Console.WriteLine($"執行緒數: {threadsTp.Count} 個（IThread 已含建立/結束時間、堆疊範圍、優先權、可執行處理器、啟動位址、啟動函式所在模組與名稱），其中具名 {namedThreadCountTp} 個");
+    foreach (var t in threadsTp.Where(t => !string.IsNullOrEmpty(t.Name)).Take(5))
+    {
+        string moduleName = t.StartFrame.Image?.FileName ?? "<未映射>";
+        Console.WriteLine($"  TID={t.Id} PID={t.ProcessId} Name=\"{t.Name}\" BasePriority={t.BasePriority} PagePriority={t.PagePriority} IoPriority={t.IoPriority} StartAddress模組={moduleName}+0x{t.StartFrame.RelativeVirtualAddress.Value:X}");
     }
 
     var cpuTop5 = pendingCpuSamples.Result.Samples
@@ -419,6 +527,7 @@ static TimeSpan RunTraceProcessorDemo(string etlFilePath)
 
     var energyIntervals = energys.Result.Intervals;
     Console.WriteLine($"Energy Estimation Engine 週期數: {energyIntervals.Count} 筆（IEnergyEstimationInterval 每筆代表一次估算週期，需自行依 ConsumerId 加總才能得到單一程序總能耗）");
+
     var topEnergyConsumers = energyIntervals
         .GroupBy(interval => interval.ConsumerId)
         .Select(group => new
@@ -522,5 +631,52 @@ static TimeSpan RunTraceProcessorDemo(string etlFilePath)
             "TraceProcessor 疑似對其做了「相鄰快照差值」之類的內部換算才得到這種數十 MB、會隨時間起伏的數值，但確切公式未公開，還原後仍有約 5% 誤差，故不採用）");
     }
 
-    return stopwatch.Elapsed;
+    // === 為了與 RunEtlFileReaderDemo 解析同一份 ETL 的結果互相驗證，整理出跨兩種實作共用的比對快照 ===
+    var processSnapshots = processes
+        // p.CommandLine 在 TraceProcessor 端對「原始事件本來就沒有 CommandLine 欄位」的程序(實測幾乎都是
+        // 追蹤開始前就已存在、只能靠 DCStart rundown 觀察到的程序，例如 PID 0 Idle / PID 4 System)回傳 null；
+        // EtlFileReader 對同樣情況一律以 GetRawPropertyString 的預設值 string.Empty 表示「無資料」(與
+        // ImageFileName、ThreadRecord.Name 等其餘字串欄位的慣例一致)。故在此以 ?? string.Empty 正規化，
+        // 避免這種「null vs ""」的純表示法差異被誤判成內容不一致。
+        .Select(p => new ProcessSnapshot(p.Id, p.ParentId, p.ImageName, p.CreateTime?.DateTimeOffset.UtcDateTime, p.ExitTime?.DateTimeOffset.UtcDateTime, p.CommandLine ?? string.Empty))
+        .ToList();
+    var serviceSnapshots = services
+        .Select(svc =>
+        {
+            IServiceStateChange? lastState = svc.StateChanges.Count > 0 ? svc.StateChanges[^1] : null;
+            return new ServiceSnapshot(svc.Name, lastState?.ProcessId, lastState?.State.ToString() ?? string.Empty, TryGetStartType(svc));
+        })
+        .ToList();
+    var threadSnapshots = threadsTp
+        .Select(t => new ThreadSnapshot(
+            t.Id,
+            t.ProcessId,
+            t.Name ?? string.Empty,
+            t.CreateTime?.DateTimeOffset.UtcDateTime,
+            t.ExitTime?.DateTimeOffset.UtcDateTime,
+            t.BasePriority,
+            (int)t.PagePriority,
+            (int)t.IoPriority,
+            t.ProcessorAffinity,
+            t.KernelStackRange.BaseAddress.Value,
+            t.KernelStackRange.LimitAddress.Value,
+            t.UserStackRange?.BaseAddress.Value,
+            t.UserStackRange?.LimitAddress.Value,
+            t.StartAddress.Value,
+            t.ThreadEnviromentBlockAddress.Value,
+            t.ServiceId,
+            t.StartFrame.Image?.FileName ?? "<未映射>"))
+        .ToList();
+    var interruptModuleSnapshots = DemoResultValidator.BuildInterruptModuleSnapshots(
+        isrIntervals.Select(isr => isr.HandlerImage?.FileName ?? "<未知模組>"),
+        dpcIntervals.Select(dpc => dpc.HandlerImage?.FileName ?? "<未知模組>"));
+
+    return new DemoResult(
+        stopwatch.Elapsed,
+        processSnapshots,
+        serviceSnapshots,
+        energyIntervals.Count,
+        energyIntervals.Sum(i => (double)i.TotalEnergy.TotalMillijoules),
+        interruptModuleSnapshots,
+        threadSnapshots);
 }

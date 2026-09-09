@@ -465,16 +465,28 @@ public sealed class RoutineEventSummary
     public Dictionary<byte, int> EventsByProcessor { get; } = [];
     public string ModuleName { get; set; } = "<未映射>";
     public ulong? ModuleRelativeAddress { get; set; }
-    /// <summary>每筆事件的時間戳，Value 為累計發生次數，供時間序列圖表使用。</summary>
     public List<EtlTimedSample> Samples { get; } = [];
 }
 
-/// <summary>單一次程序存續期間的彙總資訊，對應 TraceProcessor 的 IProcess，由內建關聯引擎於解析過程中建立與收尾。</summary>
 public sealed class ProcessRecord
 {
     public required uint ProcessId { get; init; }
     public uint ParentProcessId { get; init; }
-    public required DateTime StartTime { get; init; }
+
+    /// <summary>
+    /// 程序建立時間。僅在追蹤期間內觀察到真正的 Start(而非 DCStart/rundown)時才會有值；
+    /// 若此程序是透過 DCStart(追蹤開始前就已存在，只是被 rundown 掃描到)才第一次被觀察到，則維持 null。
+    /// 對應 TraceProcessor 的 IProcess.CreateTime 語意，比照 <see cref="ThreadRecord.CreateTime"/> 已驗證過的作法
+    /// (原本是 non-nullable DateTime、且未區分 DCStart，一律填入觀察到的時間戳記，與 TraceProcessor 不符，已修正)。
+    /// </summary>
+    public DateTime? StartTime { get; init; }
+
+    /// <summary>
+    /// 程序結束時間(僅真正的 Stop，opcode 2)。追蹤結束時仍未收到 Stop 者(程序仍存活)維持 null——
+    /// 比照 <see cref="ThreadRecord.ExitTime"/> 已實測驗證的作法：ProcessDCStop(opcode 4)是追蹤結束當下的
+    /// rundown，語意為「仍存活」而非「已終止」，不可比照真正的 Stop 設定此欄位(原本兩者混用、且會於收尾時
+    /// 強制對所有仍存活的程序補上追蹤結束時間戳記，導致與 TraceProcessor 的 IProcess.ExitTime 不符，已修正)。
+    /// </summary>
     public DateTime? EndTime { get; set; }
     public string ImageFileName { get; init; } = string.Empty;
     public string CommandLine { get; init; } = string.Empty;
@@ -511,7 +523,12 @@ public sealed class ServiceRecord
 {
     public required string ServiceName { get; init; }
     public string ImageFileName { get; set; } = string.Empty;
-    /// <summary>最近一次狀態變化回報的所在 ProcessId(服務可能因 svchost 共用行程而在不同啟動間換過 PID)。</summary>
+    /// <summary>
+    /// 最近一次狀態變化回報的所在 ProcessId(服務可能因 svchost 共用行程而在不同啟動間換過 PID)。
+    /// 原始事件回報 0 時(例如服務尚未指派/已停止)會如實保留為 0,不轉換成 null,
+    /// 對應 TraceProcessor 的 IServiceStateChange.ProcessId(非 nullable,同樣保留原始 0 值)。
+    /// 此欄位為 nullable 純粹是因為型別語意上允許「尚未收到任何狀態變化」，並非代表 0 的特殊處理。
+    /// </summary>
     public uint? ProcessId { get; set; }
     public ServiceState? CurrentState { get; set; }
     public ServiceStartType? StartType { get; set; }
@@ -519,17 +536,166 @@ public sealed class ServiceRecord
 }
 
 /// <summary>
-/// 單一次 Energy Estimation Engine(E3)估算週期紀錄,對應 TraceProcessor 的 IEnergyEstimationInterval,
-/// 由 <see cref="EnergyEstimationEngineEventInfo_37"/>(Event ID 37,EnergyEstimate)直接轉換而來。
-/// 該事件本身就是「本次估算週期內」的累積快照,因此天生就是一段時間區間(StartTime~StopTime),
-/// 而非單一時間點,不需像程序/服務那樣等待配對的結束事件。
+/// 對應 Windows MEMORY_PRIORITY_* 常數(winnt.h),文件記載的有效範圍為 1(VeryLow)~5(Normal)。
+/// 已用 .NET 反射直接讀取 TraceProcessor 組件確認 IThread.PagePriority 底層列舉數值：
+/// TraceProcessor 的 MemoryPriority 列舉數值範圍同樣是 1(VeryLow)~5(Normal)，與原始位元組完全相同，
+/// 可直接轉換、不需位移(先前僅憑印出的列舉「名稱」比對誤判成需要 -1，已修正)。
+/// 實測另外發現：少數執行緒(約 0.3%)的原始位元組實際為 0(非文件記載的 1-5 範圍)，
+/// TraceProcessor 對此不做任何驗證、直接轉型成列舉(印出時因無對應名稱而顯示底層數值 0)；
+/// 為與其逐筆比對一致，EtlFileReader 端也改為直接轉型、不篩選範圍(見 ThreadRecord.PagePriority 文件註解)，
+/// 此列舉因此可能出現未定義的 0 這個值，呼叫端不應假設一定落在上述 5 個具名成員內。
 /// </summary>
-public sealed class EnergyEstimationInterval
+public enum ThreadMemoryPriority
 {
-    /// <summary>回報此筆能耗的 ProcessId(來自 Event 37 的 EventHeader.ProcessId)。</summary>
+    VeryLow = 1,
+    Low = 2,
+    Medium = 3,
+    BelowNormal = 4,
+    Normal = 5,
+}
+
+/// <summary>
+/// 對應 Windows IO_PRIORITY_HINT 列舉(winnt.h),數值範圍 0(VeryLow)~4(Critical)。
+/// 已實測擷取同一份 ETL 並與 TraceProcessor 的 IThread.IoPriority 實際輸出比對確認：
+/// 數值定義與原始事件位元組完全相同，可直接轉換，不需位移。
+/// </summary>
+public enum ThreadIoPriority
+{
+    VeryLow = 0,
+    Low = 1,
+    Normal = 2,
+    High = 3,
+    Critical = 4,
+}
+
+/// <summary>
+/// 單一執行緒存續期間的彙總資訊，對應 TraceProcessor 的 IThread，由 <see cref="EtlReaderPlugins"/> 內的
+/// UseThreads() 內建關聯引擎依 ThreadId 建立與收尾(用法與呼叫順序同 <see cref="ProcessRecord"/>)。
+/// 兩者的完整比對(型別欄位、優先權數值轉換公式、Name 語意)已於 2026-09 評估並實測驗證，詳見各屬性註解。
+/// </summary>
+public sealed class ThreadRecord
+{
+    public required uint ThreadId { get; init; }
     public required uint ProcessId { get; init; }
 
-    /// <summary>對應 TraceProcessor 的 ImageName;來源事件的 AppName 欄位,可能為空字串。</summary>
+    /// <summary>
+    /// 執行緒建立時間。僅在追蹤期間內觀察到真正的 Start(而非 DCStart/rundown)時才會有值；
+    /// 若此執行緒是透過 DCStart(追蹤開始前就已存在，只是被 rundown 掃描到)才第一次被觀察到，則維持 null。
+    /// 對應 TraceProcessor 的 IThread.CreateTime 語意——已實測驗證：同一份 ETL 中，透過 DCStart 觀察到的
+    /// 既存執行緒(例如當下仍在執行的瀏覽器分頁執行緒)，TraceProcessor 回傳的 CreateTime 一律是 null。
+    /// </summary>
+    public DateTime? CreateTime { get; set; }
+
+    /// <summary>
+    /// 執行緒結束時間(Stop 或 DCStop)。追蹤結束時仍未收到 Stop/DCStop 者(執行緒仍存活)維持 null，
+    /// 刻意不像 <see cref="ProcessRecord.EndTime"/> 那樣在收尾時補上追蹤結束時間戳記——
+    /// 已實測驗證：TraceProcessor 對於追蹤結束時仍存活的執行緒，IThread.ExitTime 就是 null，並不會補值。
+    /// </summary>
+    public DateTime? ExitTime { get; set; }
+
+    /// <summary>CreateTime 與 ExitTime 皆有值時的存續時間，否則為 null(語意同 TraceProcessor 的 IThread.Duration)。</summary>
+    public TimeSpan? Duration => CreateTime is DateTime start && ExitTime is DateTime end ? end - start : null;
+
+    /// <summary>執行緒核心層堆疊基底位址(對應 TraceProcessor IThread.KernelStackRange.BaseAddress)。</summary>
+    public ulong? StackBase { get; init; }
+
+    /// <summary>執行緒核心層堆疊邊界位址(對應 TraceProcessor IThread.KernelStackRange.LimitAddress)。</summary>
+    public ulong? StackLimit { get; init; }
+
+    /// <summary>
+    /// 執行緒使用者層堆疊基底位址(對應 TraceProcessor IThread.UserStackRange?.BaseAddress)。
+    /// 純核心模式執行緒(例如 Idle Thread、System 行程內的核心工作執行緒)沒有使用者層堆疊，
+    /// 原始事件對此一律回傳位元組 0，但 TraceProcessor 的 UserStackRange 型別是 Nullable&lt;AddressRange&gt;，
+    /// 對這類執行緒回傳 null 而非位址 0；經比對確認語意相同、僅表示方式不同，故此處已將 0 正規化成 null。
+    /// (核心層堆疊 StackBase/StackLimit 則每個執行緒都一定存在，故不做此正規化。)
+    /// </summary>
+    public ulong? UserStackBase { get; init; }
+
+    /// <summary>執行緒使用者層堆疊邊界位址(對應 TraceProcessor IThread.UserStackRange?.LimitAddress)，0 正規化成 null 的理由同 <see cref="UserStackBase"/>。</summary>
+    public ulong? UserStackLimit { get; init; }
+
+    /// <summary>可執行處理器集合遮罩(對應 TraceProcessor IThread.ProcessorAffinity)。</summary>
+    public ulong? ProcessorAffinity { get; init; }
+
+    /// <summary>執行緒起始函式位址(對應 TraceProcessor IThread.StartAddress)。</summary>
+    public ulong? StartAddress { get; init; }
+
+    /// <summary>
+    /// StartAddress 反查得到的模組檔名，查無對應模組時為 "&lt;未映射&gt;"。
+    /// 對應 TraceProcessor IThread.StartFrame.Image.FileName 的「模組層級」部分——本專案未做 PDB 符號解析，
+    /// 無法像 TraceProcessor 一樣進一步給出函式層級的 Symbol，屬「陽春版」StartFrame。
+    /// </summary>
+    public string StartAddressModuleName { get; set; } = "<未映射>";
+
+    /// <summary>StartAddress 相對於所屬模組 ImageBase 的位移(RVA)，查無對應模組時為 null。</summary>
+    public ulong? StartAddressModuleOffset { get; set; }
+
+    /// <summary>執行緒環境區塊(TEB)位址(對應 TraceProcessor IThread.ThreadEnviromentBlockAddress)。</summary>
+    public ulong? TebBase { get; init; }
+
+    /// <summary>
+    /// 服務索引標籤，取自原始事件的 SubProcessTag，僅在此執行緒隸屬於 svchost.exe 等共用服務行程時才有值
+    /// (對應 TraceProcessor IThread.ServiceId)。原始 SubProcessTag 以 0 代表「無服務標籤」，
+    /// 但 TraceProcessor 的 ServiceId(Nullable&lt;Int32&gt;)對此一律回傳 null 而非 0，
+    /// 經反射確認兩者語意相同、僅表示方式不同，故此處已將 0 正規化成 null，與 TraceProcessor 一致。
+    /// </summary>
+    public uint? ServiceId { get; init; }
+
+    /// <summary>排程優先權(對應 TraceProcessor IThread.BasePriority)，數值與原始事件相同，無需轉換。</summary>
+    public int? BasePriority { get; init; }
+
+    /// <summary>
+    /// 記憶體分頁優先權(對應 TraceProcessor IThread.PagePriority)，由 <see cref="ThreadStartStopEventInfo.PagePriority"/>
+    /// 直接轉型而來，換算公式與驗證方式見 <see cref="ThreadMemoryPriority"/> 文件註解。
+    /// 僅在 Start/DCStart payload 為截斷版本(<see cref="ThreadStartStopEventInfo.PagePriority"/> 本身為 null)時才是 null，
+    /// 其餘情況(含原始位元組為文件未記載的 0)一律直接轉型、不篩選範圍，比照 TraceProcessor 的作法。
+    /// </summary>
+    public ThreadMemoryPriority? PagePriority { get; init; }
+
+    /// <summary>
+    /// IO 優先權提示(對應 TraceProcessor IThread.IoPriority)，由 <see cref="ThreadStartStopEventInfo.IoPriority"/>
+    /// 直接轉換而來(數值定義相同，無需位移)，驗證方式見 <see cref="ThreadIoPriority"/> 文件註解。
+    /// </summary>
+    public ThreadIoPriority? IoPriority { get; init; }
+
+    /// <summary>
+    /// 執行緒名稱(對應 TraceProcessor IThread.Name)。沒有名稱時為 null，語意與驗證方式見
+    /// <see cref="ThreadStartStopEventInfo.Name"/> 文件註解。
+    /// </summary>
+    public string? Name { get; set; }
+}
+/// <summary>
+/// 對應 TraceProcessor 的 PowerSourceType:解碼自 Event 37 的 RecordFlags 位 0x1,標示本次估算週期當下的供電來源。
+/// </summary>
+public enum PowerSourceType
+{
+    /// <summary>使用市電/外接電源(RecordFlags 位 0x1 未設定)。</summary>
+    AC,
+
+    /// <summary>使用電池供電(RecordFlags 位 0x1 已設定)。</summary>
+    DC,
+}
+
+public sealed class EnergyEstimationInterval
+{
+    /// <summary>
+    /// 回報此筆能耗的 ProcessId(來自 Event 37 的 EventHeader.ProcessId,即「呼叫 EventWrite 寫入此事件的行程」)。
+    /// 注意:這通常是 Energy Estimation Engine 服務本身的宿主行程 PID,並非 <see cref="ImageName"/> 所指應用程式的 PID
+    /// ──實測同一次擷取中所有記錄的 ProcessId 皆相同,可見其不具備「區分不同應用程式」的作用。
+    /// TraceProcessor 的 IEnergyEstimationInterval 也沒有對應的數值型 PID 欄位,佐證此設計:
+    /// 它完全以字串(ConsumerId,即 AppName 原文)分辨消耗者身分,不依賴 PID。
+    /// </summary>
+    public required uint ProcessId { get; init; }
+
+    /// <summary>
+    /// 對應 TraceProcessor 的 ImageName;來源事件的 AppName 欄位原文(未經任何加工),可能為空字串。
+    /// 注意與 TraceProcessor 的差異(反組譯 EnergyEstimationIntervalFlyweight 證實):TraceProcessor 的
+    /// ImageName 是取 AppName 第一個空白字元前的子字串(例如 AppName="svchost.exe [NetworkService] [Dnscache]"
+    /// 時,TraceProcessor.ImageName 只會是 "svchost.exe";本欄位則原封不動保留整段字串)。TraceProcessor 另有
+    /// 本類別未提供的對應欄位:ServiceGroup/ServiceName(當 AppName 以 "svchost.exe" 開頭且含中括號時,解析出
+    /// 所屬服務群組/服務名稱)、OtherConsumerName(當該筆記錄無法對應到真實行程/路徑時使用,即虛擬耗能項目,
+    /// 如上方類別註解提到的 RAPL/EMI 匯總項)。
+    /// </summary>
     public string ImageName { get; init; } = string.Empty;
 
     /// <summary>本次估算週期結束時間,即 Event 37 的 Timestamp。</summary>
@@ -543,16 +709,12 @@ public sealed class EnergyEstimationInterval
     public ulong DiskEnergy { get; init; }
     public ulong NetworkEnergy { get; init; }
     public ulong MobileBroadbandEnergy { get; init; }
+
     public ulong LossEnergy { get; init; }
     public ulong OtherEnergy { get; init; }
 
-    /// <summary>對應 TraceProcessor 的 SystemOnChipEnergy;來源事件的 GpuEnergy 欄位(新版 manifest 下實際上是 SocEnergy,见 <see cref="EnergyEstimationEngineEventInfo_37.GpuEnergy"/>)。</summary>
     public ulong SystemOnChipEnergy { get; init; }
 
-    /// <summary>
-    /// 本專案自行加總的總能耗(單位 mJ):CpuEnergy+DisplayEnergy+DiskEnergy+NetworkEnergy+MobileBroadbandEnergy+LossEnergy+OtherEnergy+SystemOnChipEnergy。
-    /// TraceProcessor 內部實際的 TotalEnergy 公式未公開,此處為本專案依可取得欄位重建的近似值。
-    /// </summary>
     public ulong TotalEnergy { get; init; }
 
     /// <summary>依 TotalEnergy 除以本次週期時長換算的平均功率(毫瓦,mW);週期時長為 0 時回傳 0。</summary>
@@ -564,19 +726,13 @@ public sealed class EnergyEstimationInterval
     /// <summary>解碼自 RecordFlags 位 0x4:本次週期省電模式是否啟用。</summary>
     public bool IsBatterySaverActive { get; init; }
 
-    /// <summary>解碼自 RecordFlags 位 0x10:本次週期應用程式是否位於前景。</summary>
     public bool IsApplicationInForeground { get; init; }
+
+    public PowerSourceType SourceType { get; init; }
 
     public ushort UserId { get; init; }
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 IEnergyMeasurementInterval:硬體 Energy Meter Interface(EMI)在同一計量通道(rail)上,
-/// 前後兩次輪詢讀數之間量測到的耗能區間,由 <see cref="PowerMeterPollingEventInfo_4"/>(Event ID 4,EMI 讀數)
-/// 相鄰兩筆依 MeterId 相減而得;ChannelName 則從 <see cref="PowerMeterPollingEventInfo_2"/>(Event ID 2,
-/// EnergyMeterRundown)依 MeterId 查表取得。同一 MeterId 收到第一筆讀數時尚無前一筆可供相減,不會產生區間,
-/// 因此 N 筆讀數只會產生 N-1 個區間,此行為與 TraceProcessor 一致。
-/// </summary>
 public sealed class EnergyMeasurementInterval
 {
     /// <summary>能源計量通道的穩定識別碼,來自 Event 2/4 共用的 MeterId 欄位,可作為兩者的 join key。</summary>
@@ -714,7 +870,6 @@ public sealed class MemoryUtilizationEventInfo
 
     public required DateTime Timestamp { get; init; }
 
-    /// <summary>Standby/Repurposed 分優先權清單的層數,目前 Windows 版本一般為 8(優先權 0~7)。</summary>
     public required byte PriorityLevels { get; init; }
 
     public long ZeroPageCount { get; init; }
@@ -723,13 +878,8 @@ public sealed class MemoryUtilizationEventInfo
     public long ModifiedNoWritePageCount { get; init; }
     public long BadPageCount { get; init; }
 
-    /// <summary>依優先權(索引=優先權,0~PriorityLevels-1)分組的 Standby 分頁數;總和即 TraceProcessor 的 StandbyListSize。</summary>
     public IReadOnlyList<long> StandbyPriorityPageCounts { get; init; } = [];
 
-    /// <summary>
-    /// 依優先權分組、自追蹤開始以來累計的 Repurposed 分頁數(單調遞增的計數器,非目前清單大小)。
-    /// 與 TraceProcessor 的 RepurposedSubListSizes 語意不同,詳見類別註解說明,請勿直接視為等同欄位。
-    /// </summary>
     public IReadOnlyList<long> RepurposedPriorityPageCounts { get; init; } = [];
 
     public long ModifiedPageFilePageCount { get; init; }
@@ -738,13 +888,8 @@ public sealed class MemoryUtilizationEventInfo
     public long MdlPageCount { get; init; }
     public long CommitPageCount { get; init; }
 
-    /// <summary>對應 TraceProcessor 的 StandbyListSize(分頁數):StandbyPriorityPageCounts 各優先權加總。</summary>
     public long StandbyTotalPageCount => Sum(StandbyPriorityPageCounts);
 
-    /// <summary>
-    /// RepurposedPriorityPageCounts 各優先權加總,即自追蹤開始以來累計的 Repurposed 分頁數(單調遞增)。
-    /// 注意:這不等同 TraceProcessor 的 RepurposedListSize,詳見類別註解說明。
-    /// </summary>
     public long RepurposedTotalPageCount => Sum(RepurposedPriorityPageCounts);
 
     private static long Sum(IReadOnlyList<long> values)
@@ -777,19 +922,13 @@ public readonly record struct ProcessInfo
     public DateTime TimeStamp { get; init; }
 }
 
-/// <summary>
-/// 對應 Process provider 的 Opcode 11(Terminate)事件,schema 只含 ProcessId,無其他程序資訊。
-/// </summary>
 public readonly record struct ProcessTerminateInfo
 {
     public uint ProcessId { get; init; }
     public DateTime TimeStamp { get; init; }
 }
 
-/// <summary>
-/// 對應 Process provider 的 Opcode 32 (PerfCtr) 與 33 (PerfCtrRundown) 事件。
-/// SizeT 欄位統一以 <see cref="ulong"/> 表示，保留 ETL 中的原始數值。
-/// </summary>
+
 public readonly record struct ProcessCounterEventInfo
 {
     public DateTime Timestamp { get; init; }
@@ -812,11 +951,6 @@ public readonly record struct ProcessCounterEventInfo
     public ulong PrivatePageCount { get; init; }
 }
 
-/// <summary>
-/// 對應 Microsoft-Windows-Services provider 的 EventId=105(task=ServiceStatusChange, opcode=101 StatusChange)。
-/// 欄位已用 "Get-WinEvent -ListProvider Microsoft-Windows-Services" 查證其 template,含服務名稱、目前所在的
-/// 映像檔/ProcessId 與狀態,是 TraceProcessor IServiceDataSource 背後對應的資料來源之一。
-/// </summary>
 public readonly record struct ServiceStatusChangeEventInfo
 {
     public DateTime Timestamp { get; init; }
@@ -1254,6 +1388,32 @@ public readonly record struct ThreadStartStopEventInfo
     public int? PagePriority { get; init; }
     public int? IoPriority { get; init; }
     public int? ThreadFlags { get; init; }
+
+    /// <summary>
+    /// 執行緒名稱。實測 dump 原始 payload bytes 後發現：Start/DCStart 事件的固定欄位(至 ThreadFlags 為止)之後，
+    /// 其實還帶有一段「Null 結尾的 UTF-16 執行緒名稱字串」，未命名的執行緒也會有僅含 Null 結尾字元的 2 bytes；
+    /// 已用同一份 ETL 交叉比對 TraceProcessor 的 IThread.Name 輸出，兩者語意完全一致(如 "Idle Thread"、
+    /// ".NET TP Worker"、"CrRendererMain" 等均相符)。
+    /// 注意：這裡只反映「執行緒建立當下」的名稱——若執行緒是先建立、之後才呼叫 Win32 SetThreadDescription()
+    /// API 命名/改名(常見於 .NET ThreadPool 工作執行緒，建立時未命名、首次執行任務時才設名稱)，
+    /// 此欄位仍會是空字串，需另外訂閱 <see cref="EtlFileReader.ThreadSetName"/> 事件才能補上，
+    /// 兩者合併後才能完全對應 TraceProcessor 的 IThread.Name(已實測驗證：同時使用兩者，
+    /// 與 TraceProcessor 的 Name 不同筆數從 226/7175 降至 0/6386，完全一致)。
+    /// </summary>
+    public string Name { get; init; }
+}
+
+/// <summary>
+/// ThreadSetName 事件(對應 SetThreadDescription() API，opcode=72)，用於補上 Start/DCStart 當下尚未設定、
+/// 而是事後才透過 SetThreadDescription() 命名的執行緒名稱(詳見 <see cref="EtlFileReader"/> 內
+/// ThreadSetNameOpcode 常數的文件註解)。
+/// </summary>
+public readonly record struct ThreadSetNameEventInfo
+{
+    public required DateTime Timestamp { get; init; }
+    public required uint ProcessId { get; init; }
+    public required uint ThreadId { get; init; }
+    public required string Name { get; init; }
 }
 
 public readonly record struct CSwitchEventInfo
@@ -1565,11 +1725,8 @@ public sealed class EtlFileReader
     private const byte ThreadDCEndOpcode = 4;
     private const byte SampledProfileOpcode = 46;
     private const byte ThreadDpcOpcode = 66;
+    private const byte ThreadSetNameOpcode = 72;
     private const byte InterruptOpcode = 67;
-    // 部分現代驅動程式(如 dxgkrnl.sys、storport.sys、ndis.sys,常見於 MSI-X 訊息式中斷)會以
-    // Opcode=50 記錄 ISR 事件,而非傳統(如 acpi.sys 這類舊式線路中斷)使用的 Opcode=67。
-    // 兩者的payload結構完全相同(TraceEvent 原始碼中兩者共用同一個 ISRTraceData 樣板),
-    // 若只比對 67 會導致高頻率中斷(常常是佔比最高的項目)被完全遺漏。
     private const byte InterruptOpcodeAlt = 50;
     private const byte DpcOpcode = 68;
     private const byte TimerDpcOpcode = 69;
@@ -1579,24 +1736,8 @@ public sealed class EtlFileReader
     private const byte ImageLoadOpcode = 10;
     private long s_eventCount;
 
-    /// <summary>QueryPerformanceCounter 頻率(ticks/秒),取自 TRACE_LOGFILE_HEADER.PerfFreq。</summary>
     private long _perfFreq;
 
-    // ===== DPC/ISR 耗時換算:線上最小平方回歸校正 =====
-    //
-    // DPC/ISR 事件負載內嵌的 InitialTime 是原始 QPC 時間戳記(KeQueryPerformanceCounter),但事件本身的
-    // EVENT_HEADER.TimeStamp 因為 ProcessFile() 並未啟用 PROCESS_TRACE_MODE_RAW_TIMESTAMP,已被 ETW
-    // 自動換算成 FILETIME。若單純用 TRACE_LOGFILE_HEADER.BootTime + PerfFreq 重建 InitialTime 對應的
-    // FILETIME,實測與作業系統內部實際使用的(未公開、更精確的)QPC↔FILETIME 校正之間,不僅有一個固定
-    // 偏差,兩者換算比例(斜率)也存在極小落差——在 60 秒等級的追蹤內,這個斜率誤差累積起來會造成隨時間
-    // 拉開的耗時誤差(甚至變號),單純扣掉「第一筆事件的固定偏差」不足以修正。
-    //
-    // 改用線上最小平方回歸:每筆 DPC/ISR 事件都同時提供一組 (InitialTime QPC, TimeStamp FILETIME) 樣本,
-    // 由於真實 DPC/ISR 執行時間必定極短(通常僅數微秒,遠小於我們在意的毫秒級精度),樣本雲幾乎全部貼著
-    // 真正的 QPC→FILETIME 換算直線,因此可以用回歸還原出比名目 PerfFreq 更準確的斜率與截距。
-    // 為避免 QPC/FILETIME 數值量級過大(FILETIME ticks since 1601 約 1.3e17,超出 double 可精確表示的
-    // 整數範圍)造成回歸計算的數值不穩定,所有樣本在累加前都先相對於第一筆樣本置中(取差值),使量級縮小到
-    // 追蹤長度等級(通常 <1e10)。
     private double _calRefX;
     private long _calRefY;
     private double _calSumX;
@@ -1616,11 +1757,6 @@ public sealed class EtlFileReader
     public long TotalEventCount => s_eventCount;
 
     public EtlReadResult Result => _readResult ?? throw new InvalidOperationException("尚未呼叫 ProcessFile()，無法取得解析結果。");
-
-    // UseBuiltInAnalysis()/UseProcesses()/UseServices()/UseEnergyEstimationData()/UseEnergyMeterData() 皆已改為
-    // EtlFileReader 的擴充方法(extension methods),與各自的 Collector 一併定義於 EtlReaderPlugins.cs——
-    // 呼叫端語法不變(reader.UseXxx()),但新增一種 Use 能力不再需要修改本檔案,比照 TraceProcessor
-    // 將 UseProcesses()/UseServices() 等定義成 ITraceSource 擴充方法(甚至各自獨立成 DLL)的作法。
 
     public unsafe void ProcessFile(string etlFilePath)
     {
@@ -1916,9 +2052,28 @@ public sealed class EtlFileReader
     public event ThreadStartStopEventHandler? ThreadDCStart;
     public event ThreadStartStopEventHandler? ThreadDCStop;
 
+    public delegate void ThreadSetNameEventHandler(in ThreadSetNameEventInfo data);
+    /// <summary>執行緒事後透過 SetThreadDescription() 命名/改名時觸發(對應 opcode=72，詳見型別文件註解)。</summary>
+    public event ThreadSetNameEventHandler? ThreadSetName;
+
     public delegate void ProcessEventHandler(in ProcessInfo process);
+    /// <summary>對應 Process provider 的 Opcode 1(Start):追蹤期間內真正建立的新程序。</summary>
     public event ProcessEventHandler? ProcessStart;
+    /// <summary>對應 Process provider 的 Opcode 2(Stop):追蹤期間內真正終止的程序。</summary>
     public event ProcessEventHandler? ProcessStop;
+    /// <summary>
+    /// 對應 Process provider 的 Opcode 3(DCStart):追蹤「開始」當下的 rundown,列出當時已在執行的既存程序,
+    /// 語意上與 ProcessStart(這段追蹤期間內真正建立的新程序)不同,故獨立成事件,不與 ProcessStart 混用
+    /// (比照既有的 ThreadDCStart 與 ThreadStart 區分方式)。
+    /// </summary>
+    public event ProcessEventHandler? ProcessDCStart;
+    /// <summary>
+    /// 對應 Process provider 的 Opcode 4(DCStop):追蹤「結束」當下的 rundown,列出當時仍在執行的程序,
+    /// 語意是「這個程序在追蹤結束當下仍存活」,並非終止事件,故獨立成事件,不可比照 ProcessStop 處理
+    /// (比照既有的 ThreadDCStop 與 ThreadStop 區分方式;此區分先前缺漏,已修正,詳見
+    /// <see cref="ProcessDataSourceCollector"/> 文件註解)。
+    /// </summary>
+    public event ProcessEventHandler? ProcessDCStop;
 
     /// <summary>
     /// 對應 Process provider 的 Opcode 11(Terminate)。此事件的 TDH schema 只定義 ProcessId 一個欄位,
@@ -2058,6 +2213,18 @@ public sealed class EtlFileReader
         if (eventRecordPtr->EventHeader.ProviderId == s_threadProviderId)
         {
             byte threadOpcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
+            if (threadOpcode == ThreadSetNameOpcode)
+            {
+                if (ThreadSetName is not null)
+                {
+                    var setNameEvent = ParseThreadSetNamePayload(timestamp, eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
+                    if (setNameEvent is { } setNameEventValue)
+                    {
+                        ThreadSetName(in setNameEventValue);
+                    }
+                }
+                return;
+            }
             if (threadOpcode == CSwitchOpcode)
             {
                 if (ThreadCSwitch is not null)
@@ -3432,11 +3599,17 @@ public sealed class EtlFileReader
             };
             switch (opcode)
             {
-                case 1 or 3:
+                case 1:
                     ProcessStart?.Invoke(process);
                     break;
-                case 2 or 4:
+                case 3:
+                    ProcessDCStart?.Invoke(process);
+                    break;
+                case 2:
                     ProcessStop?.Invoke(process);
+                    break;
+                case 4:
+                    ProcessDCStop?.Invoke(process);
                     break;
             }
         }
@@ -3712,6 +3885,19 @@ public sealed class EtlFileReader
         ulong? ReadOptionalPointer(int index) =>
             hasFullPayload ? ReadPointer(userData, pointersOffset + index * (int)pointerSize, pointerSize) : null;
 
+        string threadName = string.Empty;
+        if (hasFullPayload)
+        {
+            int nameOffset = tailOffset + TailSize;
+            int nameBytes = userDataLength - nameOffset;
+            if (nameBytes >= 2)
+            {
+                string raw = Marshal.PtrToStringUni(userData + nameOffset, nameBytes / 2);
+                int nulIndex = raw.IndexOf('\0');
+                threadName = nulIndex >= 0 ? raw[..nulIndex] : raw;
+            }
+        }
+
         return new ThreadStartStopEventInfo
         {
             Timestamp = timestamp,
@@ -3730,14 +3916,41 @@ public sealed class EtlFileReader
             PagePriority = hasFullPayload ? Marshal.ReadByte(userData, tailOffset + 5) : null,
             IoPriority = hasFullPayload ? Marshal.ReadByte(userData, tailOffset + 6) : null,
             ThreadFlags = hasFullPayload ? Marshal.ReadByte(userData, tailOffset + 7) : null,
+            Name = threadName,
+        };
+    }
+
+    private ThreadSetNameEventInfo? ParseThreadSetNamePayload(DateTime timestamp, nint userData, int userDataLength)
+    {
+        const int FixedHeaderSize = sizeof(uint) + sizeof(uint);
+        if (userData == 0 || userDataLength < FixedHeaderSize)
+        {
+            return null;
+        }
+
+        uint processId = unchecked((uint)Marshal.ReadInt32(userData, 0));
+        uint threadId = unchecked((uint)Marshal.ReadInt32(userData, 4));
+
+        string name = string.Empty;
+        int nameBytes = userDataLength - FixedHeaderSize;
+        if (nameBytes >= 2)
+        {
+            string raw = Marshal.PtrToStringUni(userData + FixedHeaderSize, nameBytes / 2);
+            int nulIndex = raw.IndexOf('\0');
+            name = nulIndex >= 0 ? raw[..nulIndex] : raw;
+        }
+
+        return new ThreadSetNameEventInfo
+        {
+            Timestamp = timestamp,
+            ProcessId = processId,
+            ThreadId = threadId,
+            Name = name,
         };
     }
 
     private InterruptEventInfo? ProcessInterruptEvent(DateTime timestamp, byte processorNumber, in EVENT_HEADER header, nint userData, int userDataLength)
     {
-        // 依官方 ISR MOF class 定義 (https://learn.microsoft.com/windows/win32/etw/isr)：
-        // InitialTime(8 bytes) + Routine(pointer) + ReturnValue(uint8) + Vector(uint8) + Reserved(uint16)。
-        // ReturnValue 與 Vector 各佔 1 byte，不可合併當成單一 uint32 讀取，否則會讀出錯誤的合成值且遺漏 Vector。
         var pointerSize = GetPointerSize(in header);
         const int InitialTimeSize = sizeof(ulong);
         const int ReturnValueSize = sizeof(byte);
@@ -3771,15 +3984,6 @@ public sealed class EtlFileReader
         };
     }
 
-    /// <summary>
-    /// 將 DPC/ISR 事件負載中內嵌的原始 QPC 時間戳記(<paramref name="initialTimeQpc"/>,來自
-    /// KeQueryPerformanceCounter)換算為與事件 <paramref name="eventTimestamp"/> 相同單位的耗時(毫秒)。
-    /// 因為 ProcessFile() 並未啟用 PROCESS_TRACE_MODE_RAW_TIMESTAMP,ETW 已將 EVENT_HEADER.TimeStamp
-    /// 自動轉換成 FILETIME,所以需把 QPC-基準的 InitialTime 換算到同一個 FILETIME 時間軸上再相減。
-    /// 換算採用線上最小平方回歸(見類別欄位 _calSumX 等的說明),而非單純依賴 TRACE_LOGFILE_HEADER 的
-    /// BootTime/PerfFreq 重建,以避免固定錨點法在長時間追蹤中因斜率(換算比例)誤差而隨時間漂移失準。
-    /// ETL 檔頭缺少 PerfFreq 資訊時回傳 null。
-    /// </summary>
     private double? ComputeElapsedTimeMSec(ulong initialTimeQpc, DateTime eventTimestamp)
     {
         if (_perfFreq <= 0)
@@ -3791,10 +3995,6 @@ public sealed class EtlFileReader
 
         if (_calCount == 0)
         {
-            // 第一筆樣本:記錄為置中基準點(此後所有樣本都相對於它取差值,避免 QPC/FILETIME 原始數值
-            // 量級過大導致回歸計算失去精度)。第一筆事件本身的耗時無法用回歸估計(樣本數不足),因此
-            // 退回用名目 PerfFreq 當斜率、並假設此事件的真實耗時為 0(真實 DPC/ISR 執行時間必定極短,
-            // 這是合理的起始錨點)。
             _calRefX = initialTimeQpc;
             _calRefY = eventFileTicks;
             _calSumX = 0;
@@ -3821,8 +4021,6 @@ public sealed class EtlFileReader
         }
         else
         {
-            // 樣本仍不足以解回歸(或目前所有樣本的 X 值都相同):退回名目 PerfFreq 當斜率,並讓「目前這筆」
-            // 事件耗時視為 0(等同於重新以這筆事件為錨點),直到累積夠多樣本讓回歸穩定為止。
             slope = 10_000_000.0 / _perfFreq;
             intercept = dy - (slope * dx);
         }

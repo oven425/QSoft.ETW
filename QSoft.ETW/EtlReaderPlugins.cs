@@ -3,101 +3,54 @@ using System.Linq;
 
 namespace QSoft.ETW;
 
-/// <summary>
-/// <see cref="EtlFileReader"/> 的擴充點。掛上插件後，才會在 <see cref="EtlFileReader.ProcessFile"/> 讀取事件的過程中
-/// 執行插件對應的即時關聯／彙總工作；未掛任何插件時，EtlFileReader 只單純解析並派送原始事件
-/// (見 EtlFileReader 上的各個 public event)，不會多做任何配對或彙總計算，適合單純轉存 SQLite 等
-/// 不需要 <see cref="EtlReadResult.Analysis"/> 的情境。
-/// </summary>
 public interface IEtlReaderPlugin
 {
-    /// <summary>
-    /// 每次呼叫 <see cref="EtlFileReader.ProcessFile"/> 開始讀取事件之前呼叫一次：
-    /// 重置插件內部狀態，並訂閱 <paramref name="reader"/> 上要用到的事件。
-    /// 此時 ProcessTrace 尚未執行，<see cref="EtlReadResult"/> 內尚無任何資料，因此不在此傳入。
-    /// </summary>
     void Attach(EtlFileReader reader);
-
-    /// <summary>
-    /// ProcessTrace 成功讀完整份 ETL 之後呼叫一次：收尾尚未結束的區間，並將彙總結果寫回 <paramref name="result"/>。
-    /// 若 ProcessFile() 過程中拋出例外，本方法不會被呼叫。
-    /// </summary>
     void Complete(EtlReadResult result);
-
-    /// <summary>
-    /// 不論 ProcessFile() 成功或失敗，都會在結束前呼叫一次：取消訂閱 <paramref name="reader"/> 上的事件，
-    /// 避免下一次 ProcessFile() 重複訂閱、或在例外情況下洩漏事件處理器。
-    /// </summary>
     void Detach(EtlFileReader reader);
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 IPendingResult&lt;T&gt;:呼叫 <see cref="ProcessDataSourceExtensions.UseProcesses"/>、
-/// <see cref="ServiceDataSourceExtensions.UseServices"/> 等 Use 開頭方法時立即取得這個代理物件,但要等
-/// <see cref="EtlFileReader.ProcessFile"/> 執行完成後,<see cref="Result"/> 才會有值;
-/// 在那之前存取會拋出例外,呼叫順序需為 UseXxx() → ProcessFile() → pending.Result。
-/// </summary>
 public interface IPendingResult<out T>
 {
-    /// <summary>解析完成後的資料來源。尚未呼叫 <see cref="EtlFileReader.ProcessFile"/> 前存取會拋出 <see cref="InvalidOperationException"/>。</summary>
     T Result { get; }
 }
 
-/// <summary>對應 TraceProcessor 的 IProcessDataSource,由 <see cref="ProcessDataSourceExtensions.UseProcesses"/> 提供。</summary>
 public interface IProcessDataSource
 {
-    /// <summary>追蹤期間觀察到的所有程序(依 ProcessStart 事件出現順序排列)。</summary>
     IReadOnlyList<ProcessRecord> Processes { get; }
 }
 
-/// <summary>對應 TraceProcessor 的 IServiceDataSource,由 <see cref="ServiceDataSourceExtensions.UseServices"/> 提供。</summary>
 public interface IServiceDataSource
 {
-    /// <summary>依 ServiceName 彙總的服務清單,含各次啟停/狀態變化與目前所在的 ProcessId。</summary>
     IReadOnlyList<ServiceRecord> Services { get; }
 }
 
-/// <summary>對應 TraceProcessor 的 IEnergyEstimationDataSource,由 <see cref="EnergyDataSourceExtensions.UseEnergyEstimationData"/> 提供。</summary>
+public interface IThreadDataSource
+{
+    IReadOnlyList<ThreadRecord> Threads { get; }
+}
+
 public interface IEnergyEstimationDataSource
 {
-    /// <summary>Energy Estimation Engine(E3)回報的每一次估算週期紀錄(依原始事件出現順序排列)。</summary>
     IReadOnlyList<EnergyEstimationInterval> Intervals { get; }
 }
 
-/// <summary>對應 TraceProcessor 的 IEnergyMeterDataSource,由 <see cref="EnergyMeterDataSourceExtensions.UseEnergyMeterData"/> 提供。</summary>
 public interface IEnergyMeterDataSource
 {
-    /// <summary>硬體 Energy Meter Interface(EMI)各計量通道(rail)的耗能區間(依原始讀數出現順序排列)。</summary>
     IReadOnlyList<EnergyMeasurementInterval> Intervals { get; }
 }
 
-/// <summary>對應 TraceProcessor 的 IInterruptHandlingDataSource,由 <see cref="InterruptHandlingDataSourceExtensions.UseInterruptHandlingData"/> 提供。</summary>
 public interface IInterruptHandlingDataSource
 {
-    /// <summary>ISR(Interrupt Service Routine)執行區間(依原始事件出現順序排列)。</summary>
     IReadOnlyList<InterruptServiceRoutineInterval> InterruptServiceRoutines { get; }
-
-    /// <summary>DPC(Deferred Procedure Call)執行區間(依原始事件出現順序排列)。</summary>
     IReadOnlyList<DeferredProcedureCallInterval> DeferredProcedureCalls { get; }
 }
 
-/// <summary>對應 TraceProcessor 的 IMemoryUtilizationDataSource,由 <see cref="MemoryUtilizationDataSourceExtensions.UseMemoryUtilizationData"/> 提供。</summary>
 public interface IMemoryUtilizationDataSource
 {
-    /// <summary>系統記憶體用量快照(依原始事件出現順序排列)。</summary>
     IReadOnlyList<MemoryUtilizationEventInfo> Snapshots { get; }
 }
 
-/// <summary>
-/// 內建的即時關聯分析插件：在 ProcessFile() 執行過程中訂閱 ProcessStart/ThreadStart/ImageLoad/ThreadCSwitch/
-/// PerfInfoProfile/PerfInfoDPC/PerfInfoISR 等事件，即時建立 CPU 使用彙總、Profile/DPC/Interrupt 熱點等物件圖，
-/// 執行完成後寫入 <see cref="EtlReadResult.Analysis"/>。程序/服務清單改由獨立的
-/// <see cref="ProcessDataSourceExtensions.UseProcesses"/>、<see cref="ServiceDataSourceExtensions.UseServices"/> 提供,不再經由本插件與
-/// <see cref="EtlReadResult"/> 傳遞。
-/// 概念上對應 TraceProcessor 的 trace.Process() + IPendingResult&lt;T&gt;.Result。
-/// 透過 <see cref="EtlAnalysisPluginExtensions.UseBuiltInAnalysis"/> 掛上本插件才會執行這些額外運算，
-/// 單純轉存 SQLite 等情境可略過，避免不必要的記憶體配置與 CPU 成本。
-/// </summary>
 public sealed class EtlAnalysisPlugin : IEtlReaderPlugin
 {
     private readonly Dictionary<uint, ProcessRecord> _activeProcessesByPid = [];
@@ -127,7 +80,9 @@ public sealed class EtlAnalysisPlugin : IEtlReaderPlugin
         _unmatchedCpuIntervalCount = 0;
 
         reader.ProcessStart += EngineOnProcessStart;
+        reader.ProcessDCStart += EngineOnProcessStart;
         reader.ProcessStop += EngineOnProcessStop;
+        reader.ProcessDCStop += EngineOnProcessStop;
         reader.ProcessTerminate += EngineOnProcessTerminate;
         reader.ThreadStart += EngineOnThreadStart;
         reader.ThreadDCStart += EngineOnThreadStart;
@@ -147,7 +102,9 @@ public sealed class EtlAnalysisPlugin : IEtlReaderPlugin
     public void Detach(EtlFileReader reader)
     {
         reader.ProcessStart -= EngineOnProcessStart;
+        reader.ProcessDCStart -= EngineOnProcessStart;
         reader.ProcessStop -= EngineOnProcessStop;
+        reader.ProcessDCStop -= EngineOnProcessStop;
         reader.ProcessTerminate -= EngineOnProcessTerminate;
         reader.ThreadStart -= EngineOnThreadStart;
         reader.ThreadDCStart -= EngineOnThreadStart;
@@ -173,7 +130,6 @@ public sealed class EtlAnalysisPlugin : IEtlReaderPlugin
     {
         if (_activeProcessesByPid.TryGetValue(info.ProcessId, out ProcessRecord? existing) && existing.EndTime is null)
         {
-            // 尚未觀察到對應的 Stop/Terminate 事件就又出現同一個 PID 的 Start，屬防禦性收尾(理論上不應發生，可能為 PID 重用)。
             existing.EndTime = info.TimeStamp;
         }
 
@@ -193,10 +149,6 @@ public sealed class EtlAnalysisPlugin : IEtlReaderPlugin
 
     private void EngineOnProcessTerminate(in ProcessTerminateInfo info) => CloseProcess(info.ProcessId, info.TimeStamp);
 
-    /// <summary>
-    /// 程序結束時，強制收尾所有仍歸屬於它、但還沒收到 CSwitch(Old)/ThreadStop 的執行緒 CPU 區間，
-    /// 避免程序生命週期最後一段的 CPU 使用時間遺漏(對應 SQLiteExport.WriteIncompleteThreadLifetimes 的概念)。
-    /// </summary>
     private void CloseProcess(uint processId, DateTime endTime)
     {
         _activeProcessesByPid.TryGetValue(processId, out ProcessRecord? record);
@@ -263,10 +215,6 @@ public sealed class EtlAnalysisPlugin : IEtlReaderPlugin
         {
             owner.Modules.Add(module);
         }
-
-        // 核心模式模組(驅動程式)或載入當下尚未觀察到對應 ProcessStart 時，仍會加入上方的
-        // _allModulesLoadOrder，供 DPC/ISR 位址反解(ResolveKernelModule)使用；不再另行發布至已移除的
-        // EtlReadResult.KernelModules。
     }
 
     private void EngineOnImageUnload(in ImageLoadEventInfo info)
@@ -461,10 +409,6 @@ public sealed class EtlAnalysisPlugin : IEtlReaderPlugin
         return false;
     }
 
-    /// <summary>
-    /// 追蹤結束時，強制收尾所有仍在執行中、尚未配對到 CSwitch(Old)的執行緒區間，
-    /// 以及仍未收到 Stop/Terminate 事件的程序，避免遺漏追蹤末段的資料(對應 TraceProcessor 對整個追蹤範圍的收尾語意)。
-    /// </summary>
     private void FinalizeOpenIntervals(EtlReadResult result)
     {
         DateTime cutoff = result.TraceEndTime ?? DateTime.UtcNow;
@@ -543,6 +487,23 @@ public static class EtlAnalysisPluginExtensions
     }
 }
 
+/// <summary>
+/// 對應 TraceProcessor 的 trace.UseProcesses():由 <see cref="ProcessDataSourceExtensions.UseProcesses"/> 建立,
+/// 訂閱 ProcessStart/ProcessDCStart/ProcessStop/ProcessDCStop 依 ProcessId 建立/收尾 <see cref="ProcessRecord"/>,
+/// 並另外自行訂閱 ImageLoad/ImageDCStart/ImageUnload 以記錄各程序載入的模組清單。
+///
+/// 兩項已實測驗證、修正自舊版的設計(比照 <see cref="ThreadDataSourceCollector"/> 已修正過的相同問題)：
+/// 1. StartTime 僅在觀察到真正的 Start(而非 DCStart/rundown)時才設值，DCStart 觀察到的既存程序維持 null——
+///    比對同一份 ETL 下 TraceProcessor 的 IProcess.CreateTime 也是如此。舊版 StartTime 為 non-nullable
+///    DateTime、且未區分 DCStart，一律填入觀察到的時間戳記，與 TraceProcessor 不符，已修正為 nullable
+///    並依 Start/DCStart 分開處理(邏輯同 <see cref="ThreadDataSourceCollector.AddThread"/>)。
+/// 2. ProcessDCStop(opcode 4)是追蹤「結束」當下的 rundown，語意為「這個程序在結束時仍存活」，並非終止事件——
+///    概念上與 ProcessDCStart 對稱(只是發生在尾端而非開頭)。舊版把它與 ProcessStop 混用、並在 Complete()
+///    另外對所有仍存活的程序強制補上 EndTime=追蹤結束時間，導致幾乎所有追蹤結束時仍存活的
+///    程序，EndTime 有無值都與 TraceProcessor 的 IProcess.ExitTime(仍存活時為 null)不符。已修正為独立的
+///    <see cref="OnProcessDCStop"/>：只有在該 ProcessId 先前從未被觀察到時才補登記一筆(StartTime 維持
+///    null，比照 DCStart)，否則不做任何事；Complete() 也移除了強制補值的邏輯。
+/// </summary>
 internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDataSource, IPendingResult<IProcessDataSource>
 {
     private readonly Dictionary<uint, ProcessRecord> _activeProcessesByPid = [];
@@ -563,7 +524,9 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
         _completed = false;
 
         reader.ProcessStart += OnProcessStart;
+        reader.ProcessDCStart += OnProcessDCStart;
         reader.ProcessStop += OnProcessStop;
+        reader.ProcessDCStop += OnProcessDCStop;
         reader.ProcessTerminate += OnProcessTerminate;
         reader.ImageLoad += OnImageLoad;
         reader.ImageDCStart += OnImageLoad;
@@ -573,7 +536,9 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
     public void Detach(EtlFileReader reader)
     {
         reader.ProcessStart -= OnProcessStart;
+        reader.ProcessDCStart -= OnProcessDCStart;
         reader.ProcessStop -= OnProcessStop;
+        reader.ProcessDCStop -= OnProcessDCStop;
         reader.ProcessTerminate -= OnProcessTerminate;
         reader.ImageLoad -= OnImageLoad;
         reader.ImageDCStart -= OnImageLoad;
@@ -582,28 +547,34 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
 
     public void Complete(EtlReadResult result)
     {
-        DateTime cutoff = result.TraceEndTime ?? DateTime.UtcNow;
-        foreach (ProcessRecord process in _activeProcessesByPid.Values)
-        {
-            process.EndTime ??= cutoff;
-        }
-
+        // 刻意不強制收尾 EndTime(見類別文件註解第 2 點)，追蹤結束時仍存活的程序維持 EndTime=null，
+        // 比對 TraceProcessor 的 IProcess.ExitTime 對仍存活程序也是 null 的作法。
         _completed = true;
     }
 
-    private void OnProcessStart(in ProcessInfo info)
+    private void OnProcessStart(in ProcessInfo info) => AddProcess(in info, info.TimeStamp);
+
+    private void OnProcessDCStart(in ProcessInfo info) => AddProcess(in info, startTime: null);
+
+    private void AddProcess(in ProcessInfo info, DateTime? startTime)
     {
-        if (_activeProcessesByPid.TryGetValue(info.ProcessId, out ProcessRecord? existing) && existing.EndTime is null)
+        if (_activeProcessesByPid.ContainsKey(info.ProcessId))
         {
-            // 尚未觀察到對應的 Stop/Terminate 事件就又出現同一個 PID 的 Start，屬防禦性收尾(理論上不應發生，可能為 PID 重用)。
-            existing.EndTime = info.TimeStamp;
+            // 同一個「尚未觀察到 Stop/DCStop」的 PID 又收到一次 Start/DCStart。
+            // 真正的 PID 重用一定會先看到 Stop/Terminate/DCStop(見 CloseProcess/OnProcessDCStop，關閉時會把該 PID 移出
+            // _activeProcessesByPid)，因此能走到這裡代表並非重用，而是 Kernel Process Provider
+            // 剛啟用、Rundown 掃描與同一行程的「即時 Start」兩者競速下對同一個仍存活的行程回報了兩次
+            // (實測：短時間擷取時偶發一個 PID 產生 2 筆 ProcessStart)。TraceProcessor 對這種情況仍視為同一個
+            // IProcess，故比照其行為忽略這筆重複事件、保留第一筆(較早、通常也更準確)記錄，
+            // 避免產生 TraceProcessor 沒有的多餘 ProcessRecord。
+            return;
         }
 
         var record = new ProcessRecord
         {
             ProcessId = info.ProcessId,
             ParentProcessId = info.ParentId,
-            StartTime = info.TimeStamp,
+            StartTime = startTime,
             ImageFileName = info.ImageFileName,
             CommandLine = info.CommandLine,
         };
@@ -615,6 +586,20 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
     private void OnProcessStop(in ProcessInfo info) => CloseProcess(info.ProcessId, info.TimeStamp);
 
     private void OnProcessTerminate(in ProcessTerminateInfo info) => CloseProcess(info.ProcessId, info.TimeStamp);
+
+    /// <summary>
+    /// ProcessDCStop(DCEnd)代表追蹤結束時的 rundown，語意是「此程序結束當下仍存活」，並非終止事件，
+    /// 因此絕不可比照 <see cref="OnProcessStop"/> 設定 EndTime(已實測驗證，詳見類別文件註解第 2 點)。
+    /// 只有在這個 ProcessId 先前從未被 Start/DCStart 觀察到時才補登記一筆(比照 DCStart，StartTime 維持 null)，
+    /// 涵蓋 Start/DCStart 事件遺失、但 DCStop 仍收到的邊角情況；已追蹤到的程序則不做任何事。
+    /// </summary>
+    private void OnProcessDCStop(in ProcessInfo info)
+    {
+        if (!_activeProcessesByPid.ContainsKey(info.ProcessId))
+        {
+            AddProcess(in info, startTime: null);
+        }
+    }
 
     private void CloseProcess(uint processId, DateTime endTime)
     {
@@ -731,7 +716,7 @@ internal sealed class ServiceDataSourceCollector : IEtlReaderPlugin, IServiceDat
         var startType = (ServiceStartType)info.StartType;
 
         record.ImageFileName = info.ImageName;
-        record.ProcessId = info.ProcessId == 0 ? null : info.ProcessId;
+        record.ProcessId = info.ProcessId;
         record.CurrentState = state;
         record.StartType = startType;
         record.StateChanges.Add(new ServiceStateChangeRecord(info.Timestamp, info.ProcessId, state, startType, info.ExecutionPhase));
@@ -749,11 +734,250 @@ public static class ServiceDataSourceExtensions
 }
 
 /// <summary>
-/// 對應 TraceProcessor 的 trace.UseEnergyEstimationData():由 <see cref="EnergyDataSourceExtensions.UseEnergyEstimationData"/> 建立,
-/// 訂閱 EnergyEstimationEngine_37(EnergyEstimate)事件,將每筆估算週期快照直接轉為 <see cref="EnergyEstimationInterval"/>,
-/// 可單獨掛載使用。每筆 Event 37 本身就是一段已結束的估算週期(StartTime/StopTime 皆可由該筆事件自行推算),
-/// 不像程序/服務需要等待配對的結束事件,因此收到即可直接轉換、加入清單，無需額外收尾。
+/// 對應 TraceProcessor 的 trace.UseThreads():由 <see cref="ThreadDataSourceExtensions.UseThreads"/> 建立,
+/// 訂閱 ThreadStart/ThreadDCStart/ThreadStop/ThreadDCStop 依 ThreadId 建立/收尾 <see cref="ThreadRecord"/>,
+/// 並另外自行訂閱 ImageLoad/ImageDCStart/ImageUnload(與其他插件各自獨立追蹤,不共用狀態,維持插件彼此獨立的慣例)
+/// 以便在 Complete() 時將 Win32StartAddr 反查成所屬模組(對應 TraceProcessor 的 IThread.StartFrame，
+/// 但因本專案未做 PDB 符號解析，只能提供模組層級的「陽春版」StartFrame，取不到函式層級的 Symbol)。
+///
+/// 三項已實測驗證、刻意不同於既有 Process/Service 慣例的設計：
+/// 1. CreateTime 僅在觀察到真正的 Start(而非 DCStart/rundown)時才設值，DCStart 觀察到的既存執行緒維持 null——
+///    比對同一份 ETL 下 TraceProcessor 的 IThread.CreateTime 也是如此。
+/// 2. Complete() 不會像 <see cref="ProcessDataSourceCollector"/> 那樣把追蹤結束時仍存活的執行緒強制補上
+///    ExitTime=追蹤結束時間；比對 TraceProcessor 的 IThread.ExitTime，對於仍存活的執行緒就是 null，並不會補值。
+/// 3. ThreadDCStop(opcode 4/DCEnd)是追蹤「結束」當下的 rundown，語意為「這個執行緒在結束時仍存活」，
+///    並非「已終止」──概念上與 ThreadDCStart 對稱(只是發生在尾端而非開頭)。第一版實作誤將它比照
+///    ThreadStop 處理、強制設定 ExitTime，實測後發現造成六千餘筆執行緒(幾乎全部仍存活的執行緒)
+///    ExitTime 有無值與 TraceProcessor 不符，才改為<see cref="OnThreadDCStop"/>：只有在該 ThreadId
+///    先前從未被觀察到時才補登記一筆(CreateTime/ExitTime 皆為 null，比照 DCStart)，否則不做任何事。
+/// 4. StartAddress 反查模組名稱需要兩層查詢(<see cref="TryResolveModule"/>)並以 <see cref="Path.GetFileName"/>
+///    去路徑：實測發現只查執行緒自己所屬 Process 的模組清單，約 7% 執行緒(多為系統/核心模式執行緒，
+///    Win32StartAddr 落在 ntoskrnl.exe 或驅動程式內)會查無模組，即使 TraceProcessor 那端能正確解析、
+///    雙方 StartAddress 完全相同也一樣；且原始 ImageLoad 事件的 FileName 是完整裝置路徑
+///    (例如 "\Device\HarddiskVolume3\Windows\System32\ntoskrnl.exe")，與 TraceProcessor
+///    IThread.StartFrame.Image.FileName 的純檔名(例如 "ntoskrnl.exe")格式不同，兩項合計曾造成
+///    近 100% 執行緒的 StartAddressModuleName 被誤判為不同，修正後才能逐字串正確比對。
 /// </summary>
+internal sealed class ThreadDataSourceCollector : IEtlReaderPlugin, IThreadDataSource, IPendingResult<IThreadDataSource>
+{
+    private readonly Dictionary<uint, ThreadRecord> _activeThreadsByTid = [];
+    private readonly Dictionary<uint, List<ModuleInfo>> _modulesByProcessId = [];
+    private readonly List<ModuleInfo> _allModulesLoadOrder = [];
+    private readonly List<ThreadRecord> _threads = [];
+    private bool _completed;
+
+    public IReadOnlyList<ThreadRecord> Threads => _threads;
+
+    public IThreadDataSource Result =>
+        _completed ? this : throw new InvalidOperationException("尚未呼叫 ProcessFile()，無法取得 UseThreads() 的解析結果。");
+
+    public void Attach(EtlFileReader reader)
+    {
+        _activeThreadsByTid.Clear();
+        _modulesByProcessId.Clear();
+        _allModulesLoadOrder.Clear();
+        _threads.Clear();
+        _completed = false;
+
+        reader.ThreadStart += OnThreadStart;
+        reader.ThreadDCStart += OnThreadDCStart;
+        reader.ThreadStop += OnThreadStop;
+        reader.ThreadDCStop += OnThreadDCStop;
+        reader.ThreadSetName += OnThreadSetName;
+        reader.ImageLoad += OnImageLoad;
+        reader.ImageDCStart += OnImageLoad;
+        reader.ImageUnload += OnImageUnload;
+    }
+
+    public void Detach(EtlFileReader reader)
+    {
+        reader.ThreadStart -= OnThreadStart;
+        reader.ThreadDCStart -= OnThreadDCStart;
+        reader.ThreadStop -= OnThreadStop;
+        reader.ThreadDCStop -= OnThreadDCStop;
+        reader.ThreadSetName -= OnThreadSetName;
+        reader.ImageLoad -= OnImageLoad;
+        reader.ImageDCStart -= OnImageLoad;
+        reader.ImageUnload -= OnImageUnload;
+    }
+
+    public void Complete(EtlReadResult result)
+    {
+        // 刻意不強制收尾 ExitTime(見類別文件註解)，只需在此把 StartAddress 反查成模組即可。
+        foreach (ThreadRecord thread in _threads)
+        {
+            if (thread.StartAddress is ulong startAddress &&
+                TryResolveModule(thread.ProcessId, startAddress, thread.CreateTime, out ModuleInfo? found))
+            {
+                // 對應 TraceProcessor IThread.StartFrame.Image.FileName 一律是「不含路徑的檔名」
+                // (例如 "ntoskrnl.exe")，但 ImageLoad 事件的原始 FileName 是完整裝置路徑
+                // (例如 "\Device\HarddiskVolume3\Windows\System32\ntoskrnl.exe")，經實測比對兩者
+                // 語意相同、僅格式不同，故在此以 Path.GetFileName 去除路徑，兩邊才能逐字串相等比對。
+                thread.StartAddressModuleName = Path.GetFileName(found.FileName);
+                thread.StartAddressModuleOffset = startAddress - found.ImageBase;
+            }
+        }
+
+        _completed = true;
+    }
+
+    /// <summary>
+    /// 先查執行緒所屬 Process 自己載入的模組(一般使用者模式 DLL)；查無結果時退而查詢全系統模組清單
+    /// (含核心模式的 ntoskrnl.exe/驅動程式——這類模組只在載入當下的那個 ProcessId 下登記一筆，
+    /// 但系統執行緒的 Win32StartAddr 可能指向任何 Process 底下都會執行到的核心模式函式，
+    /// 因此需要跨行程查詢)。實測驗證前，僅查前者會導致約 7% 執行緒的 StartAddressModuleName
+    /// 誤判為查無模組，即使 TraceProcessor 那端能正確解析、雙方 StartAddress 完全相同也一樣。
+    /// 邏輯對應 EtlAnalysisPlugin.ResolveModule/ResolveKernelModule 的兩層查詢方式。
+    /// </summary>
+    private bool TryResolveModule(uint processId, ulong address, DateTime? at, [NotNullWhen(true)] out ModuleInfo? found)
+    {
+        if (_modulesByProcessId.TryGetValue(processId, out List<ModuleInfo>? modules) &&
+            TryFindModule(modules, address, at, out found))
+        {
+            return true;
+        }
+
+        return TryFindModule(_allModulesLoadOrder, address, at: null, out found);
+    }
+
+    private void OnThreadStart(in ThreadStartStopEventInfo info) => AddThread(in info, info.Timestamp);
+
+    private void OnThreadDCStart(in ThreadStartStopEventInfo info) => AddThread(in info, createTime: null);
+
+    private void OnThreadSetName(in ThreadSetNameEventInfo info)
+    {
+        if (_activeThreadsByTid.TryGetValue(info.ThreadId, out ThreadRecord? record) && !string.IsNullOrEmpty(info.Name))
+        {
+            record.Name = info.Name;
+        }
+    }
+
+    private void AddThread(in ThreadStartStopEventInfo info, DateTime? createTime)
+    {
+        if (_activeThreadsByTid.ContainsKey(info.ThreadId))
+        {
+            return;
+        }
+
+        var record = new ThreadRecord
+        {
+            ThreadId = info.ThreadId,
+            ProcessId = info.ProcessId,
+            CreateTime = createTime,
+            StackBase = info.StackBase,
+            StackLimit = info.StackLimit,
+            UserStackBase = info.UserStackBase is > 0 ? info.UserStackBase : null,
+            UserStackLimit = info.UserStackLimit is > 0 ? info.UserStackLimit : null,
+            ProcessorAffinity = info.Affinity,
+            StartAddress = info.Win32StartAddr,
+            TebBase = info.TebBase,
+            ServiceId = info.SubProcessTag is > 0 ? info.SubProcessTag : null,
+            BasePriority = info.BasePriority,
+            PagePriority = info.PagePriority is int rawPagePriority ? (ThreadMemoryPriority)rawPagePriority : null,
+            IoPriority = info.IoPriority is >= 0 and <= 4 ? (ThreadIoPriority)info.IoPriority.Value : null,
+            Name = string.IsNullOrEmpty(info.Name) ? null : info.Name,
+        };
+
+        _activeThreadsByTid[info.ThreadId] = record;
+        _threads.Add(record);
+    }
+
+    private void OnThreadStop(in ThreadStartStopEventInfo info)
+    {
+        if (_activeThreadsByTid.TryGetValue(info.ThreadId, out ThreadRecord? record))
+        {
+            record.ExitTime = info.Timestamp;
+            _activeThreadsByTid.Remove(info.ThreadId);
+        }
+    }
+
+    private void OnThreadDCStop(in ThreadStartStopEventInfo info)
+    {
+        if (!_activeThreadsByTid.ContainsKey(info.ThreadId))
+        {
+            AddThread(in info, createTime: null);
+        }
+    }
+
+    private void OnImageLoad(in ImageLoadEventInfo info)
+    {
+        if (info.ImageBase is not ulong imageBase || info.ImageSize is not ulong imageSize || imageSize == 0)
+        {
+            return;
+        }
+
+        var module = new ModuleInfo
+        {
+            ProcessId = info.ProcessId,
+            ImageBase = imageBase,
+            ImageSize = imageSize,
+            LoadTime = info.Timestamp,
+            FileName = info.FileName,
+        };
+
+        if (!_modulesByProcessId.TryGetValue(info.ProcessId, out List<ModuleInfo>? modules))
+        {
+            modules = [];
+            _modulesByProcessId[info.ProcessId] = modules;
+        }
+
+        modules.Add(module);
+        _allModulesLoadOrder.Add(module);
+    }
+
+    private void OnImageUnload(in ImageLoadEventInfo info)
+    {
+        if (info.ImageBase is not ulong imageBase)
+        {
+            return;
+        }
+
+        if (_modulesByProcessId.TryGetValue(info.ProcessId, out List<ModuleInfo>? modules))
+        {
+            for (int i = modules.Count - 1; i >= 0; i--)
+            {
+                if (modules[i].ImageBase == imageBase && modules[i].UnloadTime is null)
+                {
+                    modules[i].UnloadTime = info.Timestamp;
+                    break;
+                }
+            }
+        }
+    }
+
+    private static bool TryFindModule(List<ModuleInfo> modules, ulong address, DateTime? at, [NotNullWhen(true)] out ModuleInfo? found)
+    {
+        foreach (ModuleInfo module in modules)
+        {
+            if (address < module.ImageBase || address >= module.ImageBase + module.ImageSize)
+            {
+                continue;
+            }
+
+            if (at is DateTime timestamp && (timestamp < module.LoadTime || (module.UnloadTime is DateTime unloadTime && timestamp > unloadTime)))
+            {
+                continue;
+            }
+
+            found = module;
+            return true;
+        }
+
+        found = null;
+        return false;
+    }
+}
+
+public static class ThreadDataSourceExtensions
+{
+    public static IPendingResult<IThreadDataSource> UseThreads(this EtlFileReader reader)
+    {
+        var collector = new ThreadDataSourceCollector();
+        reader.Plugins.Add(collector);
+        return collector;
+    }
+}
+
 internal sealed class EnergyDataSourceCollector : IEtlReaderPlugin, IEnergyEstimationDataSource, IPendingResult<IEnergyEstimationDataSource>
 {
     private readonly List<EnergyEstimationInterval> _intervals = [];
@@ -775,19 +999,16 @@ internal sealed class EnergyDataSourceCollector : IEtlReaderPlugin, IEnergyEstim
 
     public void Complete(EtlReadResult result) => _completed = true;
 
-    /// <summary>
-    /// StopTime 直接取自事件本身的 Timestamp;StartTime 則以 TimeInMSec(本次估算週期時長,毫秒)往前推算。
-    /// TotalEnergy 為本專案自行加總各分項能耗(CPU/Display/Disk/Network/Mbb/Loss/Other/SoC)的近似值，
-    /// TotalPowerMilliwatts 則是 TotalEnergy 除以週期時長(mJ/s = mW)。RecordFlags 的位元定義見
-    /// <see cref="EnergyEstimationEngineEventInfo_37.RecordFlags"/> 上的註解(0x2=MonitorOn、0x4=EnergySaver、0x10=Foreground)。
-    /// </summary>
     private void OnEnergyEstimate(in EnergyEstimationEngineEventInfo_37 info)
     {
         DateTime stopTime = info.Timestamp;
         DateTime startTime = info.TimeInMSec > 0 ? stopTime - TimeSpan.FromMilliseconds(info.TimeInMSec) : stopTime;
 
+        // 原始 LossEnergy 欄位單位為 μJ(其餘分項皆為 mJ),需先除以 1000 才能與其餘分項相加、比較。
+        ulong lossEnergyMilliJoules = info.LossEnergy / 1000;
+
         ulong totalEnergy = info.CpuEnergy + info.DisplayEnergy + info.DiskEnergy + info.NetworkEnergy
-            + info.MbbEnergy + info.LossEnergy + info.OtherEnergy + info.GpuEnergy;
+            + info.MbbEnergy + lossEnergyMilliJoules + info.OtherEnergy + info.GpuEnergy;
 
         double durationSeconds = (stopTime - startTime).TotalSeconds;
         double totalPowerMilliwatts = durationSeconds > 0 ? totalEnergy / durationSeconds : 0;
@@ -803,7 +1024,7 @@ internal sealed class EnergyDataSourceCollector : IEtlReaderPlugin, IEnergyEstim
             DiskEnergy = info.DiskEnergy,
             NetworkEnergy = info.NetworkEnergy,
             MobileBroadbandEnergy = info.MbbEnergy,
-            LossEnergy = info.LossEnergy,
+            LossEnergy = lossEnergyMilliJoules,
             OtherEnergy = info.OtherEnergy,
             SystemOnChipEnergy = info.GpuEnergy,
             TotalEnergy = totalEnergy,
@@ -811,15 +1032,12 @@ internal sealed class EnergyDataSourceCollector : IEtlReaderPlugin, IEnergyEstim
             IsScreenOn = (info.RecordFlags & 0x2) != 0,
             IsBatterySaverActive = (info.RecordFlags & 0x4) != 0,
             IsApplicationInForeground = (info.RecordFlags & 0x10) != 0,
+            SourceType = (info.RecordFlags & 0x1) != 0 ? PowerSourceType.DC : PowerSourceType.AC,
             UserId = info.UserId,
         });
     }
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 trace.UseEnergyEstimationData():宣告要在接下來的 <see cref="EtlFileReader.ProcessFile"/> 過程中收集
-/// Energy Estimation Engine(E3)的估算週期紀錄,用法與呼叫順序同 <see cref="ProcessDataSourceExtensions.UseProcesses"/>。
-/// </summary>
 public static class EnergyDataSourceExtensions
 {
     public static IPendingResult<IEnergyEstimationDataSource> UseEnergyEstimationData(this EtlFileReader reader)
@@ -830,14 +1048,6 @@ public static class EnergyDataSourceExtensions
     }
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 trace.UseEnergyMeterData():由 <see cref="EnergyMeterDataSourceExtensions.UseEnergyMeterData"/> 建立,
-/// 訂閱 Power Meter Polling 提供者的 Event ID 2(<see cref="PowerMeterPollingEventInfo_2"/>,EnergyMeterRundown,
-/// 通道名稱中繼)與 Event ID 4(<see cref="PowerMeterPollingEventInfo_4"/>,EMI 讀數),將同一 MeterId 前後兩筆讀數
-/// 相減轉為 <see cref="EnergyMeasurementInterval"/>。與 E3 的 Event 37 不同,EMI 讀數本身只是單一時間點的累計快照,
-/// 天生不是一段區間,因此必須依 MeterId 保留「上一筆讀數」狀態,等下一筆讀數到達才能收尾出一個區間
-/// (概念上類似程序/服務需要等待配對的結束事件,而非像 Event 37 那樣收到即可直接轉換)。
-/// </summary>
 internal sealed class EnergyMeterDataSourceCollector : IEtlReaderPlugin, IEnergyMeterDataSource, IPendingResult<IEnergyMeterDataSource>
 {
     /// <summary>1 picowatt-hour 換算成毫焦耳(mJ)的係數:1 pWh = 3600 pJ = 3600×10⁻¹² J = 3.6×10⁻⁹ J = 3.6×10⁻⁶ mJ。</summary>
@@ -914,18 +1124,6 @@ public static class EnergyMeterDataSourceExtensions
     }
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 trace.UseInterruptHandlingData():由
-/// <see cref="InterruptHandlingDataSourceExtensions.UseInterruptHandlingData"/> 建立,訂閱
-/// <see cref="EtlFileReader.PerfInfoISR"/>/<see cref="EtlFileReader.PerfInfoDPC"/>/
-/// <see cref="EtlFileReader.PerfInfoThreadedDPC"/>/<see cref="EtlFileReader.PerfInfoTimerDPC"/>,
-/// 將每筆事件直接轉為一段已結束的執行區間(StartTime~StopTime 皆可由事件本身推算,ISR/DPC 於執行完成當下
-/// 才會記錄,不像程序/服務需要等待配對的結束事件)。
-///
-/// 為了不與 <see cref="EtlAnalysisPlugin"/> 耦合(該插件的模組清單是私有欄位),本收集器自行訂閱
-/// ImageLoad/ImageDCStart 維護一份獨立的模組清單,用於將 Routine 位址反查為驅動程式檔名;
-/// 這與 EtlAnalysisPlugin.ResolveKernelModule 的邏輯相同,但兩者刻意保持獨立、互不相依。
-/// </summary>
 internal sealed class InterruptHandlingDataSourceCollector : IEtlReaderPlugin, IInterruptHandlingDataSource, IPendingResult<IInterruptHandlingDataSource>
 {
     private readonly List<ModuleInfo> _modules = [];
@@ -1020,25 +1218,6 @@ internal sealed class InterruptHandlingDataSourceCollector : IEtlReaderPlugin, I
         });
     }
 
-    /// <summary>
-    /// 依 <see cref="InterruptEventInfo.ElapsedTimeMSec"/>/<see cref="DpcEventInfo.ElapsedTimeMSec"/> 換算 StartTime。
-    ///
-    /// 已知限制(實測比對 TraceProcessor 後記錄於此,供呼叫端評估是否可接受):EtlFileReader.ComputeElapsedTimeMSec()
-    /// 以線上最小平方回歸(OLS)還原 QPC→FILETIME 換算直線,但 ISR/DPC 的真實耗時恆為非負值(單邊誤差),OLS 卻假設
-    /// 殘差正負對稱、平均為 0——統計上必然導致殘差被回歸線硬性置中,約半數事件的 ElapsedTimeMSec 被估成負值
-    /// (下面直接視為 0,即耗時歸零),另一半則被低估掉約當整批樣本平均真實耗時的量,因此 ISR/DPC 的加總耗時是
-    /// 系統性低估,且各模組低估幅度不一致(平均耗時遠低於整批平均值的模組,如 storport.sys 的 ISR，幾乎全部樣本
-    /// 歸零，總耗時被低估最嚴重)。
-    ///
-    /// 我們曾嘗試「取全域最小殘差當偏移量、整批平移」的校正(等同於把回歸線下移到樣本雲下緣),但實測發現此法
-    /// 對單一離群樣本極度敏感——某次實測擷取中,回歸線受離群事件干擾而偏移,校正後耗時反而暴增為原本的
-    /// 100~200 倍(遠超過追蹤總時長，明顯不合理)，比不校正時更不可靠，因此刻意不做這項校正：寧可保守低估，
-    /// 也不冒著在特定系統負載下產出離譜過高數字的風險。
-    ///
-    /// 結論(已用兩次獨立擷取驗證):ISR/DPC 的「筆數」與「所屬模組」在 EtlFileReader 與 TraceProcessor 兩份
-    /// 實作中完全一致，可放心採信；但「加總耗時」EtlFileReader 端是系統性低估，需要精確耗時數據時請改採
-    /// TraceProcessor 的 IInterruptServiceRoutineInterval/IDeferredProcedureCallInterval。
-    /// </summary>
     private static (DateTime StartTime, DateTime StopTime) ComputeInterval(DateTime stopTime, double? elapsedMSec) =>
         elapsedMSec is double ms and >= 0 ? (stopTime - TimeSpan.FromMilliseconds(ms), stopTime) : (stopTime, stopTime);
 
@@ -1059,11 +1238,6 @@ internal sealed class InterruptHandlingDataSourceCollector : IEtlReaderPlugin, I
     }
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 trace.UseInterruptHandlingData():宣告要在接下來的 <see cref="EtlFileReader.ProcessFile"/>
-/// 過程中收集 ISR/DPC 執行區間,用法與呼叫順序同 <see cref="ProcessDataSourceExtensions.UseProcesses"/>。
-/// 需擷取時啟用 KernelTraceFlags.EVENT_TRACE_FLAG_INTERRUPT 與 EVENT_TRACE_FLAG_DPC 才會有資料來源。
-/// </summary>
 public static class InterruptHandlingDataSourceExtensions
 {
     public static IPendingResult<IInterruptHandlingDataSource> UseInterruptHandlingData(this EtlFileReader reader)
@@ -1074,12 +1248,6 @@ public static class InterruptHandlingDataSourceExtensions
     }
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 trace.UseMemoryUtilizationData():由
-/// <see cref="MemoryUtilizationDataSourceExtensions.UseMemoryUtilizationData"/> 建立,訂閱
-/// <see cref="EtlFileReader.MemoryUtilization"/>,將每筆系統記憶體用量快照直接加入清單。
-/// 每筆事件本身就是單一時間點的快照(非區間),因此收到即可直接轉換、加入清單,無需額外收尾。
-/// </summary>
 internal sealed class MemoryUtilizationDataSourceCollector : IEtlReaderPlugin, IMemoryUtilizationDataSource, IPendingResult<IMemoryUtilizationDataSource>
 {
     private readonly List<MemoryUtilizationEventInfo> _snapshots = [];
@@ -1104,12 +1272,6 @@ internal sealed class MemoryUtilizationDataSourceCollector : IEtlReaderPlugin, I
     private void OnMemoryUtilization(in MemoryUtilizationEventInfo data) => _snapshots.Add(data);
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 trace.UseMemoryUtilizationData():宣告要在接下來的 <see cref="EtlFileReader.ProcessFile"/>
-/// 過程中收集系統記憶體用量快照,用法與呼叫順序同 <see cref="ProcessDataSourceExtensions.UseProcesses"/>。
-/// 需擷取時啟用 <see cref="TraceSessionBuilder.KernelMemoryProviderGuid"/> 搭配
-/// <see cref="TraceSessionBuilder.KernelMemoryMemInfoKeyword"/> 才會有資料來源。
-/// </summary>
 public static class MemoryUtilizationDataSourceExtensions
 {
     public static IPendingResult<IMemoryUtilizationDataSource> UseMemoryUtilizationData(this EtlFileReader reader)
