@@ -16,10 +16,14 @@ namespace QSoft.ETW;
 internal static class EtwNativeConstants
 {
     internal const uint PROCESS_TRACE_MODE_EVENT_RECORD = 0x10000000u;
+    internal const uint PROCESS_TRACE_MODE_RAW_TIMESTAMP = 0x00001000u;
     internal const ulong InvalidProcessTraceHandle = ulong.MaxValue;
     internal const uint ERROR_SUCCESS = 0;
     internal const uint ERROR_INSUFFICIENT_BUFFER = 122;
     internal const ushort EVENT_HEADER_FLAG_32_BIT_HEADER = 0x0020;
+    internal const uint EVENT_TRACE_CLOCK_PERFCOUNTER = 1;
+    internal const uint EVENT_TRACE_CLOCK_SYSTEMTIME = 2;
+    internal const uint EVENT_TRACE_CLOCK_CPUCYCLE = 3;
 }
 
 [InlineArray(32)]
@@ -101,7 +105,7 @@ internal struct TRACE_LOGFILE_HEADER
     public uint MaximumFileSize;
     public uint LogFileMode;
     public uint BuffersWritten;
-    public Guid LogInstanceGuid;
+    public TRACE_LOGFILE_HEADER_UNION LogInstance;
     public nint LoggerName;
     public nint LogFileName;
     public TIME_ZONE_INFORMATION TimeZone;
@@ -110,6 +114,25 @@ internal struct TRACE_LOGFILE_HEADER
     public long StartTime;
     public uint ReservedFlags;
     public uint BuffersLost;
+}
+
+[StructLayout(LayoutKind.Explicit)]
+internal struct TRACE_LOGFILE_HEADER_UNION
+{
+    [FieldOffset(0)]
+    public Guid LogInstanceGuid;
+
+    [FieldOffset(0)]
+    public uint StartBuffers;
+
+    [FieldOffset(4)]
+    public uint PointerSize;
+
+    [FieldOffset(8)]
+    public uint EventsLost;
+
+    [FieldOffset(12)]
+    public uint CpuSpeedInMHz;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -782,8 +805,7 @@ public enum EtlDeferredProcedureCallType
 /// </summary>
 public sealed class InterruptServiceRoutineInterval
 {
-    /// <summary>ISR 開始執行時間;由 StopTime 往前推 <see cref="InterruptEventInfo.ElapsedTimeMSec"/> 推算,
-    /// 當 ETL 檔頭缺少 PerfFreq 資訊而無法換算耗時時,等於 <see cref="StopTime"/>(耗時視為 0)。</summary>
+    /// <summary>ISR 開始執行時間；由事件 payload 的 InitialTime 依 ETL clock type 直接換算。</summary>
     public required DateTime StartTime { get; init; }
 
     /// <summary>ISR 執行完成時間,即原始事件的 Timestamp(傳統 PerfInfo ISR 事件於執行完成當下才會記錄)。</summary>
@@ -795,15 +817,18 @@ public sealed class InterruptServiceRoutineInterval
     /// <summary>依 <see cref="HandlerRoutineAddress"/> 反查得到的模組(驅動程式)檔名;查無對應模組時為 "&lt;未映射&gt;"。</summary>
     public string HandlerModuleName { get; init; } = "<未映射>";
 
+    /// <summary>
+    /// 由 <see cref="HandlerRoutineAddress"/>、映像範圍與選用的 DbgHelp 符號解析結果合成的單一 frame。
+    /// 這不是完整 ISR 呼叫堆疊；Routine 不存在時為 null。
+    /// </summary>
+    public HandlerStackFrameInfo? HandlerStackFrame { get; init; }
+
     public byte? Vector { get; init; }
     public byte? ReturnValue { get; init; }
 
     /// <summary>
     /// 對應 TraceProcessor 以 StopTime-StartTime 換算的耗時(毫秒)。
-    /// 已知限制(實測比對 TraceProcessor 後發現):此值來自 ComputeElapsedTimeMSec() 的線上最小平方回歸估計,
-    /// 因 ISR 真實耗時恆為非負值而回歸法先天存在系統性低估,尤其執行極快的模組(如 storport.sys)可能被低估
-    /// 到接近 0。事件筆數與 HandlerModuleName 不受影響、可放心採信;需要精確耗時數據請改用 TraceProcessor 的
-    /// IInterruptServiceRoutineInterval。詳見 InterruptHandlingDataSourceCollector.ComputeInterval 的說明。
+    /// 由原始完成時間與 payload InitialTime 的差值直接換算，語意對應 TraceProcessor。
     /// </summary>
     public double DurationMSec => (StopTime - StartTime).TotalMilliseconds;
 }
@@ -816,7 +841,7 @@ public sealed class InterruptServiceRoutineInterval
 /// </summary>
 public sealed class DeferredProcedureCallInterval
 {
-    /// <summary>DPC 開始執行時間;推算方式同 <see cref="InterruptServiceRoutineInterval.StartTime"/>。</summary>
+    /// <summary>DPC 開始執行時間；由事件 payload 的 InitialTime 依 ETL clock type 直接換算。</summary>
     public required DateTime StartTime { get; init; }
 
     /// <summary>DPC 執行完成時間,即原始事件的 Timestamp。</summary>
@@ -825,13 +850,16 @@ public sealed class DeferredProcedureCallInterval
     public required byte Processor { get; init; }
     public ulong? HandlerRoutineAddress { get; init; }
     public string HandlerModuleName { get; init; } = "<未映射>";
+    /// <summary>
+    /// 由 <see cref="HandlerRoutineAddress"/>、映像範圍與選用的 DbgHelp 符號解析結果合成的單一 frame。
+    /// 這不是完整 DPC 呼叫堆疊；Routine 不存在時為 null。
+    /// </summary>
+    public HandlerStackFrameInfo? HandlerStackFrame { get; init; }
     public required EtlDeferredProcedureCallType CallType { get; init; }
 
     /// <summary>
     /// 對應 TraceProcessor 以 StopTime-StartTime 換算的耗時(毫秒)。
-    /// 已知限制與 <see cref="InterruptServiceRoutineInterval.DurationMSec"/> 相同:回歸法先天存在系統性低估,
-    /// 事件筆數與 HandlerModuleName 不受影響、可放心採信;需要精確耗時數據請改用 TraceProcessor 的
-    /// IDeferredProcedureCallInterval。
+    /// 由原始完成時間與 payload InitialTime 的差值直接換算，語意對應 TraceProcessor。
     /// </summary>
     public double DurationMSec => (StopTime - StartTime).TotalMilliseconds;
 }
@@ -970,6 +998,8 @@ public sealed class ModuleInfo
     public string FileName { get; init; } = string.Empty;
     public required ulong ImageBase { get; init; }
     public required ulong ImageSize { get; init; }
+    public uint? ImageCheckSum { get; init; }
+    public uint? TimeDateStamp { get; init; }
 }
 
 public sealed class DiskIoEventInfo
@@ -1456,14 +1486,15 @@ public sealed class InterruptEventInfo
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
     public ulong? InitialTime { get; init; }
+    /// <summary>由 <see cref="InitialTime"/> 依 ETL clock type 換算得到的 ISR 進入時間。</summary>
+    public DateTime? InitialTimestamp { get; init; }
     public ulong? Routine { get; init; }
     public byte? ReturnValue { get; init; }
     public byte? Vector { get; init; }
 
     /// <summary>
-    /// ISR 執行耗時(毫秒),由 <see cref="InitialTime"/>(原始 QPC ticks)換算為與 <see cref="Timestamp"/>
-    /// 相同的 FILETIME 時間軸後相減而得,語意對應 TraceEvent ISRTraceData 的 ElapsedTimeMSec 欄位。
-    /// 當 ETL 檔頭缺少 PerfFreq/BootTime 資訊時為 null。
+    /// ISR 執行耗時(毫秒),由事件完成時的原始時間戳減去 <see cref="InitialTime"/> 後，
+    /// 依 ETL clock type 直接換算而得；語意對應 TraceEvent ISRTraceData 的 ElapsedTimeMSec 欄位。
     /// </summary>
     public double? ElapsedTimeMSec { get; init; }
 }
@@ -1488,12 +1519,13 @@ public sealed class DpcEventInfo
     public required byte Version { get; init; }
     public required byte Opcode { get; init; }
     public ulong? InitialTime { get; init; }
+    /// <summary>由 <see cref="InitialTime"/> 依 ETL clock type 換算得到的 DPC 進入時間。</summary>
+    public DateTime? InitialTimestamp { get; init; }
     public ulong? Routine { get; init; }
 
     /// <summary>
-    /// DPC 執行耗時(毫秒),由 <see cref="InitialTime"/>(原始 QPC ticks)換算為與 <see cref="Timestamp"/>
-    /// 相同的 FILETIME 時間軸後相減而得,語意對應 TraceEvent DPCTraceData 的 ElapsedTimeMSec 欄位。
-    /// 當 ETL 檔頭缺少 PerfFreq/BootTime 資訊時為 null。
+    /// DPC 執行耗時(毫秒),由事件完成時的原始時間戳減去 <see cref="InitialTime"/> 後，
+    /// 依 ETL clock type 直接換算而得；語意對應 TraceEvent DPCTraceData 的 ElapsedTimeMSec 欄位。
     /// </summary>
     public double? ElapsedTimeMSec { get; init; }
 }
@@ -1736,15 +1768,12 @@ public sealed class EtlFileReader
     private const byte ImageLoadOpcode = 10;
     private long s_eventCount;
 
-    private long _perfFreq;
-
-    private double _calRefX;
-    private long _calRefY;
-    private double _calSumX;
-    private double _calSumY;
-    private double _calSumXY;
-    private double _calSumXX;
-    private long _calCount;
+    private uint _timestampClockType;
+    private long _timestampScaleNumerator;
+    private long _timestampScaleDenominator;
+    private long _timestampReferenceRaw;
+    private long _timestampReferenceFileTime;
+    private bool _timestampReferenceInitialized;
 
 
     private EtlReadResult? _readResult;
@@ -1770,13 +1799,12 @@ public sealed class EtlFileReader
         s_schemaCache.Clear();
         s_cachedSchemaCache.Clear();
         _readResult = new EtlReadResult();
-        _calRefX = 0;
-        _calRefY = 0;
-        _calSumX = 0;
-        _calSumY = 0;
-        _calSumXY = 0;
-        _calSumXX = 0;
-        _calCount = 0;
+        _timestampClockType = 0;
+        _timestampScaleNumerator = 0;
+        _timestampScaleDenominator = 0;
+        _timestampReferenceRaw = 0;
+        _timestampReferenceFileTime = 0;
+        _timestampReferenceInitialized = false;
 
         nint logFileNamePtr = 0;
         ulong traceHandle = EtwNativeConstants.InvalidProcessTraceHandle;
@@ -1795,7 +1823,9 @@ public sealed class EtlFileReader
             EVENT_TRACE_LOGFILEW logfile = new()
             {
                 LogFileName = logFileNamePtr,
-                ProcessTraceMode = EtwNativeConstants.PROCESS_TRACE_MODE_EVENT_RECORD,
+                ProcessTraceMode =
+                    EtwNativeConstants.PROCESS_TRACE_MODE_EVENT_RECORD |
+                    EtwNativeConstants.PROCESS_TRACE_MODE_RAW_TIMESTAMP,
                 EventRecordCallback = &OnEventRecordCallback,
                 Context = GCHandle.ToIntPtr(readerHandle),
             };
@@ -1816,8 +1846,8 @@ public sealed class EtlFileReader
             _readResult.TraceEndTime = logfile.LogfileHeader.EndTime == 0
                 ? null
                 : DateTime.FromFileTime(logfile.LogfileHeader.EndTime);
-            _perfFreq = logfile.LogfileHeader.PerfFreq;
-            _readResult.PerfFreq = _perfFreq;
+            _readResult.PerfFreq = logfile.LogfileHeader.PerfFreq;
+            ConfigureTimestampConversion(in logfile.LogfileHeader);
 
             Console.WriteLine("=== ETL 檔頭資訊 ===");
             Console.WriteLine($"處理器數量: {logfile.LogfileHeader.NumberOfProcessors}");
@@ -2185,7 +2215,8 @@ public sealed class EtlFileReader
     {
         s_eventCount++;
 
-        DateTime timestamp = DateTime.FromFileTime(eventRecordPtr->EventHeader.TimeStamp);
+        long rawTimestamp = eventRecordPtr->EventHeader.TimeStamp;
+        DateTime timestamp = ConvertRawTimestamp(rawTimestamp);
 
         //Console.WriteLine(
         //    $"[{s_eventCount}] ProviderId={record.EventHeader.ProviderId} " +
@@ -3848,7 +3879,8 @@ public sealed class EtlFileReader
             return null;
         }
 
-        ulong initialTime = unchecked((ulong)Marshal.ReadInt64(userData, 0));
+        long initialTimeRaw = Marshal.ReadInt64(userData, 0);
+        ulong initialTime = unchecked((ulong)initialTimeRaw);
         ulong routine = ReadPointer(userData, InitialTimeSize, pointerSize);
 
         return new DpcEventInfo
@@ -3859,8 +3891,9 @@ public sealed class EtlFileReader
             Version = header.EventDescriptor.Version,
             Opcode = header.EventDescriptor.Opcode,
             InitialTime = initialTime,
+            InitialTimestamp = ConvertRawTimestamp(initialTimeRaw),
             Routine = routine,
-            ElapsedTimeMSec = ComputeElapsedTimeMSec(initialTime, timestamp),
+            ElapsedTimeMSec = ComputeElapsedTimeMSec(initialTimeRaw, header.TimeStamp),
         };
     }
 
@@ -3964,7 +3997,8 @@ public sealed class EtlFileReader
             return null;
         }
 
-        ulong initialTime = unchecked((ulong)Marshal.ReadInt64(userData, 0));
+        long initialTimeRaw = Marshal.ReadInt64(userData, 0);
+        ulong initialTime = unchecked((ulong)initialTimeRaw);
         ulong routine = ReadPointer(userData, routineOffset, pointerSize);
         byte returnValue = Marshal.ReadByte(userData, returnValueOffset);
         byte vector = Marshal.ReadByte(userData, vectorOffset);
@@ -3977,65 +4011,79 @@ public sealed class EtlFileReader
             Version = header.EventDescriptor.Version,
             Opcode = header.EventDescriptor.Opcode,
             InitialTime = initialTime,
+            InitialTimestamp = ConvertRawTimestamp(initialTimeRaw),
             Routine = routine,
             ReturnValue = returnValue,
             Vector = vector,
-            ElapsedTimeMSec = ComputeElapsedTimeMSec(initialTime, timestamp),
+            ElapsedTimeMSec = ComputeElapsedTimeMSec(initialTimeRaw, header.TimeStamp),
         };
     }
 
-    private double? ComputeElapsedTimeMSec(ulong initialTimeQpc, DateTime eventTimestamp)
+    private void ConfigureTimestampConversion(in TRACE_LOGFILE_HEADER header)
     {
-        if (_perfFreq <= 0)
+        _timestampClockType = header.ReservedFlags;
+        _timestampReferenceFileTime = header.StartTime;
+
+        switch (_timestampClockType)
+        {
+            case EtwNativeConstants.EVENT_TRACE_CLOCK_PERFCOUNTER when header.PerfFreq > 0:
+                _timestampScaleNumerator = TimeSpan.TicksPerSecond;
+                _timestampScaleDenominator = header.PerfFreq;
+                break;
+            case EtwNativeConstants.EVENT_TRACE_CLOCK_SYSTEMTIME:
+                _timestampScaleNumerator = 1;
+                _timestampScaleDenominator = 1;
+                break;
+            case EtwNativeConstants.EVENT_TRACE_CLOCK_CPUCYCLE when header.LogInstance.CpuSpeedInMHz > 0:
+                _timestampScaleNumerator = 10;
+                _timestampScaleDenominator = header.LogInstance.CpuSpeedInMHz;
+                break;
+            default:
+                throw new InvalidDataException(
+                    $"ETL 使用不支援或缺少換算資訊的 clock type：ReservedFlags={header.ReservedFlags}, " +
+                    $"PerfFreq={header.PerfFreq}, CpuSpeedInMHz={header.LogInstance.CpuSpeedInMHz}。");
+        }
+
+        if (_timestampClockType != EtwNativeConstants.EVENT_TRACE_CLOCK_SYSTEMTIME &&
+            _timestampReferenceFileTime <= 0)
+        {
+            throw new InvalidDataException("ETL 檔頭缺少 StartTime，無法將原始事件時間戳換算為 FILETIME。");
+        }
+    }
+
+    private DateTime ConvertRawTimestamp(long rawTimestamp)
+    {
+        if (_timestampClockType == EtwNativeConstants.EVENT_TRACE_CLOCK_SYSTEMTIME)
+        {
+            return DateTime.FromFileTime(rawTimestamp);
+        }
+
+        if (!_timestampReferenceInitialized)
+        {
+            _timestampReferenceRaw = rawTimestamp;
+            _timestampReferenceInitialized = true;
+        }
+
+        long fileTime = checked(
+            _timestampReferenceFileTime +
+            ScaleRawTimestampDelta((Int128)rawTimestamp - _timestampReferenceRaw));
+        return DateTime.FromFileTime(fileTime);
+    }
+
+    private double? ComputeElapsedTimeMSec(long initialTimeRaw, long stopTimeRaw)
+    {
+        Int128 rawDelta = (Int128)stopTimeRaw - initialTimeRaw;
+        if (rawDelta < 0)
         {
             return null;
         }
 
-        long eventFileTicks = eventTimestamp.ToFileTime();
-
-        if (_calCount == 0)
-        {
-            _calRefX = initialTimeQpc;
-            _calRefY = eventFileTicks;
-            _calSumX = 0;
-            _calSumY = 0;
-            _calSumXY = 0;
-            _calSumXX = 0;
-            _calCount = 1;
-            return 0.0;
-        }
-
-        double dx = initialTimeQpc - _calRefX;
-        double dy = eventFileTicks - _calRefY;
-
-        double slope;
-        double intercept;
-        double n = _calCount;
-        double meanX = _calSumX / n;
-        double meanY = _calSumY / n;
-        double varX = (_calSumXX / n) - (meanX * meanX);
-        if (_calCount >= 2 && Math.Abs(varX) > 1e-6)
-        {
-            slope = ((_calSumXY / n) - (meanX * meanY)) / varX;
-            intercept = meanY - (slope * meanX);
-        }
-        else
-        {
-            slope = 10_000_000.0 / _perfFreq;
-            intercept = dy - (slope * dx);
-        }
-
-        double predictedDy = intercept + (slope * dx);
-        double elapsedMs = (dy - predictedDy) / 10_000.0;
-
-        _calSumX += dx;
-        _calSumY += dy;
-        _calSumXY += dx * dy;
-        _calSumXX += dx * dx;
-        _calCount++;
-
-        return elapsedMs;
+        long elapsedFileTimeTicks = ScaleRawTimestampDelta(rawDelta);
+        return elapsedFileTimeTicks / (double)TimeSpan.TicksPerMillisecond;
     }
+
+    private long ScaleRawTimestampDelta(Int128 rawDelta) =>
+        checked((long)((rawDelta * _timestampScaleNumerator) / _timestampScaleDenominator));
 
 
     private uint GetPointerSize(in EVENT_HEADER header)

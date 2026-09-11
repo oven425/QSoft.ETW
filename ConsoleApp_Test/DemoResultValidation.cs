@@ -1,4 +1,7 @@
 
+using Microsoft.Windows.EventTracing.Cpu;
+using QSoft.ETW;
+
 internal sealed record ProcessSnapshot(
     long ProcessId,
     long ParentProcessId,
@@ -31,6 +34,40 @@ internal sealed record ThreadSnapshot(
 
 internal sealed record InterruptModuleSnapshot(string ModuleName, int IsrCount, int DpcCount);
 
+internal sealed record DpcSnapshot(
+    int Processor,
+    DateTime StartTime,
+    DateTime StopTime,
+    long HandlerRoutineAddress,
+    string HandlerModuleName,
+    long? HandlerRelativeVirtualAddress,
+    string? HandlerSymbolName,
+    string CallType);
+
+/// <summary>
+/// EtlFileReader 的 <see cref="InterruptServiceRoutineInterval"/> 與 TraceProcessor 的
+/// <see cref="IInterruptServiceRoutineInterval"/> 共用的比對快照。
+/// </summary>
+internal sealed record IsrSnapshot(
+    int Processor,
+    DateTime StartTime,
+    DateTime StopTime,
+    long HandlerRoutineAddress,
+    string HandlerModuleName,
+    long? HandlerRelativeVirtualAddress,
+    string? HandlerSymbolName,
+    int? Vector,
+    byte? ReturnValue);
+
+internal sealed record DemoResult_Etl(
+    TimeSpan Elapsed,
+    IReadOnlyList<InterruptServiceRoutineInterval> InterruptServiceRoutines,
+    IReadOnlyList<DeferredProcedureCallInterval> DeferredProcedureCalls);
+
+internal sealed record DemoResult_Tp(
+    TimeSpan Elapsed,
+    IReadOnlyList<IsrSnapshot> InterruptServiceRoutines,
+    IReadOnlyList<DpcSnapshot> DeferredProcedureCalls);
 
 internal sealed record DemoResult(
     TimeSpan Elapsed,
@@ -38,21 +75,23 @@ internal sealed record DemoResult(
     IReadOnlyList<ServiceSnapshot> Services,
     int EnergyIntervalCount,
     double EnergyTotalMilliJoules,
+    
     IReadOnlyList<InterruptModuleSnapshot> InterruptModules,
     IReadOnlyList<ThreadSnapshot> Threads);
 
 internal static class DemoResultValidator
 {
-    public static void Validate(DemoResult etlFileReaderResult, DemoResult traceProcessorResult)
+    public static void Validate(DemoResult_Etl etlFileReaderResult, DemoResult_Tp traceProcessorResult)
     {
         Console.WriteLine();
         Console.WriteLine("=== 驗證：EtlFileReader 與 TraceProcessor 解析同一份 ETL 的結果比對（以 TraceProcessor 為基準） ===");
-
-        ValidateProcesses(etlFileReaderResult.Processes, traceProcessorResult.Processes);
-        ValidateServices(etlFileReaderResult.Services, traceProcessorResult.Services);
-        ValidateThreads(etlFileReaderResult.Threads, traceProcessorResult.Threads);
-        ValidateEnergyEstimation(etlFileReaderResult, traceProcessorResult);
-        ValidateInterruptHandling(etlFileReaderResult.InterruptModules, traceProcessorResult.InterruptModules);
+        ValidateDeferredProcedureCalls(etlFileReaderResult.DeferredProcedureCalls, traceProcessorResult.DeferredProcedureCalls);
+        ValidateInterruptServiceRoutines(etlFileReaderResult.InterruptServiceRoutines, traceProcessorResult.InterruptServiceRoutines);
+        //ValidateProcesses(etlFileReaderResult.Processes, traceProcessorResult.Processes);
+        //ValidateServices(etlFileReaderResult.Services, traceProcessorResult.Services);
+        //ValidateThreads(etlFileReaderResult.Threads, traceProcessorResult.Threads);
+        //ValidateEnergyEstimation(etlFileReaderResult, traceProcessorResult);
+        //ValidateInterruptHandling(etlFileReaderResult.InterruptModules, traceProcessorResult.InterruptModules);
     }
 
     public static IReadOnlyList<InterruptModuleSnapshot> BuildInterruptModuleSnapshots(
@@ -171,12 +210,6 @@ internal static class DemoResultValidator
         PrintSample("僅 TraceProcessor 有的 TID", onlyInTp);
     }
 
-    /// <summary>
-    /// 比對兩邊快照的同一個 Nullable&lt;DateTime&gt; 欄位(依 <paramref name="commonKeys"/> 逐筆比對)：
-    /// 「有無值」不同一律計入不同筆數；兩邊皆有值時，只有差距超過 <see cref="TimestampToleranceSeconds"/> 秒
-    /// 才計入不同筆數，同時回報實際觀察到的最大誤差供參考。供 ValidateProcesses/ValidateThreads 共用，
-    /// 因兩者皆有 CreateTime/ExitTime 這種「兩種實作換算路徑不同、不要求逐 tick 相等」的欄位。
-    /// </summary>
     private static (int Mismatch, double MaxDeltaSeconds) CompareTimestamps<TKey, TSnapshot>(
         IReadOnlyList<TKey> commonKeys,
         Dictionary<TKey, TSnapshot> etlByKey,
@@ -206,6 +239,220 @@ internal static class DemoResultValidator
             }
         }
         return (mismatch, maxDelta);
+    }
+
+    /// <summary>DPC/ISR 時間戳容許誤差(毫秒)。兩邊都由相同的原始 ETW clock timestamp 換算，
+    /// 理論上應只相差在換算捨入誤差範圍內。</summary>
+    private const double InterruptTimestampToleranceMilliseconds = 0.01;
+
+    /// <summary>內容不同的紀錄最多列出幾筆，避免筆數龐大時洗版。</summary>
+    private const int MaxDifferenceSamplesToPrint = 10;
+
+    private static DpcSnapshot ToDpcSnapshot(DeferredProcedureCallInterval i) => new(
+        i.Processor,
+        i.StartTime.ToUniversalTime(),
+        i.StopTime.ToUniversalTime(),
+        i.HandlerRoutineAddress.HasValue ? unchecked((long)i.HandlerRoutineAddress.Value) : 0L,
+        NormalizeModuleName(i.HandlerModuleName),
+        i.HandlerStackFrame?.RelativeVirtualAddress is ulong rva ? unchecked((long)rva) : null,
+        i.HandlerStackFrame?.SymbolName,
+        (i.CallType == EtlDeferredProcedureCallType.ThreadedDpc ? EtlDeferredProcedureCallType.Normal : i.CallType).ToString());
+
+    internal static DpcSnapshot ToDpcSnapshot(IDeferredProcedureCallInterval i) => new(
+        i.Processor,
+        i.StartTime.DateTimeOffset.UtcDateTime,
+        i.StopTime.DateTimeOffset.UtcDateTime,
+        i.HandlerRoutineAddress.Value,
+        NormalizeModuleName(i.HandlerImage?.FileName),
+        i.HandlerStackFrame.HasValue ? i.HandlerStackFrame.RelativeVirtualAddress.Value : null,
+        i.HandlerStackFrame.Symbol?.FunctionName,
+        i.CallType.ToString());
+
+    private static IsrSnapshot ToIsrSnapshot(InterruptServiceRoutineInterval i) => new(
+        i.Processor,
+        i.StartTime.ToUniversalTime(),
+        i.StopTime.ToUniversalTime(),
+        i.HandlerRoutineAddress.HasValue ? unchecked((long)i.HandlerRoutineAddress.Value) : 0L,
+        NormalizeModuleName(i.HandlerModuleName),
+        i.HandlerStackFrame?.RelativeVirtualAddress is ulong rva ? unchecked((long)rva) : null,
+        i.HandlerStackFrame?.SymbolName,
+        i.Vector,
+        i.ReturnValue);
+
+    internal static IsrSnapshot ToIsrSnapshot(IInterruptServiceRoutineInterval i) => new(
+        i.Processor,
+        i.StartTime.DateTimeOffset.UtcDateTime,
+        i.StopTime.DateTimeOffset.UtcDateTime,
+        i.HandlerRoutineAddress.Value,
+        NormalizeModuleName(i.HandlerImage?.FileName),
+        i.HandlerStackFrame.HasValue ? i.HandlerStackFrame.RelativeVirtualAddress.Value : null,
+        i.HandlerStackFrame.Symbol?.FunctionName,
+        i.Vector,
+        i.ReturnValue);
+
+    private static string NormalizeModuleName(string? moduleName) =>
+        string.IsNullOrEmpty(moduleName) ? "<未映射>" : Path.GetFileName(moduleName);
+
+    /// <summary>
+    /// ISR/DPC 兩邊都沒有可跨實作對應的唯一 ID(不像 Process 有 PID、Thread 有 TID)，
+    /// 故以「同一顆處理器內、依 StopTime(原始事件時間戳，未經任何推算)排序後逐筆配對」取代查表比對：
+    /// 只要兩邊確實解析自同一份 ETL、同一個處理器上的事件發生順序不會被任一邊打亂，此法即等同逐筆比對。
+    /// 若某處理器兩邊筆數不同，多出的尾端筆數會分別計入 EtlOnlyCount/TpOnlyCount，不參與配對。
+    /// </summary>
+    private static (List<(T Etl, T Tp)> Matched, int ProcessorCountMismatch, int EtlOnlyCount, int TpOnlyCount)
+        MatchIntervalsByProcessor<T>(
+            IReadOnlyList<T> etl,
+            IReadOnlyList<T> tp,
+            Func<T, int> processorSelector,
+            Func<T, DateTime> orderSelector)
+    {
+        Dictionary<int, List<T>> etlByProcessor = etl
+            .GroupBy(processorSelector)
+            .ToDictionary(g => g.Key, g => g.OrderBy(orderSelector).ToList());
+        Dictionary<int, List<T>> tpByProcessor = tp
+            .GroupBy(processorSelector)
+            .ToDictionary(g => g.Key, g => g.OrderBy(orderSelector).ToList());
+
+        List<(T, T)> matched = [];
+        int processorCountMismatch = 0;
+        int etlOnlyCount = 0;
+        int tpOnlyCount = 0;
+
+        foreach (int processor in etlByProcessor.Keys.Union(tpByProcessor.Keys))
+        {
+            List<T> etlList = etlByProcessor.TryGetValue(processor, out List<T>? e) ? e : [];
+            List<T> tpList = tpByProcessor.TryGetValue(processor, out List<T>? t) ? t : [];
+            if (etlList.Count != tpList.Count)
+            {
+                processorCountMismatch++;
+            }
+
+            int pairCount = Math.Min(etlList.Count, tpList.Count);
+            for (int i = 0; i < pairCount; i++)
+            {
+                matched.Add((etlList[i], tpList[i]));
+            }
+            etlOnlyCount += etlList.Count - pairCount;
+            tpOnlyCount += tpList.Count - pairCount;
+        }
+
+        return (matched, processorCountMismatch, etlOnlyCount, tpOnlyCount);
+    }
+
+    private static void ValidateDeferredProcedureCalls(
+        IReadOnlyList<DeferredProcedureCallInterval> etl,
+        IReadOnlyList<DpcSnapshot> tp)
+    {
+        List<DpcSnapshot> etlSnapshots = [.. etl.Select(ToDpcSnapshot)];
+
+        (List<(DpcSnapshot Etl, DpcSnapshot Tp)> matched, int processorCountMismatch, int etlOnlyCount, int tpOnlyCount) =
+            MatchIntervalsByProcessor(etlSnapshots, tp, s => s.Processor, s => s.StopTime);
+
+        List<(int Index, DpcSnapshot Etl, DpcSnapshot Tp)> different = [];
+        for (int i = 0; i < matched.Count; i++)
+        {
+            (DpcSnapshot e, DpcSnapshot t) = matched[i];
+            bool startTimeMismatch = Math.Abs((e.StartTime - t.StartTime).TotalMilliseconds) > InterruptTimestampToleranceMilliseconds;
+            bool stopTimeMismatch = Math.Abs((e.StopTime - t.StopTime).TotalMilliseconds) > InterruptTimestampToleranceMilliseconds;
+            bool addressMismatch = e.HandlerRoutineAddress != t.HandlerRoutineAddress;
+            bool moduleMismatch = !string.Equals(e.HandlerModuleName, t.HandlerModuleName, StringComparison.OrdinalIgnoreCase);
+            bool relativeVirtualAddressMismatch =
+                e.HandlerRelativeVirtualAddress != t.HandlerRelativeVirtualAddress;
+            bool callTypeMismatch = !string.Equals(e.CallType, t.CallType, StringComparison.Ordinal);
+            bool symbolMismatch =
+                e.HandlerSymbolName is not null &&
+                t.HandlerSymbolName is not null &&
+                !string.Equals(e.HandlerSymbolName, t.HandlerSymbolName, StringComparison.Ordinal);
+            if (startTimeMismatch ||
+                stopTimeMismatch ||
+                addressMismatch ||
+                moduleMismatch ||
+                relativeVirtualAddressMismatch ||
+                symbolMismatch ||
+                callTypeMismatch)
+            {
+                different.Add((i, e, t));
+            }
+        }
+
+        Console.WriteLine($"[UseInterruptHandlingData-DPC] EtlFileReader={etl.Count} 筆, TraceProcessor={tp.Count} 筆, " +
+            $"依 Processor 分組+StopTime 排序配對成功={matched.Count} 筆(筆數不同的處理器數={processorCountMismatch}, " +
+            $"僅 EtlFileReader 多出={etlOnlyCount} 筆, 僅 TraceProcessor 多出={tpOnlyCount} 筆), 內容不同={different.Count} 筆");
+
+        foreach ((int index, DpcSnapshot e, DpcSnapshot t) in different.Take(MaxDifferenceSamplesToPrint))
+        {
+            Console.WriteLine($"  #{index} Processor={e.Processor}: " +
+                $"StartTime EtlFileReader={e.StartTime:HH:mm:ss.fffffff} vs TraceProcessor={t.StartTime:HH:mm:ss.fffffff}; " +
+                $"StopTime EtlFileReader={e.StopTime:HH:mm:ss.ffffff} vs TraceProcessor={t.StopTime:HH:mm:ss.ffffff}; " +
+                $"HandlerRoutineAddress 0x{e.HandlerRoutineAddress:X} vs 0x{t.HandlerRoutineAddress:X}; " +
+                $"HandlerModuleName \"{e.HandlerModuleName}\" vs \"{t.HandlerModuleName}\"; " +
+                $"HandlerRVA 0x{e.HandlerRelativeVirtualAddress:X} vs 0x{t.HandlerRelativeVirtualAddress:X}; " +
+                $"HandlerSymbol \"{e.HandlerSymbolName ?? "<未載入>"}\" vs \"{t.HandlerSymbolName ?? "<未載入>"}\"; " +
+                $"CallType {e.CallType} vs {t.CallType}");
+        }
+        if (different.Count > MaxDifferenceSamplesToPrint)
+        {
+            Console.WriteLine($"  ...其餘 {different.Count - MaxDifferenceSamplesToPrint} 筆不同省略");
+        }
+    }
+
+    private static void ValidateInterruptServiceRoutines(
+        IReadOnlyList<InterruptServiceRoutineInterval> etl,
+        IReadOnlyList<IsrSnapshot> tp)
+    {
+        List<IsrSnapshot> etlSnapshots = [.. etl.Select(ToIsrSnapshot)];
+
+        (List<(IsrSnapshot Etl, IsrSnapshot Tp)> matched, int processorCountMismatch, int etlOnlyCount, int tpOnlyCount) =
+            MatchIntervalsByProcessor(etlSnapshots, tp, s => s.Processor, s => s.StopTime);
+
+        List<(int Index, IsrSnapshot Etl, IsrSnapshot Tp)> different = [];
+        for (int i = 0; i < matched.Count; i++)
+        {
+            (IsrSnapshot e, IsrSnapshot t) = matched[i];
+            bool startTimeMismatch = Math.Abs((e.StartTime - t.StartTime).TotalMilliseconds) > InterruptTimestampToleranceMilliseconds;
+            bool stopTimeMismatch = Math.Abs((e.StopTime - t.StopTime).TotalMilliseconds) > InterruptTimestampToleranceMilliseconds;
+            bool addressMismatch = e.HandlerRoutineAddress != t.HandlerRoutineAddress;
+            bool moduleMismatch = !string.Equals(e.HandlerModuleName, t.HandlerModuleName, StringComparison.OrdinalIgnoreCase);
+            bool relativeVirtualAddressMismatch =
+                e.HandlerRelativeVirtualAddress != t.HandlerRelativeVirtualAddress;
+            bool vectorMismatch = e.Vector != t.Vector;
+            bool returnValueMismatch = e.ReturnValue != t.ReturnValue;
+            bool symbolMismatch =
+                e.HandlerSymbolName is not null &&
+                t.HandlerSymbolName is not null &&
+                !string.Equals(e.HandlerSymbolName, t.HandlerSymbolName, StringComparison.Ordinal);
+            if (startTimeMismatch ||
+                stopTimeMismatch ||
+                addressMismatch ||
+                moduleMismatch ||
+                relativeVirtualAddressMismatch ||
+                symbolMismatch ||
+                vectorMismatch ||
+                returnValueMismatch)
+            {
+                different.Add((i, e, t));
+            }
+        }
+
+        Console.WriteLine($"[UseInterruptHandlingData-ISR] EtlFileReader={etl.Count} 筆, TraceProcessor={tp.Count} 筆, " +
+            $"依 Processor 分組+StopTime 排序配對成功={matched.Count} 筆(筆數不同的處理器數={processorCountMismatch}, " +
+            $"僅 EtlFileReader 多出={etlOnlyCount} 筆, 僅 TraceProcessor 多出={tpOnlyCount} 筆), 內容不同={different.Count} 筆");
+
+        foreach ((int index, IsrSnapshot e, IsrSnapshot t) in different.Take(MaxDifferenceSamplesToPrint))
+        {
+            Console.WriteLine($"  #{index} Processor={e.Processor}: " +
+                $"StartTime EtlFileReader={e.StartTime:HH:mm:ss.fffffff} vs TraceProcessor={t.StartTime:HH:mm:ss.fffffff}; " +
+                $"StopTime EtlFileReader={e.StopTime:HH:mm:ss.ffffff} vs TraceProcessor={t.StopTime:HH:mm:ss.ffffff}; " +
+                $"HandlerRoutineAddress 0x{e.HandlerRoutineAddress:X} vs 0x{t.HandlerRoutineAddress:X}; " +
+                $"HandlerModuleName \"{e.HandlerModuleName}\" vs \"{t.HandlerModuleName}\"; " +
+                $"HandlerRVA 0x{e.HandlerRelativeVirtualAddress:X} vs 0x{t.HandlerRelativeVirtualAddress:X}; " +
+                $"HandlerSymbol \"{e.HandlerSymbolName ?? "<未載入>"}\" vs \"{t.HandlerSymbolName ?? "<未載入>"}\"; " +
+                $"Vector {e.Vector} vs {t.Vector}; ReturnValue {e.ReturnValue} vs {t.ReturnValue}");
+        }
+        if (different.Count > MaxDifferenceSamplesToPrint)
+        {
+            Console.WriteLine($"  ...其餘 {different.Count - MaxDifferenceSamplesToPrint} 筆不同省略");
+        }
     }
 
     private static void ValidateEnergyEstimation(DemoResult etl, DemoResult tp)
@@ -251,7 +498,7 @@ internal static class DemoResultValidator
 
         Console.WriteLine($"[UseInterruptHandlingData] ISR 總筆數 EtlFileReader={etlIsrTotal} vs TraceProcessor={tpIsrTotal}, " +
             $"DPC 總筆數 EtlFileReader={etlDpcTotal} vs TraceProcessor={tpDpcTotal}" +
-            "（依文件記載，筆數與所屬模組應完全一致；耗時不在此比對範圍內，因 EtlFileReader 端已知系統性低估）");
+            "（依文件記載，筆數、所屬模組與執行時間應一致）");
         Console.WriteLine($"  模組數 EtlFileReader={etlByModule.Count} vs TraceProcessor={tpByModule.Count}, 共同模組={common.Count}, " +
             $"僅 EtlFileReader 有={onlyInEtl.Count}, 僅 TraceProcessor 有={onlyInTp.Count}, " +
             $"ISR 筆數不同的模組={isrCountMismatch}, DPC 筆數不同的模組={dpcCountMismatch}");

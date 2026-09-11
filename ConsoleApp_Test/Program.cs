@@ -6,28 +6,30 @@ using Microsoft.Windows.EventTracing.Services;
 using QSoft.ETW;
 using System.Diagnostics;
 using System.Text;
+using System.Xml.Linq;
 
 Console.OutputEncoding = Encoding.UTF8;
-var pppps = TdhManifestMapReader.QueryManifestEventInfo(Guid.Parse("{0F67E49F-FE51-4E9F-B490-6F2948CC6027}"));
-var ees = TdhManifestMapReader.QueryEnergyEstimateEventInfo();
+var pppps = TdhManifestMapReader.QueryManifestEventInfo(Guid.Parse("{65cd4c8a-0848-4583-92a0-31c0fbaf00c0}"));
+//var ees = TdhManifestMapReader.QueryEnergyEstimateEventInfo();
 int durationSeconds = 30;
 if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSeconds > 0)
 {
     durationSeconds = parsedSeconds;
 }
 
-string? capturedEtlPath = await RunTraceSessionCaptureDemo(durationSeconds);
-if (capturedEtlPath is null)
-{
-    return 1;
-}
+//string? capturedEtlPath = await RunTraceSessionCaptureDemo(durationSeconds);
+//if (capturedEtlPath is null)
+//{
+//    return 1;
+//}
+var capturedEtlPath = "capture_20260909_092700.etl";
 
 long etlFileSizeBytes = new FileInfo(capturedEtlPath).Length;
 double etlFileSizeMb = etlFileSizeBytes / 1024.0 / 1024.0;
 Console.WriteLine($"ETL 檔案大小: {etlFileSizeMb:F2} MB ({capturedEtlPath})");
 
-DemoResult etlFileReaderResult = RunEtlFileReaderDemo(capturedEtlPath);
-DemoResult traceProcessorResult = RunTraceProcessorDemo(capturedEtlPath);
+DemoResult_Etl etlFileReaderResult = RunEtlFileReaderDemo(capturedEtlPath);
+DemoResult_Tp traceProcessorResult = RunTraceProcessorDemo(capturedEtlPath);
 
 Console.WriteLine();
 Console.WriteLine("=== 效能比較總結（同一份 ETL，兩種解析方式）===");
@@ -55,6 +57,39 @@ return 0;
 /// </summary>
 static long? ToSignedAddress(ulong? value) => value.HasValue ? unchecked((long)value.Value) : null;
 static int? ToSignedId(uint? value) => value.HasValue ? unchecked((int)value.Value) : null;
+
+/// <summary>
+/// Console 示範預設不載入 PDB、不連線。設定 QSOFT_ETW_SYMBOL_PATH 可使用自訂（通常為本機）symbol path；
+/// 或設定 QSOFT_ETW_MICROSOFT_SYMBOL_CACHE 明確允許由 Microsoft Symbol Server 下載到指定快取目錄。
+/// QSOFT_ETW_IMAGE_PATH 可用分號指定額外的映像搜尋目錄。
+/// </summary>
+static DbgHelpSymbolResolutionOptions? CreateDbgHelpOptionsFromEnvironment()
+{
+    string? symbolPath = Environment.GetEnvironmentVariable("QSOFT_ETW_SYMBOL_PATH");
+    string? microsoftSymbolCache = Environment.GetEnvironmentVariable("QSOFT_ETW_MICROSOFT_SYMBOL_CACHE");
+    if (!string.IsNullOrWhiteSpace(symbolPath) && !string.IsNullOrWhiteSpace(microsoftSymbolCache))
+    {
+        throw new InvalidOperationException(
+            "QSOFT_ETW_SYMBOL_PATH 與 QSOFT_ETW_MICROSOFT_SYMBOL_CACHE 不可同時設定。");
+    }
+
+    string? imagePath = Environment.GetEnvironmentVariable("QSOFT_ETW_IMAGE_PATH");
+    string[] imageSearchDirectories = string.IsNullOrWhiteSpace(imagePath)
+        ? []
+        : imagePath
+            .Split(Path.PathSeparator, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+    if (!string.IsNullOrWhiteSpace(microsoftSymbolCache))
+    {
+        return DbgHelpSymbolResolutionOptions.CreateWithMicrosoftSymbolServer(
+            microsoftSymbolCache,
+            imageSearchDirectories);
+    }
+
+    return string.IsNullOrWhiteSpace(symbolPath)
+        ? null
+        : DbgHelpSymbolResolutionOptions.CreateLocalOnly(symbolPath, imageSearchDirectories);
+}
 
 /// <summary>
 /// 對 <see cref="Microsoft.Windows.EventTracing.Services.IService.StartType"/> 的防禦性存取：
@@ -157,23 +192,7 @@ static async Task<string?> RunTraceSessionCaptureDemo(int durationSeconds)
     return capturedEtlPath;
 }
 
-/// <summary>
-/// 方式一：本專案 QSoft.ETW 的 <see cref="EtlFileReader"/>。
-/// 內部以 P/Invoke 直接呼叫 Advapi32 的 OpenTrace/ProcessTrace 逐筆讀取 EVENT_RECORD，
-/// 再透過 Tdh* API 手動解析每個 Provider 的 schema，並以「一種事件對應一個強型別 event」的方式向外推送
-/// (ProcessStart、ImageLoad、ThreadCSwitch、WmiActivity_17...)，需在呼叫 ProcessFile() 之前先訂閱好。
-/// 優點：零外部相依、可 Native AOT/Trimming 發佈；缺點：每新增一種要支援的事件，
-/// 都得手刻對應的 struct、delegate 與 TDH 解析程式碼，EtlFileReader.cs 因此累積超過三千行。
-///
-/// 補充：EtlFileReader 透過插件(<see cref="IEtlReaderPlugin"/>)提供即時關聯引擎，預設不會啟用──
-/// 單純轉存 SQLite 等情境不需要這些額外的關聯/彙總計算。呼叫 <see cref="EtlFileReader.UseBuiltInAnalysis"/>
-/// 掛上內建的 <see cref="EtlAnalysisPlugin"/> 後(於 ProcessFile() 執行過程中即時配對 CSwitch New/Old、
-/// 並以 InstructionPointer/Routine 反查模組)，執行完成後即可透過 <see cref="EtlFileReader.Result"/>
-/// 直接取得已關聯好的 <see cref="EtlReadResult"/>（程序清單、CPU 使用彙總、Profile/DPC/Interrupt 熱點），
-/// 概念上對應下方 TraceProcessor 示範的 trace.Process() + IPendingResult&lt;T&gt;.Result，但完全不依賴
-/// SQLite 或任何外部套件。
-/// </summary>
-static DemoResult RunEtlFileReaderDemo(string etlFilePath)
+static DemoResult_Etl RunEtlFileReaderDemo(string etlFilePath)
 {
     Console.WriteLine();
     Console.WriteLine("=== 方式一：EtlFileReader（本專案手刻 P/Invoke + TDH 解析） ===");
@@ -191,7 +210,10 @@ static DemoResult RunEtlFileReaderDemo(string etlFilePath)
     var pendingThreads = reader.UseThreads();
     var pendingEnergy = reader.UseEnergyEstimationData();
     var pendingEnergyMeter = reader.UseEnergyMeterData();
-    var pendingInterruptHandling = reader.UseInterruptHandlingData();
+    DbgHelpSymbolResolutionOptions? symbolOptions = CreateDbgHelpOptionsFromEnvironment();
+    var pendingInterruptHandling = symbolOptions is null
+        ? reader.UseInterruptHandlingData()
+        : reader.UseInterruptHandlingData(symbolOptions);
     var pendingMemoryUtilization = reader.UseMemoryUtilizationData();
     reader.ProcessStart += (in ProcessInfo info) => processStartCount++;
     reader.ImageLoad += (in ImageLoadEventInfo info) => imageLoadCount++;
@@ -298,10 +320,25 @@ static DemoResult RunEtlFileReaderDemo(string etlFilePath)
     IReadOnlyList<DeferredProcedureCallInterval> dpcIntervals = pendingInterruptHandling.Result.DeferredProcedureCalls;
     Console.WriteLine();
     Console.WriteLine($"[Result] ISR 區間數: {isrIntervals.Count} 筆，DPC 區間數: {dpcIntervals.Count} 筆" +
-        "（IInterruptServiceRoutineInterval/IDeferredProcedureCallInterval 對等，StartTime 由 StopTime 往前推 ElapsedTimeMSec 推算）");
-    Console.WriteLine("  [已知限制] 實測比對 TraceProcessor 後確認：筆數與所屬模組完全一致、可放心採信；" +
-        "但耗時是由 QPC→FILETIME 的線上回歸換算而來，統計上會系統性低估（詳見程式碼註解），" +
-        "下方的耗時加總僅供參考，精確數值請以 TraceProcessor 的結果為準。");
+        "（IInterruptServiceRoutineInterval/IDeferredProcedureCallInterval 對等，StartTime 由 payload InitialTime 依 ETL clock type 直接換算）");
+    IEnumerable<HandlerStackFrameInfo> handlerFrames = isrIntervals
+        .Select(interval => interval.HandlerStackFrame)
+        .Concat(dpcIntervals.Select(interval => interval.HandlerStackFrame))
+        .OfType<HandlerStackFrameInfo>();
+    Console.WriteLine("[Result] HandlerStackFrame 狀態：" +
+        string.Join(", ", handlerFrames
+            .GroupBy(frame => frame.SymbolResolutionStatus)
+            .OrderBy(group => group.Key)
+            .Select(group => $"{group.Key}={group.Count()}")));
+    foreach (HandlerStackFrameInfo frame in handlerFrames
+        .Where(frame => frame.SymbolResolutionStatus == HandlerSymbolResolutionStatus.Resolved)
+        .DistinctBy(frame => (frame.ModuleName, frame.Address))
+        .Take(5))
+    {
+        Console.WriteLine(
+            $"  {Path.GetFileName(frame.ModuleName)}!{frame.SymbolName}+0x{frame.SymbolDisplacement:X} " +
+            $"(RVA=0x{frame.RelativeVirtualAddress:X}, VA=0x{frame.Address:X})");
+    }
 
     var isrByModule = isrIntervals
         .GroupBy(isr => isr.HandlerModuleName)
@@ -396,15 +433,18 @@ static DemoResult RunEtlFileReaderDemo(string etlFilePath)
     var interruptModuleSnapshots = DemoResultValidator.BuildInterruptModuleSnapshots(
         isrIntervals.Select(isr => isr.HandlerModuleName),
         dpcIntervals.Select(dpc => dpc.HandlerModuleName));
-
-    return new DemoResult(
+    return new DemoResult_Etl(
         stopwatch.Elapsed,
-        processSnapshots,
-        serviceSnapshots,
-        energyIntervals.Count,
-        energyIntervals.Sum(i => (double)i.TotalEnergy),
-        interruptModuleSnapshots,
-        threadSnapshots);
+        isrIntervals,
+        dpcIntervals);
+    //return new DemoResult(
+    //    stopwatch.Elapsed,
+    //    processSnapshots,
+    //    serviceSnapshots,
+    //    energyIntervals.Count,
+    //    energyIntervals.Sum(i => (double)i.TotalEnergy),
+    //    interruptModuleSnapshots,
+    //    threadSnapshots);
 }
 
 /// <summary>
@@ -416,7 +456,7 @@ static DemoResult RunEtlFileReaderDemo(string etlFilePath)
 /// 互斥（已在 csproj 明確改回 true 才能執行本示範），也代表它終究無法真正支援 Native AOT 發佈；
 /// 且只能讀取「已寫入磁碟」的完整 ETL，不像 EtlFileReader 可以掛在即時 Session 上逐筆處理事件。
 /// </summary>
-static DemoResult RunTraceProcessorDemo(string etlFilePath)
+static DemoResult_Tp RunTraceProcessorDemo(string etlFilePath)
 {
     Console.WriteLine();
     Console.WriteLine("=== 方式二：TraceProcessor（Microsoft.Windows.EventTracing.Processing.All） ===");
@@ -429,11 +469,11 @@ static DemoResult RunTraceProcessorDemo(string etlFilePath)
     using ITraceProcessor trace = TraceProcessor.Create(etlFilePath, settings);
     
     // 想要哪些資料，就掛上對應的 UseXxx()；實際解析與關聯在 trace.Process() 執行時才會發生。
-    Microsoft.Windows.EventTracing.IPendingResult<Microsoft.Windows.EventTracing.Processes.IProcessDataSource> pendingProcesses = trace.UseProcesses();
-    Microsoft.Windows.EventTracing.IPendingResult<Microsoft.Windows.EventTracing.Services.IServiceDataSource> pendingServices = trace.UseServices();
-    Microsoft.Windows.EventTracing.IPendingResult<Microsoft.Windows.EventTracing.Processes.IThreadDataSource> pendingThreads = trace.UseThreads();
-    Microsoft.Windows.EventTracing.IPendingResult<ICpuSampleDataSource> pendingCpuSamples = trace.UseCpuSamplingData();
-    Microsoft.Windows.EventTracing.IPendingResult<IGenericEventDataSource> pendingGenericEvents = trace.UseGenericEvents();
+    var pendingProcesses = trace.UseProcesses();
+    var pendingServices = trace.UseServices();
+    var pendingThreads = trace.UseThreads();
+    var pendingCpuSamples = trace.UseCpuSamplingData();
+    var pendingGenericEvents = trace.UseGenericEvents();
     var energys = trace.UseEnergyEstimationData();
     var energyMeters = trace.UseEnergyMeterData();
     var interruptHandling = trace.UseInterruptHandlingData();
@@ -443,7 +483,7 @@ static DemoResult RunTraceProcessorDemo(string etlFilePath)
     trace.Process();
     stopwatch.Stop();
     long memoryAfter = GC.GetTotalMemory(forceFullCollection: true);
-
+    
     Console.WriteLine($"[效能] trace.Process() 耗時: {stopwatch.Elapsed.TotalMilliseconds:F1} ms");
     Console.WriteLine($"[效能] 解析後受管記憶體增量: {(memoryAfter - memoryBefore) / 1024.0 / 1024.0:F2} MB（不含其內部 COM 原生解析引擎配置的非受管記憶體）");
 
@@ -597,7 +637,7 @@ static DemoResult RunTraceProcessorDemo(string etlFilePath)
         })
         .OrderByDescending(item => item.TotalMilliseconds)
         .Take(5);
-
+    
     Console.WriteLine("DPC 執行時間前 5 名模組（依 HandlerImage 分組）：");
     foreach (var item in dpcByModule)
     {
@@ -667,16 +707,26 @@ static DemoResult RunTraceProcessorDemo(string etlFilePath)
             t.ServiceId,
             t.StartFrame.Image?.FileName ?? "<未映射>"))
         .ToList();
-    var interruptModuleSnapshots = DemoResultValidator.BuildInterruptModuleSnapshots(
-        isrIntervals.Select(isr => isr.HandlerImage?.FileName ?? "<未知模組>"),
-        dpcIntervals.Select(dpc => dpc.HandlerImage?.FileName ?? "<未知模組>"));
+    //var interruptModuleSnapshots = DemoResultValidator.BuildInterruptModuleSnapshots(
+    //    isrIntervals.Select(isr => isr.HandlerImage?.FileName ?? "<未知模組>"),
+    //    dpcIntervals.Select(dpc => dpc.HandlerImage?.FileName ?? "<未知模組>"));
 
-    return new DemoResult(
+    // TraceProcessor 的 ISR/DPC 物件是依賴 ITraceProcessor 原生資料的 flyweight；
+    // 必須在 trace.Dispose() 前複製成純受管快照，不能把介面物件回傳到 using 範圍外。
+    List<IsrSnapshot> isrSnapshots = [.. isrIntervals.Select(DemoResultValidator.ToIsrSnapshot)];
+    List<DpcSnapshot> dpcSnapshots = [.. dpcIntervals.Select(DemoResultValidator.ToDpcSnapshot)];
+
+    return new DemoResult_Tp(
         stopwatch.Elapsed,
-        processSnapshots,
-        serviceSnapshots,
-        energyIntervals.Count,
-        energyIntervals.Sum(i => (double)i.TotalEnergy.TotalMillijoules),
-        interruptModuleSnapshots,
-        threadSnapshots);
+        isrSnapshots,
+        dpcSnapshots
+        );
+    //return new DemoResult(
+    //    stopwatch.Elapsed,
+    //    processSnapshots,
+    //    serviceSnapshots,
+    //    energyIntervals.Count,
+    //    energyIntervals.Sum(i => (double)i.TotalEnergy.TotalMillijoules),
+    //    interruptModuleSnapshots,
+    //    threadSnapshots);
 }

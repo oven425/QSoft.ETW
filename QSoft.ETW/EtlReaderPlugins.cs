@@ -587,12 +587,6 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
 
     private void OnProcessTerminate(in ProcessTerminateInfo info) => CloseProcess(info.ProcessId, info.TimeStamp);
 
-    /// <summary>
-    /// ProcessDCStop(DCEnd)代表追蹤結束時的 rundown，語意是「此程序結束當下仍存活」，並非終止事件，
-    /// 因此絕不可比照 <see cref="OnProcessStop"/> 設定 EndTime(已實測驗證，詳見類別文件註解第 2 點)。
-    /// 只有在這個 ProcessId 先前從未被 Start/DCStart 觀察到時才補登記一筆(比照 DCStart，StartTime 維持 null)，
-    /// 涵蓋 Start/DCStart 事件遺失、但 DCStop 仍收到的邊角情況；已追蹤到的程序則不做任何事。
-    /// </summary>
     private void OnProcessDCStop(in ProcessInfo info)
     {
         if (!_activeProcessesByPid.ContainsKey(info.ProcessId))
@@ -733,31 +727,6 @@ public static class ServiceDataSourceExtensions
     }
 }
 
-/// <summary>
-/// 對應 TraceProcessor 的 trace.UseThreads():由 <see cref="ThreadDataSourceExtensions.UseThreads"/> 建立,
-/// 訂閱 ThreadStart/ThreadDCStart/ThreadStop/ThreadDCStop 依 ThreadId 建立/收尾 <see cref="ThreadRecord"/>,
-/// 並另外自行訂閱 ImageLoad/ImageDCStart/ImageUnload(與其他插件各自獨立追蹤,不共用狀態,維持插件彼此獨立的慣例)
-/// 以便在 Complete() 時將 Win32StartAddr 反查成所屬模組(對應 TraceProcessor 的 IThread.StartFrame，
-/// 但因本專案未做 PDB 符號解析，只能提供模組層級的「陽春版」StartFrame，取不到函式層級的 Symbol)。
-///
-/// 三項已實測驗證、刻意不同於既有 Process/Service 慣例的設計：
-/// 1. CreateTime 僅在觀察到真正的 Start(而非 DCStart/rundown)時才設值，DCStart 觀察到的既存執行緒維持 null——
-///    比對同一份 ETL 下 TraceProcessor 的 IThread.CreateTime 也是如此。
-/// 2. Complete() 不會像 <see cref="ProcessDataSourceCollector"/> 那樣把追蹤結束時仍存活的執行緒強制補上
-///    ExitTime=追蹤結束時間；比對 TraceProcessor 的 IThread.ExitTime，對於仍存活的執行緒就是 null，並不會補值。
-/// 3. ThreadDCStop(opcode 4/DCEnd)是追蹤「結束」當下的 rundown，語意為「這個執行緒在結束時仍存活」，
-///    並非「已終止」──概念上與 ThreadDCStart 對稱(只是發生在尾端而非開頭)。第一版實作誤將它比照
-///    ThreadStop 處理、強制設定 ExitTime，實測後發現造成六千餘筆執行緒(幾乎全部仍存活的執行緒)
-///    ExitTime 有無值與 TraceProcessor 不符，才改為<see cref="OnThreadDCStop"/>：只有在該 ThreadId
-///    先前從未被觀察到時才補登記一筆(CreateTime/ExitTime 皆為 null，比照 DCStart)，否則不做任何事。
-/// 4. StartAddress 反查模組名稱需要兩層查詢(<see cref="TryResolveModule"/>)並以 <see cref="Path.GetFileName"/>
-///    去路徑：實測發現只查執行緒自己所屬 Process 的模組清單，約 7% 執行緒(多為系統/核心模式執行緒，
-///    Win32StartAddr 落在 ntoskrnl.exe 或驅動程式內)會查無模組，即使 TraceProcessor 那端能正確解析、
-///    雙方 StartAddress 完全相同也一樣；且原始 ImageLoad 事件的 FileName 是完整裝置路徑
-///    (例如 "\Device\HarddiskVolume3\Windows\System32\ntoskrnl.exe")，與 TraceProcessor
-///    IThread.StartFrame.Image.FileName 的純檔名(例如 "ntoskrnl.exe")格式不同，兩項合計曾造成
-///    近 100% 執行緒的 StartAddressModuleName 被誤判為不同，修正後才能逐字串正確比對。
-/// </summary>
 internal sealed class ThreadDataSourceCollector : IEtlReaderPlugin, IThreadDataSource, IPendingResult<IThreadDataSource>
 {
     private readonly Dictionary<uint, ThreadRecord> _activeThreadsByTid = [];
@@ -821,14 +790,6 @@ internal sealed class ThreadDataSourceCollector : IEtlReaderPlugin, IThreadDataS
         _completed = true;
     }
 
-    /// <summary>
-    /// 先查執行緒所屬 Process 自己載入的模組(一般使用者模式 DLL)；查無結果時退而查詢全系統模組清單
-    /// (含核心模式的 ntoskrnl.exe/驅動程式——這類模組只在載入當下的那個 ProcessId 下登記一筆，
-    /// 但系統執行緒的 Win32StartAddr 可能指向任何 Process 底下都會執行到的核心模式函式，
-    /// 因此需要跨行程查詢)。實測驗證前，僅查前者會導致約 7% 執行緒的 StartAddressModuleName
-    /// 誤判為查無模組，即使 TraceProcessor 那端能正確解析、雙方 StartAddress 完全相同也一樣。
-    /// 邏輯對應 EtlAnalysisPlugin.ResolveModule/ResolveKernelModule 的兩層查詢方式。
-    /// </summary>
     private bool TryResolveModule(uint processId, ulong address, DateTime? at, [NotNullWhen(true)] out ModuleInfo? found)
     {
         if (_modulesByProcessId.TryGetValue(processId, out List<ModuleInfo>? modules) &&
@@ -1124,129 +1085,8 @@ public static class EnergyMeterDataSourceExtensions
     }
 }
 
-internal sealed class InterruptHandlingDataSourceCollector : IEtlReaderPlugin, IInterruptHandlingDataSource, IPendingResult<IInterruptHandlingDataSource>
-{
-    private readonly List<ModuleInfo> _modules = [];
-    private readonly List<InterruptServiceRoutineInterval> _isrIntervals = [];
-    private readonly List<DeferredProcedureCallInterval> _dpcIntervals = [];
-    private bool _completed;
 
-    public IReadOnlyList<InterruptServiceRoutineInterval> InterruptServiceRoutines => _isrIntervals;
 
-    public IReadOnlyList<DeferredProcedureCallInterval> DeferredProcedureCalls => _dpcIntervals;
-
-    public IInterruptHandlingDataSource Result =>
-        _completed ? this : throw new InvalidOperationException("尚未呼叫 ProcessFile()，無法取得 UseInterruptHandlingData() 的解析結果。");
-
-    public void Attach(EtlFileReader reader)
-    {
-        _modules.Clear();
-        _isrIntervals.Clear();
-        _dpcIntervals.Clear();
-        _completed = false;
-        reader.ImageLoad += OnImageLoad;
-        reader.ImageDCStart += OnImageLoad;
-        reader.PerfInfoISR += OnIsr;
-        reader.PerfInfoDPC += OnNormalDpc;
-        reader.PerfInfoThreadedDPC += OnThreadedDpc;
-        reader.PerfInfoTimerDPC += OnTimerDpc;
-    }
-
-    public void Detach(EtlFileReader reader)
-    {
-        reader.ImageLoad -= OnImageLoad;
-        reader.ImageDCStart -= OnImageLoad;
-        reader.PerfInfoISR -= OnIsr;
-        reader.PerfInfoDPC -= OnNormalDpc;
-        reader.PerfInfoThreadedDPC -= OnThreadedDpc;
-        reader.PerfInfoTimerDPC -= OnTimerDpc;
-    }
-
-    public void Complete(EtlReadResult result) => _completed = true;
-
-    private void OnImageLoad(in ImageLoadEventInfo info)
-    {
-        if (info.ImageBase is not ulong imageBase || info.ImageSize is not ulong imageSize || imageSize == 0)
-        {
-            return;
-        }
-
-        _modules.Add(new ModuleInfo
-        {
-            ProcessId = info.ProcessId,
-            ImageBase = imageBase,
-            ImageSize = imageSize,
-            LoadTime = info.Timestamp,
-            FileName = info.FileName,
-        });
-    }
-
-    private void OnIsr(in InterruptEventInfo data)
-    {
-        (DateTime startTime, DateTime stopTime) = ComputeInterval(data.Timestamp, data.ElapsedTimeMSec);
-
-        _isrIntervals.Add(new InterruptServiceRoutineInterval
-        {
-            StartTime = startTime,
-            StopTime = stopTime,
-            Processor = data.ProcessorNumber,
-            HandlerRoutineAddress = data.Routine,
-            HandlerModuleName = ResolveModule(data.Routine),
-            Vector = data.Vector,
-            ReturnValue = data.ReturnValue,
-        });
-    }
-
-    private void OnNormalDpc(in DpcEventInfo data) => AddDpc(data, EtlDeferredProcedureCallType.Normal);
-
-    private void OnThreadedDpc(in DpcEventInfo data) => AddDpc(data, EtlDeferredProcedureCallType.ThreadedDpc);
-
-    private void OnTimerDpc(in DpcEventInfo data) => AddDpc(data, EtlDeferredProcedureCallType.Timer);
-
-    private void AddDpc(in DpcEventInfo data, EtlDeferredProcedureCallType callType)
-    {
-        (DateTime startTime, DateTime stopTime) = ComputeInterval(data.Timestamp, data.ElapsedTimeMSec);
-
-        _dpcIntervals.Add(new DeferredProcedureCallInterval
-        {
-            StartTime = startTime,
-            StopTime = stopTime,
-            Processor = data.ProcessorNumber,
-            HandlerRoutineAddress = data.Routine,
-            HandlerModuleName = ResolveModule(data.Routine),
-            CallType = callType,
-        });
-    }
-
-    private static (DateTime StartTime, DateTime StopTime) ComputeInterval(DateTime stopTime, double? elapsedMSec) =>
-        elapsedMSec is double ms and >= 0 ? (stopTime - TimeSpan.FromMilliseconds(ms), stopTime) : (stopTime, stopTime);
-
-    private string ResolveModule(ulong? address)
-    {
-        if (address is ulong value)
-        {
-            foreach (ModuleInfo module in _modules)
-            {
-                if (value >= module.ImageBase && value < module.ImageBase + module.ImageSize)
-                {
-                    return module.FileName;
-                }
-            }
-        }
-
-        return "<未映射>";
-    }
-}
-
-public static class InterruptHandlingDataSourceExtensions
-{
-    public static IPendingResult<IInterruptHandlingDataSource> UseInterruptHandlingData(this EtlFileReader reader)
-    {
-        var collector = new InterruptHandlingDataSourceCollector();
-        reader.Plugins.Add(collector);
-        return collector;
-    }
-}
 
 internal sealed class MemoryUtilizationDataSourceCollector : IEtlReaderPlugin, IMemoryUtilizationDataSource, IPendingResult<IMemoryUtilizationDataSource>
 {
@@ -1272,6 +1112,12 @@ internal sealed class MemoryUtilizationDataSourceCollector : IEtlReaderPlugin, I
     private void OnMemoryUtilization(in MemoryUtilizationEventInfo data) => _snapshots.Add(data);
 }
 
+/// <summary>
+/// 對應 TraceProcessor 的 trace.UseMemoryUtilizationData():宣告要在接下來的 <see cref="EtlFileReader.ProcessFile"/>
+/// 過程中收集系統記憶體用量快照,用法與呼叫順序同 <see cref="ProcessDataSourceExtensions.UseProcesses"/>。
+/// 需擷取時啟用 <see cref="TraceSessionBuilder.KernelMemoryProviderGuid"/> 搭配
+/// <see cref="TraceSessionBuilder.KernelMemoryMemInfoKeyword"/> 才會有資料來源。
+/// </summary>
 public static class MemoryUtilizationDataSourceExtensions
 {
     public static IPendingResult<IMemoryUtilizationDataSource> UseMemoryUtilizationData(this EtlFileReader reader)
