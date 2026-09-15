@@ -26,11 +26,33 @@ public sealed class ServiceInfo
 
     public ServiceState? CurrentState => Latest?.CurrentState;
 
-    public ServiceStartType? StartType => Latest?.StartType;
+    public ServiceStartType? StartType
+    {
+        get
+        {
+            ServiceStartType? rawStartType = Latest?.StartType;
+            if (rawStartType is not (ServiceStartType.Auto or ServiceStartType.DelayedAuto))
+            {
+                return rawStartType;
+            }
+
+            foreach (ServiceStateChangeInfo stateChange in StateChanges)
+            {
+                if (stateChange.CurrentState == ServiceState.StartPending)
+                {
+                    return stateChange.ExecutionPhase == 2
+                        ? ServiceStartType.DelayedAuto
+                        : ServiceStartType.Auto;
+                }
+            }
+
+            return null;
+        }
+    }
 
     public string StateSummary => Latest is null
         ? "沒有狀態變化紀錄"
-        : $"目前狀態：{Latest.CurrentState}（PID={Latest.ProcessId}，StartType={Latest.StartType}，共 {StateChanges.Count} 次狀態變化）";
+        : $"目前狀態：{Latest.CurrentState}（PID={Latest.ProcessId}，StartType={StartType?.ToString() ?? "無法判定"}，共 {StateChanges.Count} 次狀態變化）";
 }
 
 /// <summary>

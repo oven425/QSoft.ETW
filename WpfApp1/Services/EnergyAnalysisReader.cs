@@ -59,10 +59,11 @@ internal sealed class EnergyAnalysisReader : IEnergyAnalysisReader
             Mode = SqliteOpenMode.ReadOnly,
         }.ToString());
         connection.Open();
+        EtlSqliteSchema.EnsureSupported(connection);
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        bool hasEnergyEvents = TableExists(connection, "EnergyEstimationEngineEvent_37");
+        bool hasEnergyEvents = TableExists(connection, "energy_estimates");
         List<EnergyConsumerSummary> consumers = hasEnergyEvents
             ? ReadConsumerSummaries(connection, cancellationToken)
             : [];
@@ -70,7 +71,7 @@ internal sealed class EnergyAnalysisReader : IEnergyAnalysisReader
         cancellationToken.ThrowIfCancellationRequested();
 
         List<EnergyAccuracyMeterSummary> accuracyMeters =
-            hasEnergyEvents && TableExists(connection, "PowerMeterPollingEvents_4")
+            hasEnergyEvents && TableExists(connection, "power_meter_samples")
                 ? ReadAccuracyMeterSummaries(connection, cancellationToken)
                 : [];
 
@@ -79,42 +80,35 @@ internal sealed class EnergyAnalysisReader : IEnergyAnalysisReader
 
     private static List<EnergyConsumerSummary> ReadConsumerSummaries(SqliteConnection connection, CancellationToken cancellationToken)
     {
-        bool hasRecordColumns = ColumnExists(connection, "EnergyEstimationEngineEvent_37", "RecordMeasured");
-        string measuredEventCountExpr = hasRecordColumns
-            ? $"SUM(CASE WHEN (RecordMeasured & {MeasuredCoreComponentsMask}) <> 0 THEN 1 ELSE 0 END)"
-            : "0";
-        string workOnBehalfExpr = hasRecordColumns ? "SUM(WorkOnBehalfCPUEnergy)" : "0";
-        string attributedExpr = hasRecordColumns ? "SUM(AttributedCPUEnergy)" : "0";
-
-        Dictionary<string, List<EnergyInteractivityBreakdown>> breakdownByApp = hasRecordColumns
-            ? ReadInteractivityBreakdownByApp(connection, cancellationToken)
-            : [];
+        Dictionary<string, List<EnergyInteractivityBreakdown>> breakdownByApp =
+            ReadInteractivityBreakdownByApp(connection, cancellationToken);
 
         using SqliteCommand command = connection.CreateCommand();
+        // loss_energy_uj 的原始單位是 μJ(而非其餘欄位的 mJ)，換算成 mJ 才能與其他分量相加得到有意義的 TotalEnergy。
         command.CommandText = $"""
             SELECT
-                COALESCE(NULLIF(TRIM(AppName), ''), '(未知)') AS AppNameKey,
+                COALESCE(NULLIF(TRIM(app_name), ''), '(未知)') AS AppNameKey,
                 CASE
-                    WHEN TRIM(AppName) LIKE 'EMI\_%' ESCAPE '\' THEN '系統/硬體遙測'
-                    WHEN TRIM(AppName) IN ('System', 'System Interrupts') THEN '系統/硬體遙測'
+                    WHEN TRIM(app_name) LIKE 'EMI\_%' ESCAPE '\' THEN '系統/硬體遙測'
+                    WHEN TRIM(app_name) IN ('System', 'System Interrupts') THEN '系統/硬體遙測'
                     ELSE '應用程式'
                 END AS Category,
                 COUNT(*) AS EventCount,
-                {measuredEventCountExpr} AS MeasuredEventCount,
-                SUM(CpuEnergy) AS TotalCpuEnergy,
-                SUM(GpuEnergy) AS TotalGpuEnergy,
-                SUM(DisplayEnergy) AS TotalDisplayEnergy,
-                SUM(DiskEnergy) AS TotalDiskEnergy,
-                SUM(NetworkEnergy) AS TotalNetworkEnergy,
-                SUM(MbbEnergy) AS TotalMbbEnergy,
-                SUM(LossEnergy) AS TotalLossEnergy,
-                SUM(OtherEnergy) AS TotalOtherEnergy,
-                SUM(EmiEnergy) AS TotalEmiEnergy,
-                SUM(NpuEnergy) AS TotalNpuEnergy,
-                SUM(CpuEnergy + GpuEnergy + DisplayEnergy + DiskEnergy + NetworkEnergy + MbbEnergy + LossEnergy + OtherEnergy + EmiEnergy + NpuEnergy) AS TotalEnergy,
-                {workOnBehalfExpr} AS TotalWorkOnBehalfCPUEnergy,
-                {attributedExpr} AS TotalAttributedCPUEnergy
-            FROM EnergyEstimationEngineEvent_37
+                SUM(CASE WHEN (record_measured & {MeasuredCoreComponentsMask}) <> 0 THEN 1 ELSE 0 END) AS MeasuredEventCount,
+                SUM(cpu_energy_mj) AS TotalCpuEnergy,
+                SUM(gpu_energy_mj) AS TotalGpuEnergy,
+                SUM(display_energy_mj) AS TotalDisplayEnergy,
+                SUM(disk_energy_mj) AS TotalDiskEnergy,
+                SUM(network_energy_mj) AS TotalNetworkEnergy,
+                SUM(mbb_energy_mj) AS TotalMbbEnergy,
+                SUM(loss_energy_uj / 1000.0) AS TotalLossEnergy,
+                SUM(other_energy_mj) AS TotalOtherEnergy,
+                SUM(emi_energy_mj) AS TotalEmiEnergy,
+                SUM(npu_energy_mj) AS TotalNpuEnergy,
+                SUM(cpu_energy_mj + gpu_energy_mj + display_energy_mj + disk_energy_mj + network_energy_mj + mbb_energy_mj + (loss_energy_uj / 1000.0) + other_energy_mj + emi_energy_mj + npu_energy_mj) AS TotalEnergy,
+                SUM(work_on_behalf_cpu_energy_mj) AS TotalWorkOnBehalfCPUEnergy,
+                SUM(attributed_cpu_energy_mj) AS TotalAttributedCPUEnergy
+            FROM energy_estimates
             GROUP BY AppNameKey, Category
             ORDER BY TotalEnergy DESC;
             """;
@@ -154,9 +148,8 @@ internal sealed class EnergyAnalysisReader : IEnergyAnalysisReader
     }
 
     /// <summary>
-    /// 依 AppName、InteractivityState 分組統計 Event 37,是解釋 DisplayEnergy 耗能成因的核心查詢:
-    /// 透過 RecordFlags 的 MonitorOn/Foreground 位元與 RecordMeasured 的 Display 位元,判斷該應用程式的
-    /// Display 能耗是否集中於前景/可見期間(預期行為),或在最小化時仍被計入(異常,值得深查其是否阻止螢幕休眠)。
+    /// 依 app_name、interactivity_state 分組統計 energy_estimates，是解釋 DisplayEnergy 耗能成因的核心查詢：
+    /// is_monitor_on/is_foreground/record_measured 皆已在匯入階段預先解碼，這裡直接彙總即可，不需再重算位元遮罩。
     /// </summary>
     private static Dictionary<string, List<EnergyInteractivityBreakdown>> ReadInteractivityBreakdownByApp(
         SqliteConnection connection, CancellationToken cancellationToken)
@@ -164,24 +157,18 @@ internal sealed class EnergyAnalysisReader : IEnergyAnalysisReader
         using SqliteCommand command = connection.CreateCommand();
         command.CommandText = $"""
             SELECT
-                COALESCE(NULLIF(TRIM(AppName), ''), '(未知)') AS AppNameKey,
-                CASE InteractivityState
-                    WHEN 0 THEN 'NotUnique(未知)'
-                    WHEN 1 THEN 'Minimized(最小化)'
-                    WHEN 2 THEN 'Visible(可見/非焦點)'
-                    WHEN 3 THEN 'Focus(前景/焦點)'
-                    ELSE 'Undefined(' || InteractivityState || ')'
-                END AS InteractivityStateText,
+                COALESCE(NULLIF(TRIM(app_name), ''), '(未知)') AS AppNameKey,
+                COALESCE(interactivity_state_name, 'Undefined(' || interactivity_state || ')') AS InteractivityStateText,
                 COUNT(*) AS EventCount,
-                SUM(TimeInMSec) AS TotalTimeInMSec,
-                SUM(DisplayEnergy) AS TotalDisplayEnergy,
-                SUM(CpuEnergy) AS TotalCpuEnergy,
-                SUM(GpuEnergy) AS TotalGpuEnergy,
-                SUM(CASE WHEN (RecordFlags & {MonitorOnRecordFlag}) <> 0 THEN 1 ELSE 0 END) AS MonitorOnCount,
-                SUM(CASE WHEN (RecordFlags & {ForegroundRecordFlag}) <> 0 THEN 1 ELSE 0 END) AS ForegroundCount,
-                SUM(CASE WHEN (RecordMeasured & {DisplayMeasuredFlag}) <> 0 THEN 1 ELSE 0 END) AS DisplayMeasuredCount
-            FROM EnergyEstimationEngineEvent_37
-            GROUP BY AppNameKey, InteractivityState
+                SUM(interval_us / 1000) AS TotalTimeInMSec,
+                SUM(display_energy_mj) AS TotalDisplayEnergy,
+                SUM(cpu_energy_mj) AS TotalCpuEnergy,
+                SUM(gpu_energy_mj) AS TotalGpuEnergy,
+                SUM(is_monitor_on) AS MonitorOnCount,
+                SUM(is_foreground) AS ForegroundCount,
+                SUM(CASE WHEN (record_measured & {DisplayMeasuredFlag}) <> 0 THEN 1 ELSE 0 END) AS DisplayMeasuredCount
+            FROM energy_estimates
+            GROUP BY AppNameKey, interactivity_state
             ORDER BY AppNameKey, TotalDisplayEnergy DESC;
             """;
 
@@ -215,8 +202,8 @@ internal sealed class EnergyAnalysisReader : IEnergyAnalysisReader
     }
 
     /// <summary>
-    /// 以分鐘為區間彙總 E3 估算總量,並用 LAG() 計算電表 AbsoluteEnergy 的區間差值(排除計數器重置造成的負值),
-    /// 兩者依相同的分鐘區間 LEFT JOIN 後,交給呼叫端依 MeterId 分組並計算相關係數與平均比值。
+    /// 以分鐘為區間彙總 E3 估算總量，並用 LAG() 計算電表 absolute_energy 的區間差值(排除計數器重置造成的負值)，
+    /// 兩者依相同的分鐘區間 LEFT JOIN 後，交給呼叫端依 MeterId 分組並計算相關係數與平均比值。
     /// </summary>
     private static List<EnergyAccuracyMeterSummary> ReadAccuracyMeterSummaries(SqliteConnection connection, CancellationToken cancellationToken)
     {
@@ -224,35 +211,37 @@ internal sealed class EnergyAnalysisReader : IEnergyAnalysisReader
         command.CommandText = """
             WITH EstimatedByBucket AS (
                 SELECT
-                    substr(TimestampUtc, 1, 16) || ':00Z' AS BucketStartUtc,
-                    SUM(CpuEnergy + GpuEnergy + DisplayEnergy + DiskEnergy + NetworkEnergy + MbbEnergy + LossEnergy + OtherEnergy + EmiEnergy + NpuEnergy) AS EstimatedEnergy
-                FROM EnergyEstimationEngineEvent_37
+                    strftime('%Y-%m-%dT%H:%M:00Z', timestamp_utc_us / 1000000, 'unixepoch') AS BucketStartUtc,
+                    SUM(cpu_energy_mj + gpu_energy_mj + display_energy_mj + disk_energy_mj + network_energy_mj + mbb_energy_mj + (loss_energy_uj / 1000.0) + other_energy_mj + emi_energy_mj + npu_energy_mj) AS EstimatedEnergy
+                FROM energy_estimates
                 GROUP BY BucketStartUtc
             ),
             MeterDeltas AS (
                 SELECT
-                    MeterId,
-                    TimestampUtc AS CurrTimestampUtc,
-                    AbsoluteEnergy - LAG(AbsoluteEnergy) OVER (PARTITION BY MeterId ORDER BY TimestampUtc) AS EnergyDelta
-                FROM PowerMeterPollingEvents_4
+                    s.meter_id,
+                    s.timestamp_utc_us AS CurrTimestampUtc,
+                    s.absolute_energy - LAG(s.absolute_energy) OVER (PARTITION BY s.meter_id ORDER BY s.timestamp_utc_us) AS EnergyDelta
+                FROM power_meter_samples s
+                WHERE s.event_id = 4
             ),
             MeasuredByBucket AS (
                 SELECT
-                    MeterId,
-                    substr(CurrTimestampUtc, 1, 16) || ':00Z' AS BucketStartUtc,
+                    meter_id,
+                    strftime('%Y-%m-%dT%H:%M:00Z', CurrTimestampUtc / 1000000, 'unixepoch') AS BucketStartUtc,
                     SUM(EnergyDelta) AS MeasuredEnergyDelta
                 FROM MeterDeltas
                 WHERE EnergyDelta IS NOT NULL AND EnergyDelta >= 0
-                GROUP BY MeterId, BucketStartUtc
+                GROUP BY meter_id, BucketStartUtc
             )
             SELECT
-                m.MeterId,
+                COALESCE(pm.channel_name, printf('0x%X', m.meter_id)) AS MeterId,
                 m.BucketStartUtc,
                 COALESCE(e.EstimatedEnergy, 0) AS EstimatedEnergy,
                 m.MeasuredEnergyDelta
             FROM MeasuredByBucket m
             LEFT JOIN EstimatedByBucket e ON e.BucketStartUtc = m.BucketStartUtc
-            ORDER BY m.MeterId, m.BucketStartUtc;
+            LEFT JOIN power_meters pm ON pm.meter_id = m.meter_id
+            ORDER BY MeterId, m.BucketStartUtc;
             """;
 
         using SqliteDataReader reader = command.ExecuteReader();

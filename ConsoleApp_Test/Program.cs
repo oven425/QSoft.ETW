@@ -22,7 +22,9 @@ if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSec
 //{
 //    return 1;
 //}
-var capturedEtlPath = "capture_20260909_092700.etl";
+var capturedEtlPath = args.Length > 0 && File.Exists(args[0])
+    ? args[0]
+    : "capture_20260909_092700.etl";
 
 long etlFileSizeBytes = new FileInfo(capturedEtlPath).Length;
 double etlFileSizeMb = etlFileSizeBytes / 1024.0 / 1024.0;
@@ -92,27 +94,6 @@ static DbgHelpSymbolResolutionOptions? CreateDbgHelpOptionsFromEnvironment()
 }
 
 /// <summary>
-/// 對 <see cref="Microsoft.Windows.EventTracing.Services.IService.StartType"/> 的防禦性存取：
-/// 實測發現(2026-09 調查)本機部分服務(並非全部)存取此屬性時，TraceProcessor 內部的
-/// ServiceFlyweight.get_StartType() 會拋出 InvalidOperationException("The item does not contain a value.")
-/// ——追進 TraceProcessor 組件的堆疊得知是 ServiceTransitionFlyweightEnumerator 對其內部 Transitions
-/// 資料做 FirstOrDefault() 查詢時，某些服務對應不到任何 Transition 記錄而觸發，屬 TraceProcessor 套件本身
-/// 對這類服務的已知限制(並非本專案的錯誤，也無法從本專案端修正)，故在此攔截、以 "&lt;無法取得&gt;" 取代，
-/// 避免單一服務的資料缺陷導致整個比對流程中斷。
-/// </summary>
-static string TryGetStartType(Microsoft.Windows.EventTracing.Services.IService service)
-{
-    try
-    {
-        return service.StartType.ToString();
-    }
-    catch (InvalidOperationException)
-    {
-        return "<無法取得>";
-    }
-}
-
-/// <summary>
 /// 前置作業：本專案 QSoft.ETW 的 <see cref="TraceSession"/>（由 <see cref="TraceSessionBuilder"/> 組裝設定）。
 /// 內部以 P/Invoke 直接呼叫 Advapi32 的 StartTraceW/EnableTraceEx2/ControlTraceW 等「ETW Controller API」，
 /// 建立並啟停一個 Kernel+User 混合 Session，將事件即時寫入磁碟成同一份 ETL 檔——這一步只負責「錄製」，
@@ -136,6 +117,7 @@ static async Task<string?> RunTraceSessionCaptureDemo(int durationSeconds)
         .WithConfig(KernelTraceFlags.EVENT_TRACE_FLAG_DPC)
         .WithProvider(TraceSessionBuilder.WmiActivityProviderGuid)
         .WithProvider(TraceSessionBuilder.ServicesProviderGuid)
+        .WithProvider(TraceSessionBuilder.ServicesSvchostProviderGuid)
         .WithProvider(TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
         .WithProvider(TraceSessionBuilder.KernelAcpiProviderGuid)
         .WithProvider(TraceSessionBuilder.KernelPowerProviderGuid)
@@ -242,8 +224,10 @@ static DemoResult_Etl RunEtlFileReaderDemo(string etlFilePath)
     EtlAnalysisResult analysis = result.Analysis!;
 
     Console.WriteLine();
-    Console.WriteLine($"[Result] 程序數: {pendingProcesses.Result.Processes.Count} 個（ProcessRecord 已含 PID、映像檔名、命令列、父程序、存續時間，免自行組裝）");
-    Console.WriteLine($"[Result] 服務數: {pendingServices.Result.Services.Count} 個（ServiceRecord 來自 Microsoft-Windows-Services 的 EventId=105 StatusChange，含 PID/CurrentState/StartType，對應 TraceProcessor 的 IServiceDataSource）");
+    IReadOnlyList<ProcessRecord> processes = pendingProcesses.Result.Processes;
+    Console.WriteLine($"[Result] 程序數: {processes.Count} 個（ProcessRecord 已含 PID、映像檔名、命令列、父程序、存續時間，免自行組裝）");
+    Console.WriteLine($"[Result] 動態服務數: {pendingServices.Result.Services.Count} 個，設定快照數: {pendingServices.Result.Snapshots.Count} 個" +
+        "（完整對應 IServiceDataSource 的 Services 與 Snapshots）");
     foreach (ServiceRecord svc in pendingServices.Result.Services.Take(5))
     {
         Console.WriteLine($"  {svc.ServiceName} ({svc.ImageFileName}): PID={svc.ProcessId?.ToString() ?? "?"} 狀態={svc.CurrentState}");
@@ -391,25 +375,20 @@ static DemoResult_Etl RunEtlFileReaderDemo(string etlFilePath)
     if (memorySnapshots.Count > 0)
     {
         MemoryUtilizationEventInfo lastSnapshot = memorySnapshots[^1];
-        static double ToMb(long pageCount) => pageCount * MemoryUtilizationEventInfo.PageSizeBytes / 1024.0 / 1024.0;
+        static double ToMb(long pageCount) =>
+            pageCount * MemoryUtilizationEventInfo.PageSizeBytes / 1_000_000.0;
 
         Console.WriteLine($"  最後一筆快照 @ {lastSnapshot.Timestamp:HH:mm:ss.fff}：");
-        Console.WriteLine($"    ZeroListSize={ToMb(lastSnapshot.ZeroPageCount):F2} MB, FreeListSize={ToMb(lastSnapshot.FreePageCount):F2} MB");
+        Console.WriteLine($"    ZeroListSize={ToMb(lastSnapshot.ZeroPageCount):F2} MB, FreeListSize={ToMb(lastSnapshot.FreePageCount):F2} MB, InUseListSize={ToMb(lastSnapshot.InUsePageCount):F2} MB");
         Console.WriteLine($"    ModifiedListSize={ToMb(lastSnapshot.ModifiedPageCount):F2} MB, ModifiedNoWriteListSize={ToMb(lastSnapshot.ModifiedNoWritePageCount):F2} MB, BadListSize={ToMb(lastSnapshot.BadPageCount):F2} MB");
-        Console.WriteLine($"    StandbyListSize={ToMb(lastSnapshot.StandbyTotalPageCount):F2} MB");
-        Console.WriteLine($"    RepurposedPageCount(累計計數器，非清單大小，詳見型別文件註解)={ToMb(lastSnapshot.RepurposedTotalPageCount):F2} MB");
+        Console.WriteLine($"    StandbyListSize={ToMb(lastSnapshot.StandbyTotalPageCount):F2} MB, NonSuperfetchStandbyListSize={ToMb(lastSnapshot.NonSuperfetchStandbyPageCount):F2} MB, RepurposedListSize={ToMb(lastSnapshot.RepurposedTotalPageCount):F2} MB");
         Console.WriteLine($"    ModifiedPageFileDataSize={ToMb(lastSnapshot.ModifiedPageFilePageCount):F2} MB, PagedPoolCommitSize={ToMb(lastSnapshot.PagedPoolPageCount):F2} MB, NonPagedPoolSize={ToMb(lastSnapshot.NonPagedPoolPageCount):F2} MB");
         Console.WriteLine($"    MemoryDescriptorListAllocationsSize={ToMb(lastSnapshot.MdlPageCount):F2} MB, CommitSize={ToMb(lastSnapshot.CommitPageCount):F2} MB");
-        Console.WriteLine("    （TraceProcessor 另有 InUseListSize/NonSuperfetchStandbyListSize 兩個推算欄位，本專案未提供對應數值，原因見 MemoryUtilizationEventInfo 文件註解）");
     }
 
     // === 為了讓 RunTraceProcessorDemo 解析同一份 ETL 後可互相驗證，整理出跨兩種實作共用的比對快照 ===
-    var processSnapshots = pendingProcesses.Result.Processes
-        .Select(p => new ProcessSnapshot(p.ProcessId, p.ParentProcessId, p.ImageFileName, p.StartTime, p.EndTime, p.CommandLine))
-        .ToList();
-    var serviceSnapshots = pendingServices.Result.Services
-        .Select(s => new ServiceSnapshot(s.ServiceName, s.ProcessId, s.CurrentState?.ToString() ?? string.Empty, s.StartType?.ToString() ?? string.Empty))
-        .ToList();
+    ServiceDataSnapshot serviceDataSnapshot =
+        DemoResultValidator.ToServiceDataSnapshot(pendingServices.Result);
     var threadSnapshots = threads
         .Select(t => new ThreadSnapshot(
             t.ThreadId,
@@ -435,6 +414,11 @@ static DemoResult_Etl RunEtlFileReaderDemo(string etlFilePath)
         dpcIntervals.Select(dpc => dpc.HandlerModuleName));
     return new DemoResult_Etl(
         stopwatch.Elapsed,
+        result.TraceStartTime,
+        result.TraceEndTime,
+        processes,
+        serviceDataSnapshot,
+        memorySnapshots,
         isrIntervals,
         dpcIntervals);
     //return new DemoResult(
@@ -491,7 +475,8 @@ static DemoResult_Tp RunTraceProcessorDemo(string etlFilePath)
     Console.WriteLine($"程序數: {processes.Count} 個（單一 IProcess 已含 PID、映像檔名、命令列、父程序、存續時間等，免自行組裝）");
 
     IReadOnlyList<IService> services = pendingServices.Result.Services;
-    Console.WriteLine($"服務數: {services.Count} 個（IService 已依 ServiceName 分組，StateChanges 內含每次啟停與所在 PID）");
+    Console.WriteLine($"動態服務數: {services.Count} 個，設定快照數: {pendingServices.Result.Snapshots.Count} 個" +
+        "（IService 已依 ServiceName 分組，並含 Group/StateChanges/Transitions）");
     foreach (IService svc in services.Take(5))
     {
         IServiceStateChange? lastState = svc.StateChanges.Count > 0 ? svc.StateChanges[^1] : null;
@@ -666,27 +651,12 @@ static DemoResult_Tp RunTraceProcessorDemo(string etlFilePath)
         Console.WriteLine($"    StandbyListSize={lastSnapshot.StandbyListSize.TotalMegabytes:F2} MB, NonSuperfetchStandbyListSize={lastSnapshot.NonSuperfetchStandbyListSize.TotalMegabytes:F2} MB, RepurposedListSize={lastSnapshot.RepurposedListSize.TotalMegabytes:F2} MB");
         Console.WriteLine($"    ModifiedPageFileDataSize={lastSnapshot.ModifiedPageFileDataSize.TotalMegabytes:F2} MB, PagedPoolCommitSize={lastSnapshot.PagedPoolCommitSize.TotalMegabytes:F2} MB, NonPagedPoolSize={lastSnapshot.NonPagedPoolSize.TotalMegabytes:F2} MB");
         Console.WriteLine($"    MemoryDescriptorListAllocationsSize={lastSnapshot.MemoryDescriptorListAllocationsSize.TotalMegabytes:F2} MB, CommitSize={lastSnapshot.CommitSize.TotalMegabytes:F2} MB");
-        Console.WriteLine("    （InUseListSize/NonSuperfetchStandbyListSize 是 TraceProcessor 內部推算欄位，MemInfo 事件本身沒有對應的原始欄位可解析，EtlFileReader 端故意不提供這兩項，避免以未經證實的猜測值冒充真實資料）");
-        Console.WriteLine("    （RepurposedListSize 經比對後發現不宜與 EtlFileReader 的 RepurposedTotalPageCount 直接對照：後者是原始事件裡單調遞增的累計計數器，" +
-            "TraceProcessor 疑似對其做了「相鄰快照差值」之類的內部換算才得到這種數十 MB、會隨時間起伏的數值，但確切公式未公開，還原後仍有約 5% 誤差，故不採用）");
     }
 
     // === 為了與 RunEtlFileReaderDemo 解析同一份 ETL 的結果互相驗證，整理出跨兩種實作共用的比對快照 ===
-    var processSnapshots = processes
-        // p.CommandLine 在 TraceProcessor 端對「原始事件本來就沒有 CommandLine 欄位」的程序(實測幾乎都是
-        // 追蹤開始前就已存在、只能靠 DCStart rundown 觀察到的程序，例如 PID 0 Idle / PID 4 System)回傳 null；
-        // EtlFileReader 對同樣情況一律以 GetRawPropertyString 的預設值 string.Empty 表示「無資料」(與
-        // ImageFileName、ThreadRecord.Name 等其餘字串欄位的慣例一致)。故在此以 ?? string.Empty 正規化，
-        // 避免這種「null vs ""」的純表示法差異被誤判成內容不一致。
-        .Select(p => new ProcessSnapshot(p.Id, p.ParentId, p.ImageName, p.CreateTime?.DateTimeOffset.UtcDateTime, p.ExitTime?.DateTimeOffset.UtcDateTime, p.CommandLine ?? string.Empty))
-        .ToList();
-    var serviceSnapshots = services
-        .Select(svc =>
-        {
-            IServiceStateChange? lastState = svc.StateChanges.Count > 0 ? svc.StateChanges[^1] : null;
-            return new ServiceSnapshot(svc.Name, lastState?.ProcessId, lastState?.State.ToString() ?? string.Empty, TryGetStartType(svc));
-        })
-        .ToList();
+    List<ProcessSnapshot> processSnapshots = [.. processes.Select(DemoResultValidator.ToProcessSnapshot)];
+    ServiceDataSnapshot serviceDataSnapshot =
+        DemoResultValidator.ToServiceDataSnapshot(pendingServices.Result);
     var threadSnapshots = threadsTp
         .Select(t => new ThreadSnapshot(
             t.Id,
@@ -713,11 +683,16 @@ static DemoResult_Tp RunTraceProcessorDemo(string etlFilePath)
 
     // TraceProcessor 的 ISR/DPC 物件是依賴 ITraceProcessor 原生資料的 flyweight；
     // 必須在 trace.Dispose() 前複製成純受管快照，不能把介面物件回傳到 using 範圍外。
+    List<MemoryUtilizationSnapshot> memoryUtilizationSnapshots =
+        [.. memorySnapshots.Select(DemoResultValidator.ToMemoryUtilizationSnapshot)];
     List<IsrSnapshot> isrSnapshots = [.. isrIntervals.Select(DemoResultValidator.ToIsrSnapshot)];
     List<DpcSnapshot> dpcSnapshots = [.. dpcIntervals.Select(DemoResultValidator.ToDpcSnapshot)];
 
     return new DemoResult_Tp(
         stopwatch.Elapsed,
+        processSnapshots,
+        serviceDataSnapshot,
+        memoryUtilizationSnapshots,
         isrSnapshots,
         dpcSnapshots
         );

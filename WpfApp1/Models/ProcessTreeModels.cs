@@ -4,7 +4,7 @@ namespace WpfApp1.Models;
 
 public sealed class ProcessTreeNode
 {
-    public ProcessTreeNode(long processRecordId, long processId, long parentProcessId, string imageFileName, string commandLine, string startedAtUtc, string? endedAtUtc)
+    public ProcessTreeNode(long processRecordId, long processId, long parentProcessId, string imageFileName, string commandLine, string? startedAtUtc, string? endedAtUtc)
     {
         ProcessRecordId = processRecordId;
         ProcessId = processId;
@@ -25,7 +25,7 @@ public sealed class ProcessTreeNode
 
     public string CommandLine { get; }
 
-    public string StartedAtUtc { get; }
+    public string? StartedAtUtc { get; }
 
     public string? EndedAtUtc { get; }
 

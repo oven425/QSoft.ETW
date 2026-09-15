@@ -32,11 +32,10 @@ internal sealed class EtlAnalyzer : IEtlAnalyzer
 
         try
         {
-            using DataBase_SQLite db = new();
-            db.Open(Path.ChangeExtension(etlPath, ".db"));
-            SQLiteExport export = new(db);
-            export.Export(new EtlFileReader(), etlPath);
-            
+            string databasePath = Path.ChangeExtension(etlPath, ".db");
+            EtlFileReader reader = new();
+            reader.UseSqliteExport(databasePath);
+            reader.ProcessFile(etlPath);
         }
         catch (OperationCanceledException)
         {

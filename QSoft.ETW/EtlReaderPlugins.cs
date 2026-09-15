@@ -23,6 +23,7 @@ public interface IProcessDataSource
 public interface IServiceDataSource
 {
     IReadOnlyList<ServiceRecord> Services { get; }
+    IReadOnlyList<ServiceSnapshotRecord> Snapshots { get; }
 }
 
 public interface IThreadDataSource
@@ -384,8 +385,7 @@ public sealed class EtlAnalysisPlugin : IEtlReaderPlugin
 
     /// <summary>
     /// 依位址是否落在模組的 [ImageBase, ImageBase+ImageSize) 範圍內比對所屬模組。
-    /// 模組數量通常僅數十至數百筆，線性掃描即可，不需要額外的排序/二分搜尋結構
-    /// (對應 DataBase_SQLite.ResolveCpuProfileSampleModules 的位址分桶手法，這裡改用簡化版本)。
+    /// 模組數量通常僅數十至數百筆，線性掃描即可，不需要額外的排序/二分搜尋結構。
     /// </summary>
     private static bool TryFindModule(List<ModuleInfo> modules, ulong address, DateTime? at, [NotNullWhen(true)] out ModuleInfo? found)
     {
@@ -508,7 +508,13 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
 {
     private readonly Dictionary<uint, ProcessRecord> _activeProcessesByPid = [];
     private readonly Dictionary<uint, List<ModuleInfo>> _modulesByProcessId = [];
+    private readonly HashSet<ModuleInfo> _assignedModules = new(ReferenceEqualityComparer.Instance);
     private readonly List<ProcessRecord> _processes = [];
+    private readonly ProcessRecord _syntheticIdleProcess = new()
+    {
+        ProcessId = 0,
+        ImageFileName = "Idle",
+    };
     private bool _completed;
 
     public IReadOnlyList<ProcessRecord> Processes => _processes;
@@ -520,6 +526,7 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
     {
         _activeProcessesByPid.Clear();
         _modulesByProcessId.Clear();
+        _assignedModules.Clear();
         _processes.Clear();
         _completed = false;
 
@@ -529,7 +536,8 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
         reader.ProcessDCStop += OnProcessDCStop;
         reader.ProcessTerminate += OnProcessTerminate;
         reader.ImageLoad += OnImageLoad;
-        reader.ImageDCStart += OnImageLoad;
+        reader.ImageDCStart += OnImageRundown;
+        reader.ImageDCStop += OnImageRundown;
         reader.ImageUnload += OnImageUnload;
     }
 
@@ -541,7 +549,8 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
         reader.ProcessDCStop -= OnProcessDCStop;
         reader.ProcessTerminate -= OnProcessTerminate;
         reader.ImageLoad -= OnImageLoad;
-        reader.ImageDCStart -= OnImageLoad;
+        reader.ImageDCStart -= OnImageRundown;
+        reader.ImageDCStop -= OnImageRundown;
         reader.ImageUnload -= OnImageUnload;
     }
 
@@ -549,7 +558,42 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
     {
         // 刻意不強制收尾 EndTime(見類別文件註解第 2 點)，追蹤結束時仍存活的程序維持 EndTime=null，
         // 比對 TraceProcessor 的 IProcess.ExitTime 對仍存活程序也是 null 的作法。
+        foreach (ProcessRecord process in _processes)
+        {
+            process.Parent = FindParent(process);
+        }
+
+        foreach ((uint processId, List<ModuleInfo> modules) in _modulesByProcessId)
+        {
+            foreach (ModuleInfo module in modules)
+            {
+                if (_assignedModules.Contains(module))
+                {
+                    continue;
+                }
+
+                ProcessRecord? owner = FindProcessForModule(processId, module);
+                if (owner is not null)
+                {
+                    owner.Modules.Add(module);
+                    _assignedModules.Add(module);
+                }
+            }
+        }
+
         _completed = true;
+    }
+
+    internal ProcessRecord? FindProcessAt(uint processId, DateTime timestamp)
+    {
+        ProcessRecord? process = _processes
+            .Where(process =>
+                process.ProcessId == processId &&
+                (process.StartTime is null || process.StartTime <= timestamp) &&
+                (process.EndTime is null || timestamp <= process.EndTime))
+            .OrderByDescending(process => process.StartTime ?? DateTime.MinValue)
+            .FirstOrDefault();
+        return process ?? (processId == 0 ? _syntheticIdleProcess : null);
     }
 
     private void OnProcessStart(in ProcessInfo info) => AddProcess(in info, info.TimeStamp);
@@ -560,13 +604,6 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
     {
         if (_activeProcessesByPid.ContainsKey(info.ProcessId))
         {
-            // 同一個「尚未觀察到 Stop/DCStop」的 PID 又收到一次 Start/DCStart。
-            // 真正的 PID 重用一定會先看到 Stop/Terminate/DCStop(見 CloseProcess/OnProcessDCStop，關閉時會把該 PID 移出
-            // _activeProcessesByPid)，因此能走到這裡代表並非重用，而是 Kernel Process Provider
-            // 剛啟用、Rundown 掃描與同一行程的「即時 Start」兩者競速下對同一個仍存活的行程回報了兩次
-            // (實測：短時間擷取時偶發一個 PID 產生 2 筆 ProcessStart)。TraceProcessor 對這種情況仍視為同一個
-            // IProcess，故比照其行為忽略這筆重複事件、保留第一筆(較早、通常也更準確)記錄，
-            // 避免產生 TraceProcessor 沒有的多餘 ProcessRecord。
             return;
         }
 
@@ -574,6 +611,13 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
         {
             ProcessId = info.ProcessId,
             ParentProcessId = info.ParentId,
+            SessionId = info.SessionId,
+            ObjectAddress = info.UniqueProcessKey.ToUInt64(),
+            DirectoryTableBase = info.DirectoryTableBase.ToUInt64(),
+            Flags = info.Flags,
+            UserSid = info.UserSID,
+            PackageFullName = info.PackageFullName,
+            ApplicationId = info.ApplicationId,
             StartTime = startTime,
             ImageFileName = info.ImageFileName,
             CommandLine = info.CommandLine,
@@ -583,7 +627,8 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
         _processes.Add(record);
     }
 
-    private void OnProcessStop(in ProcessInfo info) => CloseProcess(info.ProcessId, info.TimeStamp);
+    private void OnProcessStop(in ProcessInfo info) =>
+        CloseProcess(info.ProcessId, info.TimeStamp, info.ExitStatus);
 
     private void OnProcessTerminate(in ProcessTerminateInfo info) => CloseProcess(info.ProcessId, info.TimeStamp);
 
@@ -595,44 +640,155 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
         }
     }
 
-    private void CloseProcess(uint processId, DateTime endTime)
+    private void CloseProcess(uint processId, DateTime endTime, int? exitCode = null)
     {
         if (_activeProcessesByPid.TryGetValue(processId, out ProcessRecord? record))
         {
             record.EndTime = endTime;
+            record.ExitCode = exitCode;
             _activeProcessesByPid.Remove(processId);
+            return;
+        }
+
+        if (exitCode is int value)
+        {
+            ProcessRecord? terminatedRecord = _processes.LastOrDefault(process =>
+                process.ProcessId == processId &&
+                process.ExitCode is null &&
+                process.EndTime is not null);
+            if (terminatedRecord is not null)
+            {
+                terminatedRecord.EndTime = endTime;
+                terminatedRecord.ExitCode = value;
+            }
         }
     }
 
-    private void OnImageLoad(in ImageLoadEventInfo info)
+    private ProcessRecord? FindParent(ProcessRecord child)
+    {
+        if (child.ParentProcessId == 0 || child.ParentProcessId == child.ProcessId)
+        {
+            return null;
+        }
+
+        IEnumerable<ProcessRecord> candidates = _processes.Where(process =>
+            process.ProcessId == child.ParentProcessId &&
+            !ReferenceEquals(process, child));
+
+        if (child.StartTime is DateTime childStartTime)
+        {
+            candidates = candidates.Where(parent =>
+                (parent.StartTime is null || parent.StartTime <= childStartTime) &&
+                (parent.EndTime is null || childStartTime <= parent.EndTime));
+        }
+        else
+        {
+            candidates = candidates.Where(parent => parent.StartTime is null);
+        }
+
+        return candidates
+            .OrderByDescending(parent => parent.StartTime ?? DateTime.MinValue)
+            .FirstOrDefault();
+    }
+
+    private ProcessRecord? FindProcessForModule(uint processId, ModuleInfo module)
+    {
+        List<ProcessRecord> candidates = [.. _processes.Where(process =>
+            process.ProcessId == processId)];
+
+        if (module.IsRundown)
+        {
+            return candidates.FirstOrDefault(process => process.StartTime is null);
+        }
+
+        ProcessRecord? owner = candidates
+            .Where(process =>
+                (process.StartTime is null || process.StartTime <= module.LoadTime) &&
+                (process.EndTime is null || module.LoadTime <= process.EndTime))
+            .OrderByDescending(process => process.StartTime ?? DateTime.MinValue)
+            .FirstOrDefault();
+        if (owner is not null)
+        {
+            return owner;
+        }
+
+        return candidates
+            .OrderBy(process => GetDistanceFromLifetime(process, module.LoadTime))
+            .FirstOrDefault();
+    }
+
+    private static TimeSpan GetDistanceFromLifetime(ProcessRecord process, DateTime timestamp)
+    {
+        if (process.StartTime is DateTime startTime && timestamp < startTime)
+        {
+            return startTime - timestamp;
+        }
+
+        if (process.EndTime is DateTime endTime && timestamp > endTime)
+        {
+            return timestamp - endTime;
+        }
+
+        return TimeSpan.Zero;
+    }
+
+    private void OnImageLoad(in ImageLoadEventInfo info) => AddImage(in info, isRundown: false);
+
+    private void OnImageRundown(in ImageLoadEventInfo info) => AddImage(in info, isRundown: true);
+
+    private void AddImage(in ImageLoadEventInfo info, bool isRundown)
     {
         if (info.ImageBase is not ulong imageBase || info.ImageSize is not ulong imageSize || imageSize == 0)
         {
             return;
         }
 
-        if (!_activeProcessesByPid.TryGetValue(info.ProcessId, out ProcessRecord? owner))
+        uint processId = NormalizeImageProcessId(info.ProcessId);
+        if (!_modulesByProcessId.TryGetValue(processId, out List<ModuleInfo>? modules))
         {
-            return;
+            modules = [];
+            _modulesByProcessId[processId] = modules;
+        }
+
+        string fileName = info.FileName;
+        if (isRundown)
+        {
+            ModuleInfo? existing = modules.LastOrDefault(module =>
+                module.UnloadTime is null &&
+                module.ImageBase == imageBase &&
+                module.ImageSize == imageSize &&
+                string.Equals(module.FileName, fileName, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null)
+            {
+                bool hasOwner = _activeProcessesByPid.TryGetValue(processId, out ProcessRecord? existingOwner);
+                if (hasOwner && _assignedModules.Add(existing))
+                {
+                    existingOwner!.Modules.Add(existing);
+                }
+                return;
+            }
         }
 
         var module = new ModuleInfo
         {
-            ProcessId = info.ProcessId,
+            ProcessId = processId,
             ImageBase = imageBase,
             ImageSize = imageSize,
             LoadTime = info.Timestamp,
             FileName = info.FileName,
+            DefaultBase = info.DefaultBase,
+            ImageCheckSum = info.ImageCheckSum,
+            TimeDateStamp = info.TimeDateStamp,
+            LoadingThreadId = info.ThreadId,
+            IsRundown = isRundown,
         };
 
-        if (!_modulesByProcessId.TryGetValue(info.ProcessId, out List<ModuleInfo>? modules))
-        {
-            modules = [];
-            _modulesByProcessId[info.ProcessId] = modules;
-        }
-
         modules.Add(module);
-        owner.Modules.Add(module);
+        if (_activeProcessesByPid.TryGetValue(processId, out ProcessRecord? owner))
+        {
+            owner.Modules.Add(module);
+            _assignedModules.Add(module);
+        }
     }
 
     private void OnImageUnload(in ImageLoadEventInfo info)
@@ -642,18 +798,24 @@ internal sealed class ProcessDataSourceCollector : IEtlReaderPlugin, IProcessDat
             return;
         }
 
-        if (_modulesByProcessId.TryGetValue(info.ProcessId, out List<ModuleInfo>? modules))
+        uint processId = NormalizeImageProcessId(info.ProcessId);
+        if (_modulesByProcessId.TryGetValue(processId, out List<ModuleInfo>? modules))
         {
             for (int i = modules.Count - 1; i >= 0; i--)
             {
                 if (modules[i].ImageBase == imageBase && modules[i].UnloadTime is null)
                 {
                     modules[i].UnloadTime = info.Timestamp;
+                    modules[i].UnloadingThreadId = info.ThreadId;
                     break;
                 }
             }
         }
     }
+
+    private static uint NormalizeImageProcessId(uint processId) =>
+        processId == uint.MaxValue ? 0 : processId;
+
 }
 
 public static class ProcessDataSourceExtensions
@@ -669,10 +831,19 @@ public static class ProcessDataSourceExtensions
 internal sealed class ServiceDataSourceCollector : IEtlReaderPlugin, IServiceDataSource, IPendingResult<IServiceDataSource>
 {
     private readonly Dictionary<string, ServiceRecord> _servicesByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<uint, ServiceGroupRecord> _activeGroupsByThreadId = [];
+    private readonly Dictionary<string, Stack<DateTime>> _serviceMainStartsByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<ServiceMainCallTimeRange>> _serviceMainRangesByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<ServiceSnapshotRecord> _snapshots = [];
     private List<ServiceRecord> _services = [];
+    private ProcessDataSourceCollector? _processCollector;
+    private ThreadDataSourceCollector? _threadCollector;
+    private bool _ownsProcessCollector;
+    private bool _ownsThreadCollector;
     private bool _completed;
 
     public IReadOnlyList<ServiceRecord> Services => _services;
+    public IReadOnlyList<ServiceSnapshotRecord> Snapshots => _snapshots;
 
     public IServiceDataSource Result =>
         _completed ? this : throw new InvalidOperationException("尚未呼叫 ProcessFile()，無法取得 UseServices() 的解析結果。");
@@ -680,15 +851,75 @@ internal sealed class ServiceDataSourceCollector : IEtlReaderPlugin, IServiceDat
     public void Attach(EtlFileReader reader)
     {
         _servicesByName.Clear();
+        _activeGroupsByThreadId.Clear();
+        _serviceMainStartsByName.Clear();
+        _serviceMainRangesByName.Clear();
+        _snapshots.Clear();
         _services = [];
         _completed = false;
+
+        _processCollector = reader.Plugins
+            .OfType<ProcessDataSourceCollector>()
+            .FirstOrDefault();
+        _ownsProcessCollector = _processCollector is null;
+        if (_ownsProcessCollector)
+        {
+            _processCollector = new ProcessDataSourceCollector();
+            _processCollector.Attach(reader);
+        }
+
+        _threadCollector = reader.Plugins
+            .OfType<ThreadDataSourceCollector>()
+            .FirstOrDefault();
+        _ownsThreadCollector = _threadCollector is null;
+        if (_ownsThreadCollector)
+        {
+            _threadCollector = new ThreadDataSourceCollector();
+            _threadCollector.Attach(reader);
+        }
+
         reader.ServiceStatusChange += OnServiceStatusChange;
+        reader.ServiceGroup += OnServiceGroup;
+        reader.ServiceMain += OnServiceMain;
+        reader.ServiceSnapshot += OnServiceSnapshot;
     }
 
-    public void Detach(EtlFileReader reader) => reader.ServiceStatusChange -= OnServiceStatusChange;
+    public void Detach(EtlFileReader reader)
+    {
+        reader.ServiceStatusChange -= OnServiceStatusChange;
+        reader.ServiceGroup -= OnServiceGroup;
+        reader.ServiceMain -= OnServiceMain;
+        reader.ServiceSnapshot -= OnServiceSnapshot;
+
+        if (_ownsProcessCollector)
+        {
+            _processCollector!.Detach(reader);
+        }
+        if (_ownsThreadCollector)
+        {
+            _threadCollector!.Detach(reader);
+        }
+    }
 
     public void Complete(EtlReadResult result)
     {
+        if (_ownsProcessCollector)
+        {
+            _processCollector!.Complete(result);
+        }
+        if (_ownsThreadCollector)
+        {
+            _threadCollector!.Complete(result);
+        }
+
+        foreach (ServiceRecord service in _servicesByName.Values)
+        {
+            BuildTransitions(service);
+            ResolveNavigation(service);
+            AssignServiceMainRanges(service);
+            service.StartType = ResolveStartType(service);
+        }
+
         _services = [.. _servicesByName.Values];
         _completed = true;
     }
@@ -706,15 +937,230 @@ internal sealed class ServiceDataSourceCollector : IEtlReaderPlugin, IServiceDat
             _servicesByName[info.ServiceName] = record;
         }
 
-        var state = (ServiceState)info.CurrentState;
-        var startType = (ServiceStartType)info.StartType;
+            ServiceState state = MapServiceState(info.CurrentState);
+            var stateChange = new ServiceStateChangeRecord
+            {
+                Timestamp = info.Timestamp,
+                State = state,
+                ProcessId = info.ProcessId,
+                ImageName = info.ImageName,
+                ServiceManagementThreadId = info.ServiceManagementThreadId,
+                ExecutionPhase = info.ExecutionPhase,
+                RawStartType = info.StartType,
+            };
 
-        record.ImageFileName = info.ImageName;
-        record.ProcessId = info.ProcessId;
-        record.CurrentState = state;
-        record.StartType = startType;
-        record.StateChanges.Add(new ServiceStateChangeRecord(info.Timestamp, info.ProcessId, state, startType, info.ExecutionPhase));
+            record.ImageFileName = info.ImageName;
+            record.ProcessId = info.ProcessId;
+            record.CurrentState = state;
+            record.StateChanges.Add(stateChange);
+
+            if (_activeGroupsByThreadId.TryGetValue(info.ServiceManagementThreadId, out ServiceGroupRecord? group))
+            {
+                record.Group ??= group;
+        }
     }
+
+    private void OnServiceGroup(in ServiceGroupEventInfo info)
+        {
+            if (info.IsStart)
+            {
+                _activeGroupsByThreadId[info.ThreadId] = new ServiceGroupRecord
+                {
+                    Name = info.GroupName,
+                    ThreadId = info.ThreadId,
+                    StartTime = info.Timestamp,
+                };
+                return;
+            }
+
+            if (_activeGroupsByThreadId.Remove(info.ThreadId, out ServiceGroupRecord? group))
+            {
+                group.StopTime = info.Timestamp;
+            }
+        }
+
+    private void OnServiceMain(in ServiceMainEventInfo info)
+        {
+            if (string.IsNullOrEmpty(info.ServiceName))
+            {
+                return;
+            }
+
+            if (info.IsStart)
+            {
+                if (!_serviceMainStartsByName.TryGetValue(info.ServiceName, out Stack<DateTime>? starts))
+                {
+                    starts = [];
+                    _serviceMainStartsByName[info.ServiceName] = starts;
+                }
+                starts.Push(info.Timestamp);
+                return;
+            }
+
+            if (!_serviceMainStartsByName.TryGetValue(info.ServiceName, out Stack<DateTime>? pendingStarts) ||
+                pendingStarts.Count == 0)
+            {
+                return;
+            }
+
+            DateTime startTime = pendingStarts.Pop();
+            if (!_serviceMainRangesByName.TryGetValue(info.ServiceName, out List<ServiceMainCallTimeRange>? ranges))
+            {
+                ranges = [];
+                _serviceMainRangesByName[info.ServiceName] = ranges;
+            }
+            ranges.Add(new ServiceMainCallTimeRange { StartTime = startTime, EndTime = info.Timestamp });
+        }
+
+    private void OnServiceSnapshot(in ServiceSnapshotEventInfo info)
+        {
+            _snapshots.Add(new ServiceSnapshotRecord
+            {
+                Id = unchecked((int)info.SubProcessTag),
+                Name = info.ServiceName,
+                DisplayName = info.DisplayName,
+                GroupName = info.LoadOrderGroup,
+                ProcessId = unchecked((int)info.ProcessId),
+                ProcessName = info.ProcessName,
+                State = MapServiceState(info.CurrentState),
+            });
+        }
+
+    private static void BuildTransitions(ServiceRecord service)
+        {
+            ServiceTransitionRecord? active = null;
+            foreach (ServiceStateChangeRecord stateChange in service.StateChanges)
+            {
+                ServiceTransitionType? transitionType = stateChange.State switch
+                {
+                    ServiceState.StartPending => ServiceTransitionType.Start,
+                    ServiceState.StopPending => ServiceTransitionType.Stop,
+                    _ => null,
+                };
+
+                if (active is null)
+                {
+                    if (transitionType is ServiceTransitionType type)
+                    {
+                        active = new ServiceTransitionRecord
+                        {
+                            TransitionType = type,
+                            StartEvent = stateChange,
+                        };
+                    }
+                    continue;
+                }
+
+                ServiceState pendingState = active.TransitionType == ServiceTransitionType.Start
+                    ? ServiceState.StartPending
+                    : ServiceState.StopPending;
+                ServiceState completedState = active.TransitionType == ServiceTransitionType.Start
+                    ? ServiceState.Running
+                    : ServiceState.Stopped;
+
+                if (stateChange.State == pendingState)
+                {
+                    active.Checkpoints.Add(stateChange);
+                }
+                else if (stateChange.State == completedState)
+                {
+                    active.EndEvent = stateChange;
+                    service.Transitions.Add(active);
+                    active = null;
+                }
+                else if (transitionType is ServiceTransitionType nextType)
+                {
+                    service.Transitions.Add(active);
+                    active = new ServiceTransitionRecord
+                    {
+                        TransitionType = nextType,
+                        StartEvent = stateChange,
+                    };
+                }
+            }
+
+            if (active is not null)
+            {
+                service.Transitions.Add(active);
+            }
+        }
+
+    private void ResolveNavigation(ServiceRecord service)
+        {
+            foreach (ServiceStateChangeRecord stateChange in service.StateChanges)
+            {
+                stateChange.Process = _processCollector!.FindProcessAt(stateChange.ProcessId, stateChange.Timestamp);
+                stateChange.ServiceManagementThread =
+                    _threadCollector!.FindThreadAt(stateChange.ServiceManagementThreadId, stateChange.Timestamp);
+                if (stateChange.ServiceManagementThread is ThreadRecord managementThread)
+                {
+                    stateChange.ServiceManagementProcess =
+                        _processCollector.FindProcessAt(managementThread.ProcessId, stateChange.Timestamp);
+                }
+            }
+        }
+
+    private void AssignServiceMainRanges(ServiceRecord service)
+        {
+            if (!_serviceMainRangesByName.TryGetValue(service.ServiceName, out List<ServiceMainCallTimeRange>? ranges))
+            {
+                return;
+            }
+
+            foreach (ServiceMainCallTimeRange range in ranges.OrderBy(item => item.StartTime))
+            {
+                ServiceTransitionRecord? transition = service.Transitions
+                    .Where(item =>
+                        item.TransitionType == ServiceTransitionType.Start &&
+                        item.ServiceMainCallTimeRange is null &&
+                        item.StartEvent.Timestamp <= range.StartTime)
+                    .OrderByDescending(item => item.StartEvent.Timestamp)
+                    .FirstOrDefault();
+                if (transition is not null)
+                {
+                    transition.ServiceMainCallTimeRange = range;
+                }
+            }
+        }
+
+    private static ServiceStartType? ResolveStartType(ServiceRecord service)
+        {
+            uint rawStartType = service.StateChanges.Count == 0
+                ? uint.MaxValue
+                : service.StateChanges[^1].RawStartType;
+            if (rawStartType == 3)
+            {
+                return ServiceStartType.Demand;
+            }
+            if (rawStartType != 2)
+            {
+                return ServiceStartType.Unknown;
+            }
+
+            ServiceTransitionRecord? firstStart = service.Transitions
+                .FirstOrDefault(transition => transition.TransitionType == ServiceTransitionType.Start);
+            if (firstStart is null)
+            {
+                // TraceProcessor 1.12.10 在這個情況會因內部空 flyweight list 拋出 InvalidOperationException。
+                return null;
+            }
+
+            return firstStart.StartEvent.ExecutionPhase == 2
+                ? ServiceStartType.DelayedAuto
+                : ServiceStartType.Auto;
+        }
+
+    private static ServiceState MapServiceState(uint rawState) => rawState switch
+        {
+            1 => ServiceState.Stopped,
+            2 => ServiceState.StartPending,
+            3 => ServiceState.StopPending,
+            4 => ServiceState.Running,
+            5 => ServiceState.ContinuePending,
+            6 => ServiceState.PausePending,
+            7 => ServiceState.Paused,
+            _ => throw new InvalidDataException($"無效的 SERVICE_STATUS 狀態值：{rawState}。"),
+        };
 }
 
 public static class ServiceDataSourceExtensions
@@ -789,6 +1235,15 @@ internal sealed class ThreadDataSourceCollector : IEtlReaderPlugin, IThreadDataS
 
         _completed = true;
     }
+
+    internal ThreadRecord? FindThreadAt(uint threadId, DateTime timestamp) =>
+        _threads
+            .Where(thread =>
+                thread.ThreadId == threadId &&
+                (thread.CreateTime is null || thread.CreateTime <= timestamp) &&
+                (thread.ExitTime is null || timestamp <= thread.ExitTime))
+            .OrderByDescending(thread => thread.CreateTime ?? DateTime.MinValue)
+            .FirstOrDefault();
 
     private bool TryResolveModule(uint processId, ulong address, DateTime? at, [NotNullWhen(true)] out ModuleInfo? found)
     {
@@ -1091,6 +1546,7 @@ public static class EnergyMeterDataSourceExtensions
 internal sealed class MemoryUtilizationDataSourceCollector : IEtlReaderPlugin, IMemoryUtilizationDataSource, IPendingResult<IMemoryUtilizationDataSource>
 {
     private readonly List<MemoryUtilizationEventInfo> _snapshots = [];
+    private long[]? _previousRepurposedPageCounts;
     private bool _completed;
 
     public IReadOnlyList<MemoryUtilizationEventInfo> Snapshots => _snapshots;
@@ -1101,15 +1557,52 @@ internal sealed class MemoryUtilizationDataSourceCollector : IEtlReaderPlugin, I
     public void Attach(EtlFileReader reader)
     {
         _snapshots.Clear();
+        _previousRepurposedPageCounts = null;
         _completed = false;
         reader.MemoryUtilization += OnMemoryUtilization;
     }
 
     public void Detach(EtlFileReader reader) => reader.MemoryUtilization -= OnMemoryUtilization;
 
-    public void Complete(EtlReadResult result) => _completed = true;
+    public void Complete(EtlReadResult result)
+    {
+        if (result.UsableMemorySizeBytes > 0 && result.MemoryPageSizeBytes > 0)
+        {
+            long totalPhysicalPageCount = checked(
+                (long)(result.UsableMemorySizeBytes / result.MemoryPageSizeBytes));
+            foreach (MemoryUtilizationEventInfo snapshot in _snapshots)
+            {
+                long unavailablePageCount =
+                    snapshot.ZeroPageCount +
+                    snapshot.FreePageCount +
+                    snapshot.ModifiedPageCount +
+                    snapshot.ModifiedNoWritePageCount +
+                    snapshot.BadPageCount +
+                    snapshot.StandbyTotalPageCount;
+                snapshot.InUsePageCount = Math.Max(0, totalPhysicalPageCount - unavailablePageCount);
+            }
+        }
 
-    private void OnMemoryUtilization(in MemoryUtilizationEventInfo data) => _snapshots.Add(data);
+        _completed = true;
+    }
+
+    private void OnMemoryUtilization(in MemoryUtilizationEventInfo data)
+    {
+        IReadOnlyList<long> current = data.RepurposedPriorityPageCounts;
+        long[] deltas = new long[current.Count];
+        if (_previousRepurposedPageCounts is not null)
+        {
+            int count = Math.Min(current.Count, _previousRepurposedPageCounts.Length);
+            for (int index = 0; index < count; index++)
+            {
+                deltas[index] = Math.Max(0, current[index] - _previousRepurposedPageCounts[index]);
+            }
+        }
+
+        data.RepurposedSubListPageCounts = deltas;
+        _previousRepurposedPageCounts = [.. current];
+        _snapshots.Add(data);
+    }
 }
 
 /// <summary>
@@ -1127,4 +1620,3 @@ public static class MemoryUtilizationDataSourceExtensions
         return collector;
     }
 }
-

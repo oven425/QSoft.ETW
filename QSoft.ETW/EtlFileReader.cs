@@ -346,9 +346,17 @@ internal sealed class CachedSchema
 
 public sealed class EtlReadResult
 {
+    public string SourceFilePath { get; internal set; } = string.Empty;
     public DateTime? TraceStartTime { get; set; }
     public DateTime? TraceEndTime { get; set; }
     public uint ProcessorCount { get; set; }
+    /// <summary>
+    /// 作業系統可用的實體記憶體總位元組數，取自 NT Kernel Logger 自動產生的
+    /// SystemConfig CPU 事件；未包含該事件時為 0。
+    /// </summary>
+    public ulong UsableMemorySizeBytes { get; set; }
+    /// <summary>SystemConfig CPU 事件記錄的系統分頁大小；未包含該事件時為 0。</summary>
+    public uint MemoryPageSizeBytes { get; set; }
     public uint BuffersLost { get; set; }
     public uint EventsLost { get; set; }
     /// <summary>QueryPerformanceCounter 頻率(ticks/秒),取自 ETL 檔頭(TRACE_LOGFILE_HEADER.PerfFreq),
@@ -495,6 +503,15 @@ public sealed class ProcessRecord
 {
     public required uint ProcessId { get; init; }
     public uint ParentProcessId { get; init; }
+    public uint SessionId { get; init; }
+    public ulong ObjectAddress { get; init; }
+    public ulong DirectoryTableBase { get; init; }
+    public uint Flags { get; init; }
+    public int? ExitCode { get; set; }
+    public string UserSid { get; init; } = string.Empty;
+    public string PackageFullName { get; init; } = string.Empty;
+    public string ApplicationId { get; init; } = string.Empty;
+    public ProcessRecord? Parent { get; internal set; }
 
     /// <summary>
     /// 程序建立時間。僅在追蹤期間內觀察到真正的 Start(而非 DCStart/rundown)時才會有值；
@@ -511,40 +528,103 @@ public sealed class ProcessRecord
     /// 強制對所有仍存活的程序補上追蹤結束時間戳記，導致與 TraceProcessor 的 IProcess.ExitTime 不符，已修正)。
     /// </summary>
     public DateTime? EndTime { get; set; }
+    public TimeSpan? Duration =>
+        StartTime is DateTime startTime && EndTime is DateTime endTime
+            ? endTime - startTime
+            : null;
     public string ImageFileName { get; init; } = string.Empty;
     public string CommandLine { get; init; } = string.Empty;
     public List<ModuleInfo> Modules { get; } = [];
 }
 
-/// <summary>對應 SERVICE_STATUS.dwCurrentState(winsvc.h),由 Microsoft-Windows-Services EventId=105 的 CurrentState 欄位轉換而來。</summary>
+/// <summary>
+/// 對應 TraceProcessor 的 ServiceState。Microsoft-Windows-Services EventId=105 與
+/// SystemConfig/Services 事件使用 SERVICE_STATUS 的原始值 1~7，解析時會轉成此處的 0~6。
+/// </summary>
 public enum ServiceState : uint
 {
-    Stopped = 1,
-    StartPending = 2,
-    StopPending = 3,
-    Running = 4,
-    ContinuePending = 5,
-    PausePending = 6,
-    Paused = 7,
+    Stopped = 0,
+    StartPending = 1,
+    StopPending = 2,
+    Running = 3,
+    ContinuePending = 4,
+    PausePending = 5,
+    Paused = 6,
 }
 
-/// <summary>對應 QUERY_SERVICE_CONFIG.dwStartType(winsvc.h),由 Microsoft-Windows-Services EventId=105 的 StartType 欄位轉換而來。</summary>
+/// <summary>
+/// 對應 TraceProcessor 的 ServiceStartType。EventId=105 的原始 SCM StartType 只有
+/// Auto(2)/Demand(3)會直接參與映射；Auto 再依第一次 start transition 的 ExecutionPhase
+/// 區分 Auto 與 DelayedAuto，其餘原始值對應 Unknown。
+/// </summary>
 public enum ServiceStartType : uint
 {
-    BootStart = 0,
-    SystemStart = 1,
-    AutoStart = 2,
-    DemandStart = 3,
-    Disabled = 4,
+    Unknown = 0,
+    Auto = 1,
+    DelayedAuto = 2,
+    Demand = 3,
 }
 
-/// <summary>單一次服務狀態變化紀錄,對應 TraceProcessor 的 IServiceStateChange。</summary>
-public readonly record struct ServiceStateChangeRecord(DateTime Timestamp, uint ProcessId, ServiceState State, ServiceStartType StartType, uint ExecutionPhase);
+public enum ServiceTransitionType
+{
+    Start,
+    Stop,
+}
+
+/// <summary>對應 TraceProcessor 的 IServiceGroup。</summary>
+public sealed class ServiceGroupRecord
+{
+    public required string Name { get; init; }
+    public required uint ThreadId { get; init; }
+    public DateTime? StartTime { get; init; }
+    public DateTime? StopTime { get; internal set; }
+    public TimeSpan? Duration =>
+        StartTime is DateTime start && StopTime is DateTime stop ? stop - start : null;
+}
+
+/// <summary>單一次服務狀態變化紀錄，對應 TraceProcessor 的 IServiceStateChange。</summary>
+public sealed class ServiceStateChangeRecord
+{
+    public required DateTime Timestamp { get; init; }
+    public required ServiceState State { get; init; }
+    public required uint ProcessId { get; init; }
+    public required string ImageName { get; init; }
+    public required uint ServiceManagementThreadId { get; init; }
+    public ProcessRecord? Process { get; internal set; }
+    public ThreadRecord? ServiceManagementThread { get; internal set; }
+    public ProcessRecord? ServiceManagementProcess { get; internal set; }
+
+    /// <summary>EventId=105 的原始 ExecutionPhase；TraceProcessor 僅間接使用它判斷 DelayedAuto。</summary>
+    public required uint ExecutionPhase { get; init; }
+
+    /// <summary>EventId=105 的原始 SCM StartType；TraceProcessor 的 IServiceStateChange 不直接公開此欄位。</summary>
+    public required uint RawStartType { get; init; }
+}
+
+/// <summary>對應 TraceProcessor 的 IServiceTransition.ServiceMainCallTimeRange。</summary>
+public sealed class ServiceMainCallTimeRange
+{
+    public required DateTime StartTime { get; init; }
+    public required DateTime EndTime { get; init; }
+    public TimeSpan Duration => EndTime - StartTime;
+}
+
+/// <summary>對應 TraceProcessor 的 IServiceTransition。</summary>
+public sealed class ServiceTransitionRecord
+{
+    public required ServiceTransitionType TransitionType { get; init; }
+    public required ServiceStateChangeRecord StartEvent { get; init; }
+    public ServiceStateChangeRecord? EndEvent { get; internal set; }
+    public List<ServiceStateChangeRecord> Checkpoints { get; } = [];
+    public ServiceMainCallTimeRange? ServiceMainCallTimeRange { get; internal set; }
+}
 
 /// <summary>單一服務的存續期間彙總資訊,對應 TraceProcessor 的 IService,由內建關聯引擎於解析過程中依 ServiceName 建立與更新。</summary>
 public sealed class ServiceRecord
 {
     public required string ServiceName { get; init; }
+    public string Name => ServiceName;
+    public ServiceGroupRecord? Group { get; internal set; }
     public string ImageFileName { get; set; } = string.Empty;
     /// <summary>
     /// 最近一次狀態變化回報的所在 ProcessId(服務可能因 svchost 共用行程而在不同啟動間換過 PID)。
@@ -556,6 +636,19 @@ public sealed class ServiceRecord
     public ServiceState? CurrentState { get; set; }
     public ServiceStartType? StartType { get; set; }
     public List<ServiceStateChangeRecord> StateChanges { get; } = [];
+    public List<ServiceTransitionRecord> Transitions { get; } = [];
+}
+
+/// <summary>對應 TraceProcessor 的 IServiceSnapshot，來源為 SystemConfig/Services rundown。</summary>
+public sealed class ServiceSnapshotRecord
+{
+    public required int Id { get; init; }
+    public required string Name { get; init; }
+    public required string DisplayName { get; init; }
+    public required string GroupName { get; init; }
+    public required int ProcessId { get; init; }
+    public required string ProcessName { get; init; }
+    public required ServiceState State { get; init; }
 }
 
 /// <summary>
@@ -878,19 +971,10 @@ public sealed class DeferredProcedureCallInterval
 /// (TdhGetPropertySize/TdhGetProperty)驗證,UserDataLength 209 bytes = 1(PriorityLevels)+5×8(單一分頁數
 /// 欄位)+8×8(StandbyPriorityPageCounts)+8×8(RepurposedPriorityPageCounts)+5×8(其餘單一分頁數欄位)。
 ///
-/// 注意:TraceProcessor 的 IMemoryUtilizationSnapshot 另有 InUseListSize 與 NonSuperfetchStandbyListSize
-/// 兩個欄位,本類別未提供對應欄位——因為這兩者並非本事件的原始欄位,TraceProcessor 內部實際計算方式並未公開,
-/// 為避免以未經證實的猜測值冒充真實資料,刻意省略(比較 demo 中會保留 TraceProcessor 這兩欄的輸出,但不與
-/// EtlFileReader 端做比較)。
-///
-/// 另一項實測比對後發現的重要落差:<see cref="RepurposedPriorityPageCounts"/>/<see cref="RepurposedTotalPageCount"/>
-/// 雖然欄位名稱與數值皆已用 TdhGetProperty 逐項驗證無誤(確認是 MemInfo 事件裡確實存在、名為 RepurposedPageCounts
-/// 的原始欄位),但實測發現其語意是「自追蹤開始(或開機)以來,依優先權累計的『已重新用途化(repurposed)分頁數』
-/// 計數器」——單調遞增,量級可達數十萬頁(數百 GB 級)，而非一個有界的「目前清單大小」。這與 TraceProcessor 的
-/// RepurposedListSize/RepurposedSubListSizes(數值通常僅數十 MB、且會隨時間增減)明顯是不同的度量;實測交叉比對
-/// 顯示 TraceProcessor 疑似是取「相鄰兩次快照間的差值」等內部換算方式呈現,但確切演算法未公開,嘗試還原後仍有
-/// 約 5% 誤差,故不冒然採用可能有誤的還原公式。因此 RepurposedTotalPageCount 不宣稱等同 RepurposedListSize，
-/// 若需要「repurposed 速率」這類指標,請自行對連續快照的 RepurposedTotalPageCount 取差值,並理解這只是近似值。
+/// <see cref="RepurposedPriorityPageCounts"/> 是 MemInfo 事件中的單調累計計數器；
+/// <see cref="RepurposedSubListPageCounts"/> 則是相鄰快照的逐優先權差值，第一筆為 0，
+/// 對應 TraceProcessor 的 RepurposedSubListSizes。<see cref="InUsePageCount"/> 由 ETL 的
+/// SystemConfig CPU 事件 MemSize 總頁數扣除 Zero/Free/Modified/ModifiedNoWrite/Bad/Standby 清單計算。
 /// </summary>
 public sealed class MemoryUtilizationEventInfo
 {
@@ -916,11 +1000,21 @@ public sealed class MemoryUtilizationEventInfo
     public long MdlPageCount { get; init; }
     public long CommitPageCount { get; init; }
 
+    /// <summary>對應 TraceProcessor InUseListSize 的分頁數。</summary>
+    public long InUsePageCount { get; internal set; }
+
     public long StandbyTotalPageCount => Sum(StandbyPriorityPageCounts);
 
-    public long RepurposedTotalPageCount => Sum(RepurposedPriorityPageCounts);
+    /// <summary>優先權 0 到 5 的 standby 分頁總數，對應 NonSuperfetchStandbyListSize。</summary>
+    public long NonSuperfetchStandbyPageCount => Sum(StandbyPriorityPageCounts.Take(6));
 
-    private static long Sum(IReadOnlyList<long> values)
+    /// <summary>各優先權自上一筆快照後增加的 repurposed 分頁數，第一筆全部為 0。</summary>
+    public IReadOnlyList<long> RepurposedSubListPageCounts { get; internal set; } = [];
+
+    /// <summary>所有 <see cref="RepurposedSubListPageCounts"/> 的總和。</summary>
+    public long RepurposedTotalPageCount => Sum(RepurposedSubListPageCounts);
+
+    private static long Sum(IEnumerable<long> values)
     {
         long total = 0;
         foreach (long value in values)
@@ -988,6 +1082,33 @@ public readonly record struct ServiceStatusChangeEventInfo
     public uint ProcessId { get; init; }
     public string ServiceName { get; init; }
     public string ImageName { get; init; }
+    public uint ServiceManagementThreadId { get; init; }
+}
+
+public readonly record struct ServiceGroupEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public bool IsStart { get; init; }
+    public uint ThreadId { get; init; }
+    public string GroupName { get; init; }
+}
+
+public readonly record struct ServiceMainEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public bool IsStart { get; init; }
+    public string ServiceName { get; init; }
+}
+
+public readonly record struct ServiceSnapshotEventInfo
+{
+    public uint ProcessId { get; init; }
+    public uint CurrentState { get; init; }
+    public uint SubProcessTag { get; init; }
+    public string ServiceName { get; init; }
+    public string DisplayName { get; init; }
+    public string ProcessName { get; init; }
+    public string LoadOrderGroup { get; init; }
 }
 
 public sealed class ModuleInfo
@@ -998,8 +1119,12 @@ public sealed class ModuleInfo
     public string FileName { get; init; } = string.Empty;
     public required ulong ImageBase { get; init; }
     public required ulong ImageSize { get; init; }
+    public ulong? DefaultBase { get; init; }
     public uint? ImageCheckSum { get; init; }
     public uint? TimeDateStamp { get; init; }
+    public uint? LoadingThreadId { get; init; }
+    public uint? UnloadingThreadId { get; set; }
+    public bool IsRundown { get; set; }
 }
 
 public sealed class DiskIoEventInfo
@@ -1535,6 +1660,7 @@ public readonly record struct ImageLoadEventInfo
     public required DateTime Timestamp { get; init; }
     public required byte Opcode { get; init; }
     public required uint ProcessId { get; init; }
+    public uint ThreadId { get; init; }
     public ulong? ImageBase { get; init; }
     public ulong? ImageSize { get; init; }
     public uint? ImageCheckSum { get; init; }
@@ -1750,6 +1876,7 @@ public sealed class EtlFileReader
     private readonly Guid s_fileIoProviderId = new("90cbdc39-4a3e-11d1-84f4-0000f80464e3");
     private readonly Guid s_perfInfoProviderId = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
     private readonly Guid s_kernelMemoryProviderId = new("d1d93ef7-e1f2-4f45-9943-03d245fe6c00");
+    private readonly Guid s_systemConfigProviderId = new("01853a65-418f-4f36-aefc-dc0f1d2fd235");
     private const byte CSwitchOpcode = 36;
     private const byte ThreadStartOpcode = 1;
     private const byte ThreadEndOpcode = 2;
@@ -1766,6 +1893,8 @@ public sealed class EtlFileReader
     private const byte ImageDCStartOpcode = 3;
     private const byte ImageDCStopOpcode = 4;
     private const byte ImageLoadOpcode = 10;
+    private const byte SystemConfigCpuOpcode = 10;
+    private const byte SystemConfigServicesOpcode = 15;
     private long s_eventCount;
 
     private uint _timestampClockType;
@@ -1798,7 +1927,10 @@ public sealed class EtlFileReader
         s_eventCount = 0;
         s_schemaCache.Clear();
         s_cachedSchemaCache.Clear();
-        _readResult = new EtlReadResult();
+        _readResult = new EtlReadResult
+        {
+            SourceFilePath = Path.GetFullPath(etlFilePath),
+        };
         _timestampClockType = 0;
         _timestampScaleNumerator = 0;
         _timestampScaleDenominator = 0;
@@ -2119,6 +2251,12 @@ public sealed class EtlFileReader
     /// <summary>對應 Microsoft-Windows-Services 的 EventId=105(StatusChange):服務狀態變化(含目前所在的 ProcessId)。</summary>
     public delegate void ServiceStatusChangeEventHandler(in ServiceStatusChangeEventInfo data);
     public event ServiceStatusChangeEventHandler? ServiceStatusChange;
+    public delegate void ServiceGroupEventHandler(in ServiceGroupEventInfo data);
+    public event ServiceGroupEventHandler? ServiceGroup;
+    public delegate void ServiceMainEventHandler(in ServiceMainEventInfo data);
+    public event ServiceMainEventHandler? ServiceMain;
+    public delegate void ServiceSnapshotEventHandler(in ServiceSnapshotEventInfo data);
+    public event ServiceSnapshotEventHandler? ServiceSnapshot;
 
     public delegate void PerfInfoDpcEventHandler(in DpcEventInfo data);
     public event PerfInfoDpcEventHandler? PerfInfoThreadedDPC;
@@ -2206,8 +2344,17 @@ public sealed class EtlFileReader
     /// <summary>PMP Event ID 2(EnergyMeterRundown,通道名稱中繼)。</summary>
     public delegate void PowerMeterPollingEventInfo_2Handler(in PowerMeterPollingEventInfo_2 data);
     public event PowerMeterPollingEventInfo_2Handler? PowerMeterPollingEventInfo_2;
+
+    /// <summary>PMP Event ID 3(單一計量瞬時值回報)。</summary>
+    public delegate void PowerMeterPollingEventInfo_3Handler(in PowerMeterPollingEventInfo_3 data);
+    public event PowerMeterPollingEventInfo_3Handler? PowerMeterPollingEventInfo_3;
+
     public delegate void DiskIoOperationHandler(DiskIoOperation operation);
     public event DiskIoOperationHandler? DiskIoOperationCompleted;
+
+    /// <summary>Kernel Power Event ID 63(電源請求解析度變更/是否忽略請求)。</summary>
+    public delegate void KernelPowerEventHandler_63(in KernelPowerEventInfo_63 data);
+    public event KernelPowerEventHandler_63? KernelPower_63;
 
 
 
@@ -2223,6 +2370,33 @@ public sealed class EtlFileReader
         //    $"EventId={record.EventHeader.EventDescriptor.Id} Opcode={record.EventHeader.EventDescriptor.Opcode} " +
         //    $"時間={timestamp:yyyy-MM-dd HH:mm:ss.fff} " +
         //    $"PID={record.EventHeader.ProcessId} TID={record.EventHeader.ThreadId}");
+
+        if (eventRecordPtr->EventHeader.ProviderId == s_systemConfigProviderId)
+        {
+            byte systemConfigOpcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
+            CachedSchema? systemConfigSchema = GetOrAddCachedSchema(eventRecordPtr);
+            if (systemConfigSchema is not null && systemConfigOpcode == SystemConfigCpuOpcode)
+            {
+                uint memorySizeMegabytes =
+                    GetRawProperty<uint>(eventRecordPtr, "MemSize", systemConfigSchema);
+                uint pageSizeBytes =
+                    GetRawProperty<uint>(eventRecordPtr, "PageSize", systemConfigSchema);
+                if (memorySizeMegabytes > 0 && pageSizeBytes > 0)
+                {
+                    _readResult!.UsableMemorySizeBytes =
+                        checked((ulong)memorySizeMegabytes * 1024UL * 1024UL);
+                    _readResult.MemoryPageSizeBytes = pageSizeBytes;
+                }
+            }
+            else if (systemConfigSchema is not null &&
+                     systemConfigOpcode == SystemConfigServicesOpcode &&
+                     ServiceSnapshot is not null)
+            {
+                ServiceSnapshotEventInfo snapshot = ParseServiceSnapshotPayload(eventRecordPtr, systemConfigSchema);
+                ServiceSnapshot(in snapshot);
+            }
+            return;
+        }
 
         if (eventRecordPtr->EventHeader.ProviderId == s_kernelMemoryProviderId)
         {
@@ -2573,13 +2747,34 @@ public sealed class EtlFileReader
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.ServicesProviderGuid)
         {
-            if (eventRecordPtr->EventHeader.EventDescriptor.Id == 105 && ServiceStatusChange is not null)
+            switch (eventRecordPtr->EventHeader.EventDescriptor.Id)
             {
-                var serviceEvent = ParseServiceStatusChangePayload(timestamp, eventRecordPtr, cache);
-                if (serviceEvent is { } serviceEventValue)
-                {
-                    ServiceStatusChange(in serviceEventValue);
-                }
+                case 103 or 104 when ServiceGroup is not null:
+                    ServiceGroupEventInfo groupEvent = ParseServiceGroupPayload(
+                        timestamp,
+                        eventRecordPtr,
+                        cache,
+                        isStart: eventRecordPtr->EventHeader.EventDescriptor.Id == 103);
+                    ServiceGroup(in groupEvent);
+                    break;
+                case 105 when ServiceStatusChange is not null:
+                    ServiceStatusChangeEventInfo serviceEvent =
+                        ParseServiceStatusChangePayload(timestamp, eventRecordPtr, cache);
+                    ServiceStatusChange(in serviceEvent);
+                    break;
+            }
+        }
+        else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.ServicesSvchostProviderGuid)
+        {
+            ushort eventId = eventRecordPtr->EventHeader.EventDescriptor.Id;
+            if (eventId is 101 or 102 && ServiceMain is not null)
+            {
+                ServiceMainEventInfo serviceMainEvent = ParseServiceMainPayload(
+                    timestamp,
+                    eventRecordPtr,
+                    cache,
+                    isStart: eventId == 101);
+                ServiceMain(in serviceMainEvent);
             }
         }
         else if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.EnergyEstimationEngineProviderGuid)
@@ -2695,7 +2890,14 @@ public sealed class EtlFileReader
             switch(evtid)
             {
                 case 63:
-                    var pd = ProcessKernelPowerEvent_63(timestamp, eventRecordPtr, cache);
+                    if (KernelPower_63 is not null)
+                    {
+                        var kernelPower63 = ProcessKernelPowerEvent_63(timestamp, eventRecordPtr, cache);
+                        if (kernelPower63 is { } kernelPower63Value)
+                        {
+                            KernelPower_63(in kernelPower63Value);
+                        }
+                    }
                     break;
                 default:
                     //var strb = new StringBuilder();
@@ -2727,9 +2929,13 @@ public sealed class EtlFileReader
                     }
                     break;
                 case 3:
-                    var powerneter = ProcessPowerMeterPollingEvent_3(timestamp, eventRecordPtr, cache);
-                    if (PowerMeterPollingEventInfo_4 is not null)
+                    if (PowerMeterPollingEventInfo_3 is not null)
                     {
+                        var powermeter_3 = ProcessPowerMeterPollingEvent_3(timestamp, eventRecordPtr, cache);
+                        if (powermeter_3 is { } powermeter_3Value)
+                        {
+                            PowerMeterPollingEventInfo_3(in powermeter_3Value);
+                        }
                     }
                     break;
                 case 4:
@@ -3646,10 +3852,8 @@ public sealed class EtlFileReader
         }
     }
 
-    private unsafe ServiceStatusChangeEventInfo? ParseServiceStatusChangePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
+    private static unsafe ServiceStatusChangeEventInfo ParseServiceStatusChangePayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr, CachedSchema schema)
     {
-        if (eventRecordPtr == null) return null;
-
         return new ServiceStatusChangeEventInfo
         {
             Timestamp = timestamp,
@@ -3659,6 +3863,52 @@ public sealed class EtlFileReader
             ProcessId = GetRawProperty<uint>(eventRecordPtr, "PID", schema),
             ServiceName = GetRawPropertyString(eventRecordPtr, "ServiceName", schema),
             ImageName = GetRawPropertyString(eventRecordPtr, "ImageName", schema),
+            ServiceManagementThreadId = eventRecordPtr->EventHeader.ThreadId,
+        };
+    }
+
+    private static unsafe ServiceGroupEventInfo ParseServiceGroupPayload(
+        DateTime timestamp,
+        EVENT_RECORD* eventRecordPtr,
+        CachedSchema schema,
+        bool isStart)
+    {
+        return new ServiceGroupEventInfo
+        {
+            Timestamp = timestamp,
+            IsStart = isStart,
+            ThreadId = eventRecordPtr->EventHeader.ThreadId,
+            GroupName = GetRawPropertyString(eventRecordPtr, "GroupName", schema),
+        };
+    }
+
+    private static unsafe ServiceMainEventInfo ParseServiceMainPayload(
+        DateTime timestamp,
+        EVENT_RECORD* eventRecordPtr,
+        CachedSchema schema,
+        bool isStart)
+    {
+        return new ServiceMainEventInfo
+        {
+            Timestamp = timestamp,
+            IsStart = isStart,
+            ServiceName = GetRawPropertyString(eventRecordPtr, "ServiceName", schema),
+        };
+    }
+
+    private static unsafe ServiceSnapshotEventInfo ParseServiceSnapshotPayload(
+        EVENT_RECORD* eventRecordPtr,
+        CachedSchema schema)
+    {
+        return new ServiceSnapshotEventInfo
+        {
+            ProcessId = GetRawPropertyAny<uint>(eventRecordPtr, schema, 0, "ProcessId", "PID"),
+            CurrentState = GetRawPropertyAny<uint>(eventRecordPtr, schema, 0, "ServiceState", "State", "CurrentState"),
+            SubProcessTag = GetRawProperty<uint>(eventRecordPtr, "SubProcessTag", schema),
+            ServiceName = GetRawPropertyString(eventRecordPtr, "ServiceName", schema),
+            DisplayName = GetRawPropertyString(eventRecordPtr, "DisplayName", schema),
+            ProcessName = GetRawPropertyString(eventRecordPtr, "ProcessName", schema),
+            LoadOrderGroup = GetRawPropertyString(eventRecordPtr, "LoadOrderGroup", schema),
         };
     }
 
@@ -4179,7 +4429,8 @@ public sealed class EtlFileReader
         {
             Timestamp = timestamp,
             Opcode = opcode,
-            ProcessId = processId != 0 ? processId : header.ProcessId,
+            ProcessId = processId,
+            ThreadId = header.ThreadId,
             ImageBase = hasFullFixedPayload ? ReadPointer(userData, imageBaseOffset, pointerSize) : null,
             ImageSize = hasFullFixedPayload ? ReadPointer(userData, imageSizeOffset, pointerSize) : null,
             ImageCheckSum = hasFullFixedPayload ? unchecked((uint)Marshal.ReadInt32(userData, imageCheckSumOffset)) : null,

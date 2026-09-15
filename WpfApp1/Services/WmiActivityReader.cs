@@ -34,132 +34,103 @@ internal sealed class WmiActivityReader : IWmiActivityReader
             Mode = SqliteOpenMode.ReadOnly,
         }.ToString());
         connection.Open();
+        EtlSqliteSchema.EnsureSupported(connection);
 
-        if (!TableExists(connection, "WmiActivityEvents"))
+        if (!TableExists(connection, "wmi_events"))
         {
             return new WmiAnalysisResult([], []);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        bool hasQuery = TableExists(connection, "WmiActivityEvents_11");
-        bool hasMethod = TableExists(connection, "WmiActivityEvents_22");
-        bool hasPolling = TableExists(connection, "WmiActivityEvents_24");
-        bool hasAsyncNotify = TableExists(connection, "WmiActivityEvents_20");
+        // wmi_events 是統一單一資料表(event_id 區分事件種類)，不再需要判斷各個子表是否存在，
+        // 直接依 event_id 篩選即可；沒有對應 event_id 的資料表時該分支自然回傳空集合。
+        CreateEnrichedTempTable(connection, cancellationToken);
 
-        List<WmiSignatureNode> hotspots = [];
-        if (hasQuery || hasMethod || hasPolling || hasAsyncNotify)
-        {
-            bool hasStop = TableExists(connection, "WmiActivityEvents_13");
-            bool hasProviderLoad = TableExists(connection, "WmiActivityEvents_12");
-            CreateEnrichedTempTable(connection, hasQuery, hasMethod, hasPolling, hasAsyncNotify, hasStop, hasProviderLoad, cancellationToken);
-
-            Dictionary<(string Namespace, string Kind, string Target), List<WmiCallerNode>> callersBySignature =
-                ReadCallerAggregates(connection, cancellationToken);
-            hotspots = ReadHotspotAggregates(connection, callersBySignature, cancellationToken);
-        }
+        Dictionary<(string Namespace, string Kind, string Target), List<WmiCallerNode>> callersBySignature =
+            ReadCallerAggregates(connection, cancellationToken);
+        List<WmiSignatureNode> hotspots = ReadHotspotAggregates(connection, callersBySignature, cancellationToken);
 
         List<WmiSystemEventNode> systemEvents = ReadSystemEvents(connection, cancellationToken);
 
         return new WmiAnalysisResult(hotspots, systemEvents);
     }
 
-    private static void CreateEnrichedTempTable(
-        SqliteConnection connection,
-        bool hasQuery,
-        bool hasMethod,
-        bool hasPolling,
-        bool hasAsyncNotify,
-        bool hasStop,
-        bool hasProviderLoad,
-        CancellationToken cancellationToken)
+    private static void CreateEnrichedTempTable(SqliteConnection connection, CancellationToken cancellationToken)
     {
-        List<string> callBranches = [];
-
-        if (hasQuery)
+        string callsUnion = string.Join("\nUNION ALL\n", new[]
         {
-            callBranches.Add("""
-                SELECT
-                    p.TimestampUtc AS TimestampUtc,
-                    p.ProcessId AS HostProcessId,
-                    c.OperationId AS OperationId,
-                    c.GroupOperationId AS GroupOperationId,
-                    COALESCE(NULLIF(TRIM(c.NamespaceName), ''), '(未提供 Namespace)') AS Namespace,
-                    '查詢' AS Kind,
-                    COALESCE(NULLIF(TRIM(c.Operation), ''), '(未知操作)') AS Target,
-                    COALESCE(c.ClientProcessId, 0) AS ClientProcessId,
-                    NULL AS IntervalMs
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_11 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
+            // 查詢 (event_id = 11)
+            """
+            SELECT
+                timestamp_utc_us AS TimestampUtc,
+                process_id AS HostProcessId,
+                operation_id AS OperationId,
+                group_operation_id AS GroupOperationId,
+                COALESCE(NULLIF(TRIM(namespace_name), ''), '(未提供 Namespace)') AS Namespace,
+                '查詢' AS Kind,
+                COALESCE(NULLIF(TRIM(operation), ''), '(未知操作)') AS Target,
+                COALESCE(client_process_id, 0) AS ClientProcessId,
+                client_process_creation_time_utc_us AS ClientProcessCreationTimeUtc,
+                NULL AS IntervalMs
+            FROM wmi_events
+            WHERE event_id = 11
+            """,
+            // 方法呼叫 (event_id = 22)
+            """
+            SELECT
+                timestamp_utc_us, process_id, operation_id, group_operation_id,
+                COALESCE(NULLIF(TRIM(namespace_name), ''), '(未提供 Namespace)'),
+                '方法呼叫',
+                CASE
+                    WHEN COALESCE(TRIM(class_name), '') = '' AND COALESCE(TRIM(method_name), '') = '' THEN '(未知方法)'
+                    ELSE COALESCE(NULLIF(TRIM(class_name), ''), '?') || '::' || COALESCE(NULLIF(TRIM(method_name), ''), '?')
+                END,
+                client_process_id,
+                client_process_creation_time_utc_us,
+                NULL
+            FROM wmi_events
+            WHERE event_id = 22
+            """,
+            // 輪詢查詢 (event_id = 24)
+            """
+            SELECT
+                timestamp_utc_us, process_id, NULL, group_operation_id,
+                COALESCE(NULLIF(TRIM(namespace_name), ''), '(未提供 Namespace)'),
+                '輪詢查詢',
+                COALESCE(NULLIF(TRIM(query), ''), '(未知查詢)'),
+                client_process_id,
+                NULL,
+                CAST(interval_ms AS REAL)
+            FROM wmi_events
+            WHERE event_id = 24
+            """,
+            // 非同步通知 (event_id = 20)
+            """
+            SELECT
+                timestamp_utc_us, process_id, operation_id, NULL,
+                '(未提供 Namespace)',
+                '非同步通知',
+                COALESCE(NULLIF(TRIM(operation), ''), '(未知操作)'),
+                client_process_id,
+                client_process_creation_time_utc_us,
+                NULL
+            FROM wmi_events
+            WHERE event_id = 20
+            """,
+        });
 
-        if (hasMethod)
-        {
-            callBranches.Add("""
-                SELECT
-                    p.TimestampUtc, p.ProcessId, c.OperationId, c.GroupOperationId,
-                    COALESCE(NULLIF(TRIM(c.NamespaceName), ''), '(未提供 Namespace)'),
-                    '方法呼叫',
-                    CASE
-                        WHEN COALESCE(TRIM(c.ClassName), '') = '' AND COALESCE(TRIM(c.MethodName), '') = '' THEN '(未知方法)'
-                        ELSE COALESCE(NULLIF(TRIM(c.ClassName), ''), '?') || '::' || COALESCE(NULLIF(TRIM(c.MethodName), ''), '?')
-                    END,
-                    c.ClientProcessId,
-                    NULL
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_22 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
+        const string StopsSource = """
+            SELECT timestamp_utc_us AS TimestampUtc, process_id AS HostProcessId, operation_id AS OperationId, result_code AS ResultCode
+            FROM wmi_events
+            WHERE event_id = 13
+            """;
 
-        if (hasPolling)
-        {
-            callBranches.Add("""
-                SELECT
-                    p.TimestampUtc, p.ProcessId, NULL, c.GroupOperationId,
-                    COALESCE(NULLIF(TRIM(c.NamespaceName), ''), '(未提供 Namespace)'),
-                    '輪詢查詢',
-                    COALESCE(NULLIF(TRIM(c.Query), ''), '(未知查詢)'),
-                    c.ClientProcessId,
-                    CAST(c.IntervalMs AS REAL)
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_24 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
-
-        if (hasAsyncNotify)
-        {
-            callBranches.Add("""
-                SELECT
-                    p.TimestampUtc, p.ProcessId, c.OperationId, NULL,
-                    '(未提供 Namespace)',
-                    '非同步通知',
-                    COALESCE(NULLIF(TRIM(c.Operation), ''), '(未知操作)'),
-                    c.ClientProcessId,
-                    NULL
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_20 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
-
-        string stopsSource = hasStop
-            ? """
-              SELECT p.TimestampUtc AS TimestampUtc, p.ProcessId AS HostProcessId, c.OperationId AS OperationId, c.ResultCode AS ResultCode
-              FROM WmiActivityEvents p
-              JOIN WmiActivityEvents_13 c ON c.WmiActivityEventId = p.WmiActivityEventId
-              """
-            : "SELECT NULL AS TimestampUtc, NULL AS HostProcessId, NULL AS OperationId, NULL AS ResultCode WHERE 0";
-
-        string providersSource = hasProviderLoad
-            ? """
-              SELECT p.TimestampUtc AS TimestampUtc, p.ProcessId AS HostProcessId, c.GroupOperationId AS GroupOperationId, c.ProviderName AS ProviderName
-              FROM WmiActivityEvents p
-              JOIN WmiActivityEvents_12 c ON c.WmiActivityEventId = p.WmiActivityEventId
-              WHERE c.ProviderName IS NOT NULL AND TRIM(c.ProviderName) <> ''
-              """
-            : "SELECT NULL AS TimestampUtc, NULL AS HostProcessId, NULL AS GroupOperationId, NULL AS ProviderName WHERE 0";
-
-        string callsUnion = string.Join("\nUNION ALL\n", callBranches);
+        const string ProvidersSource = """
+            SELECT timestamp_utc_us AS TimestampUtc, process_id AS HostProcessId, group_operation_id AS GroupOperationId, provider_name AS ProviderName
+            FROM wmi_events
+            WHERE event_id = 12 AND provider_name IS NOT NULL AND TRIM(provider_name) <> ''
+            """;
 
         string sql = $"""
             DROP TABLE IF EXISTS temp.Enriched;
@@ -172,11 +143,11 @@ internal sealed class WmiActivityReader : IWmiActivityReader
             ),
             Stops AS (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY HostProcessId, OperationId ORDER BY TimestampUtc) AS Seq
-                FROM ({stopsSource})
+                FROM ({StopsSource})
             ),
             ProvidersRanked AS (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY HostProcessId, GroupOperationId ORDER BY TimestampUtc) AS Seq
-                FROM ({providersSource})
+                FROM ({ProvidersSource})
             )
             SELECT
                 c.TimestampUtc AS TimestampUtc,
@@ -186,20 +157,35 @@ internal sealed class WmiActivityReader : IWmiActivityReader
                 c.ClientProcessId AS ClientProcessId,
                 c.IntervalMs AS IntervalMs,
                 COALESCE(
-                    (SELECT proc.ImageFileName || ' (PID ' || c.ClientProcessId || ')'
+                    (SELECT proc.image_file_name || ' (PID ' || c.ClientProcessId || ')'
                      FROM (
                          SELECT
-                             p3.ImageFileName AS ImageFileName,
-                             CASE WHEN p3.StartedAtUtc <= c.TimestampUtc AND (p3.EndedAtUtc IS NULL OR p3.EndedAtUtc >= c.TimestampUtc) THEN 0 ELSE 1 END AS RangeRank,
-                             ABS(p3.StartedAtUtc - c.TimestampUtc) AS TimeDiff
-                         FROM Processes p3
-                         WHERE p3.ProcessId = c.ClientProcessId
+                             p3.image_file_name AS image_file_name,
+                             CASE
+                                 WHEN (p3.started_at_utc_us IS NULL OR p3.started_at_utc_us <= c.TimestampUtc)
+                                  AND (p3.ended_at_utc_us IS NULL OR p3.ended_at_utc_us >= c.TimestampUtc)
+                                     THEN 0
+                                 ELSE 1
+                             END AS RangeRank,
+                             CASE WHEN p3.started_at_utc_us IS NULL THEN 1 ELSE 0 END AS MissingStartRank,
+                             CASE
+                                 WHEN c.ClientProcessCreationTimeUtc IS NOT NULL AND p3.started_at_utc_us IS NOT NULL
+                                     THEN ABS(p3.started_at_utc_us - c.ClientProcessCreationTimeUtc)
+                                 WHEN p3.started_at_utc_us IS NOT NULL
+                                     THEN ABS(p3.started_at_utc_us - c.TimestampUtc)
+                                 ELSE 9223372036854775807
+                             END AS TimeDiff
+                         FROM processes p3
+                         WHERE p3.process_id = c.ClientProcessId
                      ) proc
-                     ORDER BY proc.RangeRank ASC, proc.TimeDiff ASC
+                     ORDER BY
+                        proc.RangeRank ASC,
+                        proc.MissingStartRank ASC,
+                        proc.TimeDiff ASC
                      LIMIT 1),
                     'PID ' || c.ClientProcessId || '（未知行程）'
                 ) AS ProcessDisplayName,
-                (s.TimestampUtc - c.TimestampUtc) / 10000.0 AS DurationMs,
+                (s.TimestampUtc - c.TimestampUtc) / 1000.0 AS DurationMs,
                 s.ResultCode AS ResultCode,
                 pv.ProviderName AS Provider
             FROM Calls c
@@ -336,83 +322,49 @@ internal sealed class WmiActivityReader : IWmiActivityReader
     /// </summary>
     private static List<WmiSystemEventNode> ReadSystemEvents(SqliteConnection connection, CancellationToken cancellationToken)
     {
-        List<string> branches = [];
-
-        if (TableExists(connection, "WmiActivityEvents_16"))
-        {
-            branches.Add("""
-                SELECT
-                    p.TimestampUtc AS TimestampUtc,
-                    '操作警告 (16)' AS EventLabel,
-                    CASE WHEN c.Operation IS NULL THEN 'OperationId ' || c.OperationId ELSE 'OperationId ' || c.OperationId || ' - ' || c.Operation END AS Source,
-                    COALESCE(NULLIF(c.Message, ''), '(無訊息)') AS Detail,
-                    c.ErrorId AS ResultCode
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_16 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
-
-        if (TableExists(connection, "WmiActivityEvents_100"))
-        {
-            branches.Add("""
-                SELECT
-                    p.TimestampUtc, '系統訊息 (100)',
-                    COALESCE(NULLIF(TRIM(c.ComponentName), ''), '(未知元件)'),
-                    CASE WHEN c.FileName IS NULL THEN COALESCE(c.MessageDetail, '') ELSE COALESCE(c.MessageDetail, '') || ' [' || c.FileName || ']' END,
-                    NULL
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_100 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
-
-        if (TableExists(connection, "WmiActivityEvents_101"))
-        {
-            branches.Add("""
-                SELECT
-                    p.TimestampUtc, '系統錯誤 (101)',
-                    COALESCE(NULLIF(TRIM(c.ComponentName), ''), '(未知元件)'),
-                    CASE WHEN c.FileName IS NULL THEN COALESCE(c.ErrorDetail, '') ELSE COALESCE(c.ErrorDetail, '') || ' [' || c.FileName || ']' END,
-                    c.ErrorId
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_101 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
-
-        if (TableExists(connection, "WmiActivityEvents_5857"))
-        {
-            branches.Add("""
-                SELECT
-                    p.TimestampUtc, 'Provider 主機錯誤 (5857)',
-                    COALESCE(NULLIF(TRIM(c.ProviderName), ''), '(未知 Provider)') || ' @ ' || COALESCE(NULLIF(TRIM(c.HostProcess), ''), '(未知主機)') || ' (PID ' || c.ProcessID || ')',
-                    COALESCE(c.ProviderPath, ''),
-                    c.Code
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_5857 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
-
-        if (TableExists(connection, "WmiActivityEvents_5858"))
-        {
-            branches.Add("""
-                SELECT
-                    p.TimestampUtc, 'WMI 錯誤事件 (5858)',
-                    COALESCE(NULLIF(TRIM(c.Component), ''), '(未知元件)') || '/' || COALESCE(NULLIF(TRIM(c.Operation), ''), '(未知操作)') || ' (ClientPID ' || c.ClientProcessId || ')',
-                    COALESCE(c.PossibleCause, ''),
-                    c.ResultCode
-                FROM WmiActivityEvents p
-                JOIN WmiActivityEvents_5858 c ON c.WmiActivityEventId = p.WmiActivityEventId
-                """);
-        }
-
-        if (branches.Count == 0)
-        {
-            return [];
-        }
+        string sql = """
+            SELECT
+                timestamp_utc_us AS TimestampUtc,
+                '操作警告 (16)' AS EventLabel,
+                CASE WHEN operation IS NULL THEN 'OperationId ' || operation_id ELSE 'OperationId ' || operation_id || ' - ' || operation END AS Source,
+                COALESCE(NULLIF(message, ''), '(無訊息)') AS Detail,
+                error_id AS ResultCode
+            FROM wmi_events WHERE event_id = 16
+            UNION ALL
+            SELECT
+                timestamp_utc_us, '系統訊息 (100)',
+                COALESCE(NULLIF(TRIM(component_name), ''), '(未知元件)'),
+                CASE WHEN file_name IS NULL THEN COALESCE(message_detail, '') ELSE COALESCE(message_detail, '') || ' [' || file_name || ']' END,
+                NULL
+            FROM wmi_events WHERE event_id = 100
+            UNION ALL
+            SELECT
+                timestamp_utc_us, '系統錯誤 (101)',
+                COALESCE(NULLIF(TRIM(component_name), ''), '(未知元件)'),
+                CASE WHEN file_name IS NULL THEN COALESCE(message, '') ELSE COALESCE(message, '') || ' [' || file_name || ']' END,
+                error_id
+            FROM wmi_events WHERE event_id = 101
+            UNION ALL
+            SELECT
+                timestamp_utc_us, 'Provider 主機錯誤 (5857)',
+                COALESCE(NULLIF(TRIM(provider_name), ''), '(未知 Provider)') || ' @ ' || COALESCE(NULLIF(TRIM(host_process), ''), '(未知主機)') || ' (PID ' || host_process_id || ')',
+                COALESCE(provider_path, ''),
+                code
+            FROM wmi_events WHERE event_id = 5857
+            UNION ALL
+            SELECT
+                timestamp_utc_us, 'WMI 錯誤事件 (5858)',
+                COALESCE(NULLIF(TRIM(component), ''), '(未知元件)') || '/' || COALESCE(NULLIF(TRIM(operation), ''), '(未知操作)') || ' (ClientPID ' || client_process_id || ')',
+                COALESCE(possible_cause, ''),
+                result_code
+            FROM wmi_events WHERE event_id = 5858
+            ORDER BY TimestampUtc DESC;
+            """;
 
         cancellationToken.ThrowIfCancellationRequested();
 
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText = string.Join("\nUNION ALL\n", branches) + "\nORDER BY TimestampUtc DESC;";
+        command.CommandText = sql;
 
         using SqliteDataReader reader = command.ExecuteReader();
         List<WmiSystemEventNode> events = [];
@@ -440,5 +392,5 @@ internal sealed class WmiActivityReader : IWmiActivityReader
         return command.ExecuteScalar() is not null;
     }
 
-    private static DateTime ParseTimestamp(long ticks) => new(ticks, DateTimeKind.Utc);
+    private static DateTime ParseTimestamp(long unixMicros) => DateTime.UnixEpoch.AddTicks(unixMicros * 10);
 }

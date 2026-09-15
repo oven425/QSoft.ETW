@@ -3,7 +3,6 @@ using QSoft.ETW;
 using System;
 using System.Globalization;
 using System.IO;
-using WpfApp1.Analysis;
 
 namespace WpfApp1
 {

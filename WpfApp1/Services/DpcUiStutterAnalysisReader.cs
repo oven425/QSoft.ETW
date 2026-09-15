@@ -11,7 +11,6 @@ public interface IDpcUiStutterAnalysisReader
 
 internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
 {
-    private const int AddressBucketShift = 24;
     private const byte ThreadedDpcOpcode = 66;
     private const byte DpcOpcode = 68;
     private const byte TimerDpcOpcode = 69;
@@ -40,8 +39,9 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
             Mode = SqliteOpenMode.ReadOnly,
         }.ToString());
         connection.Open();
+        EtlSqliteSchema.EnsureSupported(connection);
 
-        if (!TableExists(connection, "DpcEvents"))
+        if (!TableExists(connection, "dpc_events"))
         {
             return new DpcStutterAnalysisResult();
         }
@@ -55,11 +55,17 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
         cancellationToken.ThrowIfCancellationRequested();
 
         TimeSpan bucketSize = DetermineBucketSize(summary);
+        // handler_module_name/handler_module_offset 已在匯入階段由 InterruptHandlingDataSourceCollector 解析完成，
+        // 不需要像舊版那樣自行掃描 ImageLoads 做位址範圍比對。
         List<RoutineAggregate> routineAggregates = ReadRoutineAggregates(connection, cancellationToken);
         Dictionary<long, Dictionary<int, int>> processorsByRoutine = ReadRoutineProcessorCounts(connection, cancellationToken);
-        Dictionary<long, ModuleResolution> moduleByRoutine = ResolveRoutineModules(
-            ReadLoadedImages(connection, cancellationToken),
-            routineAggregates);
+        Dictionary<long, ModuleResolution> moduleByRoutine = routineAggregates
+            .Where(static aggregate => aggregate.ModuleName is not null)
+            .ToDictionary(
+                static aggregate => aggregate.RoutineBits,
+                static aggregate => new ModuleResolution(
+                    FormatModuleDisplay(aggregate.ModuleName!, unchecked((ulong)(aggregate.ModuleOffset ?? 0))),
+                    aggregate.ModuleName!));
         List<DpcRoutineHotspot> hotspots = BuildRoutineHotspots(routineAggregates, processorsByRoutine, moduleByRoutine);
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -100,13 +106,13 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
         using SqliteCommand command = connection.CreateCommand();
         command.CommandText = """
             SELECT
-                MIN(TimestampUtc),
-                MAX(TimestampUtc),
+                MIN(start_utc_us),
+                MAX(start_utc_us),
                 COUNT(*),
-                SUM(CASE WHEN Routine IS NOT NULL THEN 1 ELSE 0 END),
-                SUM(CASE WHEN Routine IS NULL THEN 1 ELSE 0 END),
-                COUNT(DISTINCT ProcessorNumber)
-            FROM DpcEvents;
+                SUM(CASE WHEN handler_routine_address IS NOT NULL THEN 1 ELSE 0 END),
+                SUM(CASE WHEN handler_routine_address IS NULL THEN 1 ELSE 0 END),
+                COUNT(DISTINCT processor_number)
+            FROM dpc_events;
             """;
 
         using SqliteDataReader reader = command.ExecuteReader();
@@ -115,9 +121,10 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
             return new TraceSummary();
         }
 
+        // start_utc_us 儲存為微秒；乘以 10 換算成 .NET Ticks(100ns)，讓 TraceSummary 沿用既有以 Ticks 為單位的既有邏輯不必更動。
         return new TraceSummary(
-            reader.GetInt64(0),
-            reader.GetInt64(1),
+            reader.GetInt64(0) * 10,
+            reader.GetInt64(1) * 10,
             reader.GetInt32(2),
             reader.GetInt32(3),
             reader.GetInt32(4),
@@ -129,17 +136,19 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
         using SqliteCommand command = connection.CreateCommand();
         command.CommandText = """
             SELECT
-                Routine,
+                handler_routine_address,
                 COUNT(*) AS EventCount,
-                SUM(CASE WHEN Opcode = 68 THEN 1 ELSE 0 END) AS DpcCount,
-                SUM(CASE WHEN Opcode = 66 THEN 1 ELSE 0 END) AS ThreadedDpcCount,
-                SUM(CASE WHEN Opcode = 69 THEN 1 ELSE 0 END) AS TimerDpcCount,
-                SUM(CASE WHEN Opcode NOT IN (66, 68, 69) THEN 1 ELSE 0 END) AS UnknownOpcodeCount,
-                MIN(TimestampUtc) AS FirstSeenUtc,
-                MAX(TimestampUtc) AS LastSeenUtc
-            FROM DpcEvents
-            WHERE Routine IS NOT NULL
-            GROUP BY Routine
+                SUM(CASE WHEN call_type_name = 'Normal' THEN 1 ELSE 0 END) AS DpcCount,
+                SUM(CASE WHEN call_type_name = 'ThreadedDpc' THEN 1 ELSE 0 END) AS ThreadedDpcCount,
+                SUM(CASE WHEN call_type_name = 'Timer' THEN 1 ELSE 0 END) AS TimerDpcCount,
+                SUM(CASE WHEN call_type_name NOT IN ('Normal', 'ThreadedDpc', 'Timer') OR call_type_name IS NULL THEN 1 ELSE 0 END) AS UnknownOpcodeCount,
+                MIN(start_utc_us) AS FirstSeenUtc,
+                MAX(start_utc_us) AS LastSeenUtc,
+                MIN(handler_module_name) AS ModuleName,
+                MIN(handler_module_offset) AS ModuleOffset
+            FROM dpc_events
+            WHERE handler_routine_address IS NOT NULL
+            GROUP BY handler_routine_address
             ORDER BY EventCount DESC, FirstSeenUtc;
             """;
 
@@ -155,8 +164,10 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
                 reader.GetInt32(3),
                 reader.GetInt32(4),
                 reader.GetInt32(5),
-                reader.GetInt64(6),
-                reader.GetInt64(7)));
+                reader.GetInt64(6) * 10,
+                reader.GetInt64(7) * 10,
+                reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetInt64(9)));
         }
 
         return aggregates;
@@ -166,10 +177,10 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
     {
         using SqliteCommand command = connection.CreateCommand();
         command.CommandText = """
-            SELECT Routine, ProcessorNumber, COUNT(*) AS EventCount
-            FROM DpcEvents
-            WHERE Routine IS NOT NULL
-            GROUP BY Routine, ProcessorNumber;
+            SELECT handler_routine_address, processor_number, COUNT(*) AS EventCount
+            FROM dpc_events
+            WHERE handler_routine_address IS NOT NULL
+            GROUP BY handler_routine_address, processor_number;
             """;
 
         using SqliteDataReader reader = command.ExecuteReader();
@@ -199,17 +210,18 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
         using SqliteCommand command = connection.CreateCommand();
         command.CommandText = """
             SELECT
-                ((TimestampUtc - $traceStartTicks) / $bucketSizeTicks) AS BucketIndex,
-                ProcessorNumber,
-                Opcode,
-                Routine,
+                ((start_utc_us - $traceStartMicros) / $bucketSizeMicros) AS BucketIndex,
+                processor_number,
+                CASE call_type_name WHEN 'Normal' THEN 68 WHEN 'ThreadedDpc' THEN 66 WHEN 'Timer' THEN 69 ELSE 0 END AS Opcode,
+                handler_routine_address,
                 COUNT(*) AS EventCount
-            FROM DpcEvents
-            GROUP BY BucketIndex, ProcessorNumber, Opcode, Routine
+            FROM dpc_events
+            GROUP BY BucketIndex, processor_number, Opcode, handler_routine_address
             ORDER BY BucketIndex;
             """;
-        command.Parameters.AddWithValue("$traceStartTicks", traceStartTicks);
-        command.Parameters.AddWithValue("$bucketSizeTicks", bucketSizeTicks);
+        // start_utc_us 為微秒，乘以 10 換算成 .NET Ticks(100ns)，讓後續視窗/桶運算沿用既有以 Ticks 為單位的邏輯不必更動。
+        command.Parameters.AddWithValue("$traceStartMicros", traceStartTicks / 10);
+        command.Parameters.AddWithValue("$bucketSizeMicros", bucketSizeTicks / 10);
 
         using SqliteDataReader reader = command.ExecuteReader();
         Dictionary<long, BucketAccumulator> buckets = [];
@@ -246,75 +258,6 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
         }
 
         return [.. buckets.OrderBy(static pair => pair.Key).Select(static pair => (pair.Key, pair.Value))];
-    }
-
-    private static List<LoadedImage> ReadLoadedImages(SqliteConnection connection, CancellationToken cancellationToken)
-    {
-        if (!TableExists(connection, "ImageLoads"))
-        {
-            return [];
-        }
-
-        using SqliteCommand command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT FileName, ProcessId, ImageBase, ImageSize, LoadedAtUtc, UnloadedAtUtc
-            FROM ImageLoads
-            WHERE ImageBase IS NOT NULL
-              AND ImageSize IS NOT NULL
-              AND ImageSize > 0;
-            """;
-
-        using SqliteDataReader reader = command.ExecuteReader();
-        List<LoadedImage> images = [];
-        while (reader.Read())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            images.Add(new LoadedImage(
-                reader.GetString(0),
-                reader.GetInt64(1),
-                unchecked((ulong)reader.GetInt64(2)),
-                unchecked((ulong)reader.GetInt64(3)),
-                reader.GetInt64(4),
-                reader.IsDBNull(5) ? null : reader.GetInt64(5)));
-        }
-
-        return images;
-    }
-
-    private static Dictionary<long, ModuleResolution> ResolveRoutineModules(
-        List<LoadedImage> images,
-        IReadOnlyList<RoutineAggregate> routineAggregates)
-    {
-        Dictionary<long, ModuleResolution> result = [];
-        if (images.Count == 0 || routineAggregates.Count == 0)
-        {
-            return result;
-        }
-
-        Dictionary<ulong, List<LoadedImage>> imagesByAddressBucket = [];
-        foreach (LoadedImage image in images)
-        {
-            AddLoadedImageToAddressBuckets(imagesByAddressBucket, image);
-        }
-
-        foreach (RoutineAggregate aggregate in routineAggregates)
-        {
-            ulong routine = unchecked((ulong)aggregate.RoutineBits);
-            LoadedImage? image = FindUniqueLoadedImage(
-                imagesByAddressBucket,
-                routine,
-                aggregate.FirstSeenTicks,
-                aggregate.LastSeenTicks);
-            if (image is not null)
-            {
-                ulong offset = routine - image.ImageBase;
-                result[aggregate.RoutineBits] = new ModuleResolution(
-                    FormatModuleDisplay(image.FileName, offset),
-                    image.FileName);
-            }
-        }
-
-        return result;
     }
 
     private static List<DpcRoutineHotspot> BuildRoutineHotspots(
@@ -561,89 +504,6 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
         return $"{(string.IsNullOrWhiteSpace(shortName) ? fileName : shortName)}+0x{offset:X}";
     }
 
-    private static LoadedImage? FindUniqueLoadedImage(
-        Dictionary<ulong, List<LoadedImage>> imagesByAddressBucket,
-        ulong routine,
-        long firstSeenTicks,
-        long lastSeenTicks)
-    {
-        ulong addressBucket = routine >> AddressBucketShift;
-        if (!imagesByAddressBucket.TryGetValue(addressBucket, out List<LoadedImage>? candidates))
-        {
-            return null;
-        }
-
-        LoadedImage? match = null;
-        HashSet<(string FileName, ulong ImageBase, ulong ImageSize)> distinctMatches = [];
-        foreach (LoadedImage candidate in candidates)
-        {
-            if (candidate.LoadedAtUtc > lastSeenTicks ||
-                (candidate.UnloadedAtUtc is long unloadedAt && unloadedAt < firstSeenTicks) ||
-                routine < candidate.ImageBase ||
-                routine - candidate.ImageBase >= candidate.ImageSize)
-            {
-                continue;
-            }
-
-            (string FileName, ulong ImageBase, ulong ImageSize) key = (candidate.FileName, candidate.ImageBase, candidate.ImageSize);
-            if (!distinctMatches.Add(key))
-            {
-                if (match is null || PreferCandidate(candidate, match))
-                {
-                    match = candidate;
-                }
-
-                continue;
-            }
-
-            if (match is not null && !SameImage(match, candidate))
-            {
-                return null;
-            }
-
-            match = candidate;
-        }
-
-        return match;
-    }
-
-    private static bool PreferCandidate(LoadedImage candidate, LoadedImage current)
-    {
-        int candidateRank = candidate.ProcessId is 0 or 4 ? 0 : 1;
-        int currentRank = current.ProcessId is 0 or 4 ? 0 : 1;
-        if (candidateRank != currentRank)
-        {
-            return candidateRank < currentRank;
-        }
-
-        return candidate.LoadedAtUtc > current.LoadedAtUtc;
-    }
-
-    private static bool SameImage(LoadedImage left, LoadedImage right)
-    {
-        return left.ImageBase == right.ImageBase &&
-               left.ImageSize == right.ImageSize &&
-               string.Equals(left.FileName, right.FileName, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static void AddLoadedImageToAddressBuckets(
-        Dictionary<ulong, List<LoadedImage>> imagesByAddressBucket,
-        LoadedImage image)
-    {
-        ulong firstBucket = image.ImageBase >> AddressBucketShift;
-        ulong lastBucket = checked(image.ImageBase + image.ImageSize - 1) >> AddressBucketShift;
-        for (ulong bucket = firstBucket; bucket <= lastBucket; bucket++)
-        {
-            if (!imagesByAddressBucket.TryGetValue(bucket, out List<LoadedImage>? images))
-            {
-                images = [];
-                imagesByAddressBucket[bucket] = images;
-            }
-
-            images.Add(image);
-        }
-    }
-
     private static int GetOpcodeCount(
         IReadOnlyDictionary<long, Dictionary<byte, int>> eventsByRoutineAndOpcode,
         long routineBits,
@@ -691,15 +551,9 @@ internal sealed class DpcUiStutterAnalysisReader : IDpcUiStutterAnalysisReader
         int TimerDpcCount,
         int UnknownOpcodeCount,
         long FirstSeenTicks,
-        long LastSeenTicks);
-
-    private sealed record LoadedImage(
-        string FileName,
-        long ProcessId,
-        ulong ImageBase,
-        ulong ImageSize,
-        long LoadedAtUtc,
-        long? UnloadedAtUtc);
+        long LastSeenTicks,
+        string? ModuleName,
+        long? ModuleOffset);
 
     private sealed record ModuleResolution(string Display, string Path);
 

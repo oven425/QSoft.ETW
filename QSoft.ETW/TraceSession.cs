@@ -779,6 +779,11 @@ namespace QSoft.ETW
         /// 是 TraceProcessor IServiceDataSource 背後對應的資料來源之一(已用 Get-WinEvent -ListProvider 查證 template)。
         /// </summary>
         public static readonly Guid ServicesProviderGuid = new("0063715b-eeda-4007-9429-ad526f62696e");
+        /// <summary>
+        /// Microsoft-Windows-Services-Svchost。EventId 101/102 分別標記 ServiceMain 呼叫開始/結束，
+        /// 用於建立 TraceProcessor IServiceTransition.ServiceMainCallTimeRange 對等資料。
+        /// </summary>
+        public static readonly Guid ServicesSvchostProviderGuid = new("06184c97-5201-480e-92af-3a3626c5b140");
         public const ulong PowerMeterPollingFiveSecondKeyword = 0x0000000000000004;
         public const ulong SystemMemoryMemoryInfoKeyword = 0x0000000000000010;
         public const ulong SystemMemoryWorkingSetKeyword = 0x0000000000000100;
