@@ -24,31 +24,31 @@ if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSec
 //}
 var capturedEtlPath = args.Length > 0 && File.Exists(args[0])
     ? args[0]
-    : "capture_20260909_092700.etl";
+    : "capture_20260915_121502.etl";
 
 long etlFileSizeBytes = new FileInfo(capturedEtlPath).Length;
 double etlFileSizeMb = etlFileSizeBytes / 1024.0 / 1024.0;
 Console.WriteLine($"ETL 檔案大小: {etlFileSizeMb:F2} MB ({capturedEtlPath})");
 
 DemoResult_Etl etlFileReaderResult = RunEtlFileReaderDemo(capturedEtlPath);
-DemoResult_Tp traceProcessorResult = RunTraceProcessorDemo(capturedEtlPath);
+//DemoResult_Tp traceProcessorResult = RunTraceProcessorDemo(capturedEtlPath);
 
 Console.WriteLine();
 Console.WriteLine("=== 效能比較總結（同一份 ETL，兩種解析方式）===");
 Console.WriteLine($"ETL 檔案大小: {etlFileSizeMb:F2} MB");
 Console.WriteLine($"EtlFileReader ProcessFile() 耗時: {etlFileReaderResult.Elapsed.TotalMilliseconds:F1} ms（{etlFileSizeMb / etlFileReaderResult.Elapsed.TotalSeconds:F2} MB/s）");
-Console.WriteLine($"TraceProcessor trace.Process() 耗時: {traceProcessorResult.Elapsed.TotalMilliseconds:F1} ms（{etlFileSizeMb / traceProcessorResult.Elapsed.TotalSeconds:F2} MB/s）");
-if (etlFileReaderResult.Elapsed < traceProcessorResult.Elapsed)
-{
-    Console.WriteLine($"EtlFileReader 較快，約為 TraceProcessor 的 {traceProcessorResult.Elapsed.TotalMilliseconds / etlFileReaderResult.Elapsed.TotalMilliseconds:F2} 倍速度" +
-        "（但 TraceProcessor 同時多做了跨程序符號解析等 EtlFileReader 未實作的工作，非完全對等負載）。");
-}
-else
-{
-    Console.WriteLine($"TraceProcessor 較快，約為 EtlFileReader 的 {etlFileReaderResult.Elapsed.TotalMilliseconds / traceProcessorResult.Elapsed.TotalMilliseconds:F2} 倍速度。");
-}
+//Console.WriteLine($"TraceProcessor trace.Process() 耗時: {traceProcessorResult.Elapsed.TotalMilliseconds:F1} ms（{etlFileSizeMb / traceProcessorResult.Elapsed.TotalSeconds:F2} MB/s）");
+//if (etlFileReaderResult.Elapsed < traceProcessorResult.Elapsed)
+//{
+//    Console.WriteLine($"EtlFileReader 較快，約為 TraceProcessor 的 {traceProcessorResult.Elapsed.TotalMilliseconds / etlFileReaderResult.Elapsed.TotalMilliseconds:F2} 倍速度" +
+//        "（但 TraceProcessor 同時多做了跨程序符號解析等 EtlFileReader 未實作的工作，非完全對等負載）。");
+//}
+//else
+//{
+//    Console.WriteLine($"TraceProcessor 較快，約為 EtlFileReader 的 {etlFileReaderResult.Elapsed.TotalMilliseconds / traceProcessorResult.Elapsed.TotalMilliseconds:F2} 倍速度。");
+//}
 
-DemoResultValidator.Validate(etlFileReaderResult, traceProcessorResult);
+//DemoResultValidator.Validate(etlFileReaderResult, traceProcessorResult);
 
 return 0;
 
@@ -187,11 +187,11 @@ static DemoResult_Etl RunEtlFileReaderDemo(string etlFilePath)
 
     EtlFileReader reader = new();
     reader.UseBuiltInAnalysis();
-    var pendingProcesses = reader.UseProcesses();
-    var pendingServices = reader.UseServices();
-    var pendingThreads = reader.UseThreads();
-    var pendingEnergy = reader.UseEnergyEstimationData();
-    var pendingEnergyMeter = reader.UseEnergyMeterData();
+    //var pendingProcesses = reader.UseProcesses();
+    //var pendingServices = reader.UseServices();
+    //var pendingThreads = reader.UseThreads();
+    //var pendingEnergy = reader.UseEnergyEstimationData();
+    //var pendingEnergyMeter = reader.UseEnergyMeterData();
     DbgHelpSymbolResolutionOptions? symbolOptions = CreateDbgHelpOptionsFromEnvironment();
     var pendingInterruptHandling = symbolOptions is null
         ? reader.UseInterruptHandlingData()
@@ -224,211 +224,205 @@ static DemoResult_Etl RunEtlFileReaderDemo(string etlFilePath)
     EtlAnalysisResult analysis = result.Analysis!;
 
     Console.WriteLine();
-    IReadOnlyList<ProcessRecord> processes = pendingProcesses.Result.Processes;
-    Console.WriteLine($"[Result] 程序數: {processes.Count} 個（ProcessRecord 已含 PID、映像檔名、命令列、父程序、存續時間，免自行組裝）");
-    Console.WriteLine($"[Result] 動態服務數: {pendingServices.Result.Services.Count} 個，設定快照數: {pendingServices.Result.Snapshots.Count} 個" +
-        "（完整對應 IServiceDataSource 的 Services 與 Snapshots）");
-    foreach (ServiceRecord svc in pendingServices.Result.Services.Take(5))
-    {
-        Console.WriteLine($"  {svc.ServiceName} ({svc.ImageFileName}): PID={svc.ProcessId?.ToString() ?? "?"} 狀態={svc.CurrentState}");
-    }
+    //IReadOnlyList<ProcessRecord> processes = pendingProcesses.Result.Processes;
+    //Console.WriteLine($"[Result] 程序數: {processes.Count} 個（ProcessRecord 已含 PID、映像檔名、命令列、父程序、存續時間，免自行組裝）");
+    //Console.WriteLine($"[Result] 動態服務數: {pendingServices.Result.Services.Count} 個，設定快照數: {pendingServices.Result.Snapshots.Count} 個" +
+    //    "（完整對應 IServiceDataSource 的 Services 與 Snapshots）");
+    //foreach (ServiceRecord svc in pendingServices.Result.Services.Take(5))
+    //{
+    //    Console.WriteLine($"  {svc.ServiceName} ({svc.ImageFileName}): PID={svc.ProcessId?.ToString() ?? "?"} 狀態={svc.CurrentState}");
+    //}
 
-    IReadOnlyList<ThreadRecord> threads = pendingThreads.Result.Threads;
-    int namedThreadCount = threads.Count(t => !string.IsNullOrEmpty(t.Name));
-    Console.WriteLine($"[Result] 執行緒數: {threads.Count} 個（ThreadRecord 對應 TraceProcessor 的 IThread，含建立/結束時間、堆疊範圍、優先權、可執行處理器、啟動位址與名稱），其中具名 {namedThreadCount} 個");
-    foreach (ThreadRecord t in threads.Where(t => !string.IsNullOrEmpty(t.Name)).Take(5))
-    {
-        Console.WriteLine($"  TID={t.ThreadId} PID={t.ProcessId} Name=\"{t.Name}\" BasePriority={t.BasePriority} PagePriority={t.PagePriority} IoPriority={t.IoPriority} StartAddress模組={t.StartAddressModuleName}+0x{t.StartAddressModuleOffset:X}");
-    }
+    //IReadOnlyList<ThreadRecord> threads = pendingThreads.Result.Threads;
+    //int namedThreadCount = threads.Count(t => !string.IsNullOrEmpty(t.Name));
+    //Console.WriteLine($"[Result] 執行緒數: {threads.Count} 個（ThreadRecord 對應 TraceProcessor 的 IThread，含建立/結束時間、堆疊範圍、優先權、可執行處理器、啟動位址與名稱），其中具名 {namedThreadCount} 個");
+    //foreach (ThreadRecord t in threads.Where(t => !string.IsNullOrEmpty(t.Name)).Take(5))
+    //{
+    //    Console.WriteLine($"  TID={t.ThreadId} PID={t.ProcessId} Name=\"{t.Name}\" BasePriority={t.BasePriority} PagePriority={t.PagePriority} IoPriority={t.IoPriority} StartAddress模組={t.StartAddressModuleName}+0x{t.StartAddressModuleOffset:X}");
+    //}
 
-    IReadOnlyList<EnergyEstimationInterval> energyIntervals = pendingEnergy.Result.Intervals;
-    Console.WriteLine($"[Result] Energy Estimation 週期數: {energyIntervals.Count} 筆（EnergyEstimationInterval 每筆對應一次 E3 估算週期，含 CPU/Disk/Display/Network/SoC 等分項能耗）");
-    var topEnergyConsumers = energyIntervals
-        .GroupBy(interval => interval.ProcessId)
-        .Select(group => new
-        {
-            ProcessId = group.Key,
-            ImageName = group.First().ImageName,
-            TotalMilliJoules = group.Sum(interval => (double)interval.TotalEnergy),
-        })
-        .OrderByDescending(item => item.TotalMilliJoules)
-        .Take(5);
+    //IReadOnlyList<EnergyEstimationInterval> energyIntervals = pendingEnergy.Result.Intervals;
+    //Console.WriteLine($"[Result] Energy Estimation 週期數: {energyIntervals.Count} 筆（EnergyEstimationInterval 每筆對應一次 E3 估算週期，含 CPU/Disk/Display/Network/SoC 等分項能耗）");
+    //var topEnergyConsumers = energyIntervals
+    //    .GroupBy(interval => interval.ProcessId)
+    //    .Select(group => new
+    //    {
+    //        ProcessId = group.Key,
+    //        ImageName = group.First().ImageName,
+    //        TotalMilliJoules = group.Sum(interval => (double)interval.TotalEnergy),
+    //    })
+    //    .OrderByDescending(item => item.TotalMilliJoules)
+    //    .Take(5);
 
-    Console.WriteLine("[Result] 估計耗能前 5 名（依 ProcessId 加總 TotalEnergy）：");
-    foreach (var item in topEnergyConsumers)
-    {
-        Console.WriteLine($"  PID={item.ProcessId} {item.ImageName}: {item.TotalMilliJoules:F1} mJ");
-    }
+    //Console.WriteLine("[Result] 估計耗能前 5 名（依 ProcessId 加總 TotalEnergy）：");
+    //foreach (var item in topEnergyConsumers)
+    //{
+    //    Console.WriteLine($"  PID={item.ProcessId} {item.ImageName}: {item.TotalMilliJoules:F1} mJ");
+    //}
 
-    IReadOnlyList<EnergyMeasurementInterval> energyMeterIntervals = pendingEnergyMeter.Result.Intervals;
-    Console.WriteLine($"[Result] Energy Meter(EMI)區間數: {energyMeterIntervals.Count} 筆（EnergyMeasurementInterval 每筆對應硬體計量通道相鄰兩次讀數之間的耗能，僅在裝置支援 EMI 時才會有資料）");
-    var topEnergyMeterChannels = energyMeterIntervals
-        .GroupBy(interval => interval.ChannelName)
-        .Select(group => new
-        {
-            ChannelName = group.Key,
-            TotalMilliJoules = group.Sum(interval => interval.TotalEnergy),
-        })
-        .OrderByDescending(item => item.TotalMilliJoules)
-        .Take(5);
+    //IReadOnlyList<EnergyMeasurementInterval> energyMeterIntervals = pendingEnergyMeter.Result.Intervals;
+    //Console.WriteLine($"[Result] Energy Meter(EMI)區間數: {energyMeterIntervals.Count} 筆（EnergyMeasurementInterval 每筆對應硬體計量通道相鄰兩次讀數之間的耗能，僅在裝置支援 EMI 時才會有資料）");
+    //var topEnergyMeterChannels = energyMeterIntervals
+    //    .GroupBy(interval => interval.ChannelName)
+    //    .Select(group => new
+    //    {
+    //        ChannelName = group.Key,
+    //        TotalMilliJoules = group.Sum(interval => interval.TotalEnergy),
+    //    })
+    //    .OrderByDescending(item => item.TotalMilliJoules)
+    //    .Take(5);
 
-    Console.WriteLine("[Result] 硬體電錶耗能前 5 個通道（依 ChannelName 加總 TotalEnergy）：");
-    foreach (var item in topEnergyMeterChannels)
-    {
-        Console.WriteLine($"  {item.ChannelName}: {item.TotalMilliJoules:F1} mJ");
-    }
+    //Console.WriteLine("[Result] 硬體電錶耗能前 5 個通道（依 ChannelName 加總 TotalEnergy）：");
+    //foreach (var item in topEnergyMeterChannels)
+    //{
+    //    Console.WriteLine($"  {item.ChannelName}: {item.TotalMilliJoules:F1} mJ");
+    //}
 
-    Console.WriteLine("[Result] 估計 CPU 執行時間前 5 名（由內建引擎配對 CSwitch New/Old 累加而得）：");
-    foreach (EtlProcessCpuSummary cpu in analysis.ProcessCpuSummaries.Take(5))
-    {
-        Console.WriteLine($"  PID={cpu.ProcessId} {cpu.ImageFileName}: {cpu.EstimatedExecutionTime.TotalMilliseconds:F3} ms");
-    }
+    //Console.WriteLine("[Result] 估計 CPU 執行時間前 5 名（由內建引擎配對 CSwitch New/Old 累加而得）：");
+    //foreach (EtlProcessCpuSummary cpu in analysis.ProcessCpuSummaries.Take(5))
+    //{
+    //    Console.WriteLine($"  PID={cpu.ProcessId} {cpu.ImageFileName}: {cpu.EstimatedExecutionTime.TotalMilliseconds:F3} ms");
+    //}
 
-    Console.WriteLine("[Result] CPU 取樣熱點前 5 名（由內建引擎以 InstructionPointer 反查所屬模組/RVA）：");
-    foreach (AddressSampleSummary hotspot in analysis.ProfileHotspots.Take(5))
-    {
-        Console.WriteLine($"  0x{hotspot.Address:X} {hotspot.ModuleName}+0x{hotspot.ModuleRelativeAddress?.ToString("X") ?? "?"}: {hotspot.SampleCount} 次");
-    }
+    //Console.WriteLine("[Result] CPU 取樣熱點前 5 名（由內建引擎以 InstructionPointer 反查所屬模組/RVA）：");
+    //foreach (AddressSampleSummary hotspot in analysis.ProfileHotspots.Take(5))
+    //{
+    //    Console.WriteLine($"  0x{hotspot.Address:X} {hotspot.ModuleName}+0x{hotspot.ModuleRelativeAddress?.ToString("X") ?? "?"}: {hotspot.SampleCount} 次");
+    //}
 
-    if (analysis.DataQualityWarnings.Count > 0)
-    {
-        Console.WriteLine("[Result] 資料品質警告：");
-        foreach (string warning in analysis.DataQualityWarnings)
-        {
-            Console.WriteLine($"  - {warning}");
-        }
-    }
+    //if (analysis.DataQualityWarnings.Count > 0)
+    //{
+    //    Console.WriteLine("[Result] 資料品質警告：");
+    //    foreach (string warning in analysis.DataQualityWarnings)
+    //    {
+    //        Console.WriteLine($"  - {warning}");
+    //    }
+    //}
 
-    // === UseInterruptHandlingData()：對應 TraceProcessor 的 trace.UseInterruptHandlingData() ===
-    IReadOnlyList<InterruptServiceRoutineInterval> isrIntervals = pendingInterruptHandling.Result.InterruptServiceRoutines;
-    IReadOnlyList<DeferredProcedureCallInterval> dpcIntervals = pendingInterruptHandling.Result.DeferredProcedureCalls;
-    Console.WriteLine();
-    Console.WriteLine($"[Result] ISR 區間數: {isrIntervals.Count} 筆，DPC 區間數: {dpcIntervals.Count} 筆" +
-        "（IInterruptServiceRoutineInterval/IDeferredProcedureCallInterval 對等，StartTime 由 payload InitialTime 依 ETL clock type 直接換算）");
-    IEnumerable<HandlerStackFrameInfo> handlerFrames = isrIntervals
-        .Select(interval => interval.HandlerStackFrame)
-        .Concat(dpcIntervals.Select(interval => interval.HandlerStackFrame))
-        .OfType<HandlerStackFrameInfo>();
-    Console.WriteLine("[Result] HandlerStackFrame 狀態：" +
-        string.Join(", ", handlerFrames
-            .GroupBy(frame => frame.SymbolResolutionStatus)
-            .OrderBy(group => group.Key)
-            .Select(group => $"{group.Key}={group.Count()}")));
-    foreach (HandlerStackFrameInfo frame in handlerFrames
-        .Where(frame => frame.SymbolResolutionStatus == HandlerSymbolResolutionStatus.Resolved)
-        .DistinctBy(frame => (frame.ModuleName, frame.Address))
-        .Take(5))
-    {
-        Console.WriteLine(
-            $"  {Path.GetFileName(frame.ModuleName)}!{frame.SymbolName}+0x{frame.SymbolDisplacement:X} " +
-            $"(RVA=0x{frame.RelativeVirtualAddress:X}, VA=0x{frame.Address:X})");
-    }
+    //// === UseInterruptHandlingData()：對應 TraceProcessor 的 trace.UseInterruptHandlingData() ===
+    //IReadOnlyList<InterruptServiceRoutineInterval> isrIntervals = pendingInterruptHandling.Result.InterruptServiceRoutines;
+    //IReadOnlyList<DeferredProcedureCallInterval> dpcIntervals = pendingInterruptHandling.Result.DeferredProcedureCalls;
+    //Console.WriteLine();
+    //Console.WriteLine($"[Result] ISR 區間數: {isrIntervals.Count} 筆，DPC 區間數: {dpcIntervals.Count} 筆" +
+    //    "（IInterruptServiceRoutineInterval/IDeferredProcedureCallInterval 對等，StartTime 由 payload InitialTime 依 ETL clock type 直接換算）");
+    //IEnumerable<HandlerStackFrameInfo> handlerFrames = isrIntervals
+    //    .Select(interval => interval.HandlerStackFrame)
+    //    .Concat(dpcIntervals.Select(interval => interval.HandlerStackFrame))
+    //    .OfType<HandlerStackFrameInfo>();
+    //Console.WriteLine("[Result] HandlerStackFrame 狀態：" +
+    //    string.Join(", ", handlerFrames
+    //        .GroupBy(frame => frame.SymbolResolutionStatus)
+    //        .OrderBy(group => group.Key)
+    //        .Select(group => $"{group.Key}={group.Count()}")));
+    //foreach (HandlerStackFrameInfo frame in handlerFrames
+    //    .Where(frame => frame.SymbolResolutionStatus == HandlerSymbolResolutionStatus.Resolved)
+    //    .DistinctBy(frame => (frame.ModuleName, frame.Address))
+    //    .Take(5))
+    //{
+    //    Console.WriteLine(
+    //        $"  {Path.GetFileName(frame.ModuleName)}!{frame.SymbolName}+0x{frame.SymbolDisplacement:X} " +
+    //        $"(RVA=0x{frame.RelativeVirtualAddress:X}, VA=0x{frame.Address:X})");
+    //}
 
-    var isrByModule = isrIntervals
-        .GroupBy(isr => isr.HandlerModuleName)
-        .Select(group => new
-        {
-            Module = group.Key,
-            Count = group.Count(),
-            TotalMilliseconds = group.Sum(item => item.DurationMSec),
-        })
-        .OrderByDescending(item => item.TotalMilliseconds)
-        .Take(5);
+    //var isrByModule = isrIntervals
+    //    .GroupBy(isr => isr.HandlerModuleName)
+    //    .Select(group => new
+    //    {
+    //        Module = group.Key,
+    //        Count = group.Count(),
+    //        TotalMilliseconds = group.Sum(item => item.DurationMSec),
+    //    })
+    //    .OrderByDescending(item => item.TotalMilliseconds)
+    //    .Take(5);
 
-    Console.WriteLine("[Result] ISR 執行時間前 5 名模組（依 HandlerModuleName 分組）：");
-    foreach (var item in isrByModule)
-    {
-        Console.WriteLine($"  {item.Module}: {item.Count} 次，共 {item.TotalMilliseconds:F3} ms");
-    }
+    //Console.WriteLine("[Result] ISR 執行時間前 5 名模組（依 HandlerModuleName 分組）：");
+    //foreach (var item in isrByModule)
+    //{
+    //    Console.WriteLine($"  {item.Module}: {item.Count} 次，共 {item.TotalMilliseconds:F3} ms");
+    //}
 
-    var dpcByModule = dpcIntervals
-        .GroupBy(dpc => dpc.HandlerModuleName)
-        .Select(group => new
-        {
-            Module = group.Key,
-            Count = group.Count(),
-            TotalMilliseconds = group.Sum(item => item.DurationMSec),
-        })
-        .OrderByDescending(item => item.TotalMilliseconds)
-        .Take(5);
+    //var dpcByModule = dpcIntervals
+    //    .GroupBy(dpc => dpc.HandlerModuleName)
+    //    .Select(group => new
+    //    {
+    //        Module = group.Key,
+    //        Count = group.Count(),
+    //        TotalMilliseconds = group.Sum(item => item.DurationMSec),
+    //    })
+    //    .OrderByDescending(item => item.TotalMilliseconds)
+    //    .Take(5);
 
-    Console.WriteLine("[Result] DPC 執行時間前 5 名模組（依 HandlerModuleName 分組）：");
-    foreach (var item in dpcByModule)
-    {
-        Console.WriteLine($"  {item.Module}: {item.Count} 次，共 {item.TotalMilliseconds:F3} ms");
-    }
+    //Console.WriteLine("[Result] DPC 執行時間前 5 名模組（依 HandlerModuleName 分組）：");
+    //foreach (var item in dpcByModule)
+    //{
+    //    Console.WriteLine($"  {item.Module}: {item.Count} 次，共 {item.TotalMilliseconds:F3} ms");
+    //}
 
-    var dpcByType = dpcIntervals
-        .GroupBy(dpc => dpc.CallType == EtlDeferredProcedureCallType.ThreadedDpc ? EtlDeferredProcedureCallType.Normal : dpc.CallType)
-        .Select(group => new { CallType = group.Key, Count = group.Count() });
+    //var dpcByType = dpcIntervals
+    //    .GroupBy(dpc => dpc.CallType == EtlDeferredProcedureCallType.ThreadedDpc ? EtlDeferredProcedureCallType.Normal : dpc.CallType)
+    //    .Select(group => new { CallType = group.Key, Count = group.Count() });
 
-    Console.WriteLine("[Result] DPC 依 CallType 統計（ThreadedDpc 已併入 Normal，才能與 TraceProcessor 對等比較）：");
-    foreach (var item in dpcByType)
-    {
-        Console.WriteLine($"  {item.CallType}: {item.Count} 次");
-    }
+    //Console.WriteLine("[Result] DPC 依 CallType 統計（ThreadedDpc 已併入 Normal，才能與 TraceProcessor 對等比較）：");
+    //foreach (var item in dpcByType)
+    //{
+    //    Console.WriteLine($"  {item.CallType}: {item.Count} 次");
+    //}
 
-    // === UseMemoryUtilizationData()：對應 TraceProcessor 的 trace.UseMemoryUtilizationData() ===
-    IReadOnlyList<MemoryUtilizationEventInfo> memorySnapshots = pendingMemoryUtilization.Result.Snapshots;
-    Console.WriteLine($"[Result] 系統記憶體用量快照數: {memorySnapshots.Count} 筆" +
-        "（對應 IMemoryUtilizationSnapshot，來源為 Microsoft-Windows-Kernel-Memory 的 MemInfo 事件）");
-    if (memorySnapshots.Count > 0)
-    {
-        MemoryUtilizationEventInfo lastSnapshot = memorySnapshots[^1];
-        static double ToMb(long pageCount) =>
-            pageCount * MemoryUtilizationEventInfo.PageSizeBytes / 1_000_000.0;
+    //// === UseMemoryUtilizationData()：對應 TraceProcessor 的 trace.UseMemoryUtilizationData() ===
+    //IReadOnlyList<MemoryUtilizationEventInfo> memorySnapshots = pendingMemoryUtilization.Result.Snapshots;
+    //Console.WriteLine($"[Result] 系統記憶體用量快照數: {memorySnapshots.Count} 筆" +
+    //    "（對應 IMemoryUtilizationSnapshot，來源為 Microsoft-Windows-Kernel-Memory 的 MemInfo 事件）");
+    //if (memorySnapshots.Count > 0)
+    //{
+    //    MemoryUtilizationEventInfo lastSnapshot = memorySnapshots[^1];
+    //    static double ToMb(long pageCount) =>
+    //        pageCount * MemoryUtilizationEventInfo.PageSizeBytes / 1_000_000.0;
 
-        Console.WriteLine($"  最後一筆快照 @ {lastSnapshot.Timestamp:HH:mm:ss.fff}：");
-        Console.WriteLine($"    ZeroListSize={ToMb(lastSnapshot.ZeroPageCount):F2} MB, FreeListSize={ToMb(lastSnapshot.FreePageCount):F2} MB, InUseListSize={ToMb(lastSnapshot.InUsePageCount):F2} MB");
-        Console.WriteLine($"    ModifiedListSize={ToMb(lastSnapshot.ModifiedPageCount):F2} MB, ModifiedNoWriteListSize={ToMb(lastSnapshot.ModifiedNoWritePageCount):F2} MB, BadListSize={ToMb(lastSnapshot.BadPageCount):F2} MB");
-        Console.WriteLine($"    StandbyListSize={ToMb(lastSnapshot.StandbyTotalPageCount):F2} MB, NonSuperfetchStandbyListSize={ToMb(lastSnapshot.NonSuperfetchStandbyPageCount):F2} MB, RepurposedListSize={ToMb(lastSnapshot.RepurposedTotalPageCount):F2} MB");
-        Console.WriteLine($"    ModifiedPageFileDataSize={ToMb(lastSnapshot.ModifiedPageFilePageCount):F2} MB, PagedPoolCommitSize={ToMb(lastSnapshot.PagedPoolPageCount):F2} MB, NonPagedPoolSize={ToMb(lastSnapshot.NonPagedPoolPageCount):F2} MB");
-        Console.WriteLine($"    MemoryDescriptorListAllocationsSize={ToMb(lastSnapshot.MdlPageCount):F2} MB, CommitSize={ToMb(lastSnapshot.CommitPageCount):F2} MB");
-    }
+    //    Console.WriteLine($"  最後一筆快照 @ {lastSnapshot.Timestamp:HH:mm:ss.fff}：");
+    //    Console.WriteLine($"    ZeroListSize={ToMb(lastSnapshot.ZeroPageCount):F2} MB, FreeListSize={ToMb(lastSnapshot.FreePageCount):F2} MB, InUseListSize={ToMb(lastSnapshot.InUsePageCount):F2} MB");
+    //    Console.WriteLine($"    ModifiedListSize={ToMb(lastSnapshot.ModifiedPageCount):F2} MB, ModifiedNoWriteListSize={ToMb(lastSnapshot.ModifiedNoWritePageCount):F2} MB, BadListSize={ToMb(lastSnapshot.BadPageCount):F2} MB");
+    //    Console.WriteLine($"    StandbyListSize={ToMb(lastSnapshot.StandbyTotalPageCount):F2} MB, NonSuperfetchStandbyListSize={ToMb(lastSnapshot.NonSuperfetchStandbyPageCount):F2} MB, RepurposedListSize={ToMb(lastSnapshot.RepurposedTotalPageCount):F2} MB");
+    //    Console.WriteLine($"    ModifiedPageFileDataSize={ToMb(lastSnapshot.ModifiedPageFilePageCount):F2} MB, PagedPoolCommitSize={ToMb(lastSnapshot.PagedPoolPageCount):F2} MB, NonPagedPoolSize={ToMb(lastSnapshot.NonPagedPoolPageCount):F2} MB");
+    //    Console.WriteLine($"    MemoryDescriptorListAllocationsSize={ToMb(lastSnapshot.MdlPageCount):F2} MB, CommitSize={ToMb(lastSnapshot.CommitPageCount):F2} MB");
+    //}
 
-    // === 為了讓 RunTraceProcessorDemo 解析同一份 ETL 後可互相驗證，整理出跨兩種實作共用的比對快照 ===
-    ServiceDataSnapshot serviceDataSnapshot =
-        DemoResultValidator.ToServiceDataSnapshot(pendingServices.Result);
-    var threadSnapshots = threads
-        .Select(t => new ThreadSnapshot(
-            t.ThreadId,
-            t.ProcessId,
-            t.Name ?? string.Empty,
-            t.CreateTime,
-            t.ExitTime,
-            t.BasePriority ?? 0,
-            (int?)t.PagePriority,
-            (int?)t.IoPriority,
-            ToSignedAddress(t.ProcessorAffinity) ?? 0,
-            ToSignedAddress(t.StackBase),
-            ToSignedAddress(t.StackLimit),
-            ToSignedAddress(t.UserStackBase),
-            ToSignedAddress(t.UserStackLimit),
-            ToSignedAddress(t.StartAddress),
-            ToSignedAddress(t.TebBase),
-            ToSignedId(t.ServiceId),
-            t.StartAddressModuleName))
-        .ToList();
-    var interruptModuleSnapshots = DemoResultValidator.BuildInterruptModuleSnapshots(
-        isrIntervals.Select(isr => isr.HandlerModuleName),
-        dpcIntervals.Select(dpc => dpc.HandlerModuleName));
-    return new DemoResult_Etl(
-        stopwatch.Elapsed,
-        result.TraceStartTime,
-        result.TraceEndTime,
-        processes,
-        serviceDataSnapshot,
-        memorySnapshots,
-        isrIntervals,
-        dpcIntervals);
-    //return new DemoResult(
+    //// === 為了讓 RunTraceProcessorDemo 解析同一份 ETL 後可互相驗證，整理出跨兩種實作共用的比對快照 ===
+    //ServiceDataSnapshot serviceDataSnapshot =
+    //    DemoResultValidator.ToServiceDataSnapshot(pendingServices.Result);
+    //var threadSnapshots = threads
+    //    .Select(t => new ThreadSnapshot(
+    //        t.ThreadId,
+    //        t.ProcessId,
+    //        t.Name ?? string.Empty,
+    //        t.CreateTime,
+    //        t.ExitTime,
+    //        t.BasePriority ?? 0,
+    //        (int?)t.PagePriority,
+    //        (int?)t.IoPriority,
+    //        ToSignedAddress(t.ProcessorAffinity) ?? 0,
+    //        ToSignedAddress(t.StackBase),
+    //        ToSignedAddress(t.StackLimit),
+    //        ToSignedAddress(t.UserStackBase),
+    //        ToSignedAddress(t.UserStackLimit),
+    //        ToSignedAddress(t.StartAddress),
+    //        ToSignedAddress(t.TebBase),
+    //        ToSignedId(t.ServiceId),
+    //        t.StartAddressModuleName))
+    //    .ToList();
+    //var interruptModuleSnapshots = DemoResultValidator.BuildInterruptModuleSnapshots(
+    //    isrIntervals.Select(isr => isr.HandlerModuleName),
+    //    dpcIntervals.Select(dpc => dpc.HandlerModuleName));
+    //return new DemoResult_Etl(
     //    stopwatch.Elapsed,
-    //    processSnapshots,
-    //    serviceSnapshots,
-    //    energyIntervals.Count,
-    //    energyIntervals.Sum(i => (double)i.TotalEnergy),
-    //    interruptModuleSnapshots,
-    //    threadSnapshots);
+    //    result.TraceStartTime,
+    //    result.TraceEndTime,
+    //    processes,
+    //    serviceDataSnapshot,
+    //    memorySnapshots,
+    //    isrIntervals,
+    //    dpcIntervals);
+
+    return null;
 }
 
 /// <summary>

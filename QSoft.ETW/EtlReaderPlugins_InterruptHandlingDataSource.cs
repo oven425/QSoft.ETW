@@ -37,6 +37,15 @@ internal sealed class InterruptHandlingDataSourceCollector(
     : IEtlReaderPlugin, IInterruptHandlingDataSource, IPendingResult<IInterruptHandlingDataSource>
 {
     private readonly List<ModuleInfo> _modules = [];
+
+    /// <summary>
+    /// 依 (ProcessId, ImageBase) 分組的模組索引，供 OnImageUnload/OnImageRundown 做 O(1) 精確鍵值查找，
+    /// 避免對 _modules 做全表 LINQ 掃描(掃描量會隨追蹤時間累積的模組數等比放大，是效能瓶頸主因之一)。
+    /// FindModule() 仍需針對「位址是否落在某模組範圍內」跨程序查找，無法比照精確鍵值索引，
+    /// 但已改寫成不經 LINQ 的單一迴圈(見該方法註解)。
+    /// </summary>
+    private readonly Dictionary<(uint ProcessId, ulong ImageBase), List<ModuleInfo>> _modulesByProcessAndBase = [];
+
     private readonly List<InterruptEventInfo> _pendingIsrEvents = [];
     private readonly List<(DpcEventInfo Data, EtlDeferredProcedureCallType CallType)> _pendingDpcEvents = [];
     private readonly List<InterruptServiceRoutineInterval> _isrIntervals = [];
@@ -53,6 +62,7 @@ internal sealed class InterruptHandlingDataSourceCollector(
     public void Attach(EtlFileReader reader)
     {
         _modules.Clear();
+        _modulesByProcessAndBase.Clear();
         _pendingIsrEvents.Clear();
         _pendingDpcEvents.Clear();
         _isrIntervals.Clear();
@@ -135,10 +145,7 @@ internal sealed class InterruptHandlingDataSourceCollector(
         _completed = true;
     }
 
-    private static DateTime GetStartTime(
-        double? elapsedTimeMSec,
-        DateTime? initialTimestamp,
-        DateTime stopTime) =>
+    private static DateTime GetStartTime(double? elapsedTimeMSec, DateTime? initialTimestamp, DateTime stopTime) =>
         elapsedTimeMSec is >= 0 ? initialTimestamp ?? stopTime : stopTime;
 
     private void OnImageLoad(in ImageLoadEventInfo info) => AddModule(info, info.Timestamp);
@@ -152,10 +159,19 @@ internal sealed class InterruptHandlingDataSourceCollector(
 
         uint processId = info.ProcessId;
         string fileName = info.FileName;
-        bool alreadyKnown = _modules.Any(module =>
-            module.ProcessId == processId &&
-            module.ImageBase == imageBase &&
-            string.Equals(module.FileName, fileName, StringComparison.OrdinalIgnoreCase));
+        bool alreadyKnown = false;
+        if (_modulesByProcessAndBase.TryGetValue((processId, imageBase), out List<ModuleInfo>? candidates))
+        {
+            foreach (ModuleInfo candidate in candidates)
+            {
+                if (string.Equals(candidate.FileName, fileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    alreadyKnown = true;
+                    break;
+                }
+            }
+        }
+
         if (!alreadyKnown)
         {
             AddModule(info, DateTime.MinValue);
@@ -171,7 +187,7 @@ internal sealed class InterruptHandlingDataSourceCollector(
             return;
         }
 
-        _modules.Add(new ModuleInfo
+        ModuleInfo module = new()
         {
             ProcessId = info.ProcessId,
             ImageBase = imageBase,
@@ -180,7 +196,18 @@ internal sealed class InterruptHandlingDataSourceCollector(
             FileName = info.FileName,
             ImageCheckSum = info.ImageCheckSum,
             TimeDateStamp = info.TimeDateStamp,
-        });
+        };
+
+        _modules.Add(module);
+
+        (uint ProcessId, ulong ImageBase) key = (info.ProcessId, imageBase);
+        if (!_modulesByProcessAndBase.TryGetValue(key, out List<ModuleInfo>? bucket))
+        {
+            bucket = [];
+            _modulesByProcessAndBase[key] = bucket;
+        }
+
+        bucket.Add(module);
     }
 
     private void OnImageUnload(in ImageLoadEventInfo info)
@@ -192,17 +219,29 @@ internal sealed class InterruptHandlingDataSourceCollector(
 
         uint processId = info.ProcessId;
         DateTime timestamp = info.Timestamp;
-        ModuleInfo? module = _modules
-            .Where(candidate =>
-                candidate.ProcessId == processId &&
-                candidate.ImageBase == imageBase &&
-                candidate.UnloadTime is null &&
-                candidate.LoadTime <= timestamp)
-            .OrderByDescending(candidate => candidate.LoadTime)
-            .FirstOrDefault();
-        if (module is not null)
+
+        if (!_modulesByProcessAndBase.TryGetValue((processId, imageBase), out List<ModuleInfo>? candidates))
         {
-            module.UnloadTime = timestamp;
+            return;
+        }
+
+        ModuleInfo? best = null;
+        foreach (ModuleInfo candidate in candidates)
+        {
+            if (candidate.UnloadTime is not null || candidate.LoadTime > timestamp)
+            {
+                continue;
+            }
+
+            if (best is null || candidate.LoadTime > best.LoadTime)
+            {
+                best = candidate;
+            }
+        }
+
+        if (best is not null)
+        {
+            best.UnloadTime = timestamp;
         }
     }
 
@@ -217,6 +256,14 @@ internal sealed class InterruptHandlingDataSourceCollector(
     private void OnTimerDpc(in DpcEventInfo data) =>
         _pendingDpcEvents.Add((data, EtlDeferredProcedureCallType.Timer));
 
+    /// <summary>
+    /// 依位址找出當下(timestamp)有效的模組。DPC/ISR 的處理常式位址可能屬於系統中任何一個程序載入的模組
+    /// (例如驅動程式常掛在 System 程序下)，因此必須對 _modules 做跨程序掃描，無法比照 OnImageUnload
+    /// 用 (ProcessId, ImageBase) 精確鍵值索引。這裡改成不經 LINQ 的單一迴圈手動找出 LoadTime 最新的相符模組，
+    /// 取代原本 Where().OrderByDescending().FirstOrDefault()：語意完全相同，但省掉 LINQ 疊代器/委派呼叫、
+    /// 以及「排序整個相符子集合只為取第一筆」的多餘排序開銷。此函式是 DPC/ISR 解析的主要熱路徑
+    /// (Complete() 時每筆事件呼叫一次)，事件量大時原本的 LINQ 版本是主要效能瓶頸。
+    /// </summary>
     private ModuleInfo? FindModule(ulong? address, DateTime timestamp)
     {
         if (address is not ulong value)
@@ -224,14 +271,31 @@ internal sealed class InterruptHandlingDataSourceCollector(
             return null;
         }
 
-        return _modules
-            .Where(module =>
-                value >= module.ImageBase &&
-                value - module.ImageBase < module.ImageSize &&
-                module.LoadTime <= timestamp &&
-                (module.UnloadTime is null || timestamp < module.UnloadTime.Value))
-            .OrderByDescending(module => module.LoadTime)
-            .FirstOrDefault();
+        ModuleInfo? best = null;
+        foreach (ModuleInfo module in _modules)
+        {
+            if (value < module.ImageBase || value - module.ImageBase >= module.ImageSize)
+            {
+                continue;
+            }
+
+            if (module.LoadTime > timestamp)
+            {
+                continue;
+            }
+
+            if (module.UnloadTime is DateTime unloadTime && timestamp >= unloadTime)
+            {
+                continue;
+            }
+
+            if (best is null || module.LoadTime > best.LoadTime)
+            {
+                best = module;
+            }
+        }
+
+        return best;
     }
 
     private HandlerStackFrameInfo? CreateFrame(
