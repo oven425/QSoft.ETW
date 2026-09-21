@@ -715,7 +715,7 @@ namespace QSoft.ETW.Legacy
                 data = GC.AllocateArray<byte>(size, pinned: true);
             }
 
-            public ref EVENT_TRACE_PROPERTIES Properties => ref MemoryMarshal.AsRef<EVENT_TRACE_PROPERTIES>(data);
+            public ref EVENT_TRACE_PROPERTIES Properties => ref MemoryMarshal.AsRef<EVENT_TRACE_PROPERTIES>(data.AsSpan());
 
             public Span<byte> AsSpan() => data;
         }

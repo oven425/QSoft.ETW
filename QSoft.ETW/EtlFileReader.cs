@@ -1669,10 +1669,21 @@ public readonly record struct ImageLoadEventInfo
     public string FileName { get; init; }
 }
 
-/// <summary>
-/// 對應 Event ID 37(EnergyEstimate,Version 2):應用程式在本次估算週期內依裝置分類的能耗數值(單位:mJ),
-/// 以及描述量測情境的旗標(電源狀態、前景/背景、是否為實測值等)。欄位對應 tid_34 樣板的完整定義。
-/// </summary>
+public readonly ref struct ImageLoadEventInfoRef
+{
+    public required DateTime Timestamp { get; init; }
+    public required byte Opcode { get; init; }
+    public uint ProcessId { get; init; }
+    public uint ThreadId { get; init; }
+    public ulong ImageBase { get; init; }
+    public ulong ImageSize { get; init; }
+    public uint ImageCheckSum { get; init; }
+    public uint TimeDateStamp { get; init; }
+    public ulong DefaultBase { get; init; }
+    public ReadOnlySpan<char> FileName { get; init; }
+
+}
+
 public readonly record struct EnergyEstimationEngineEventInfo_37
 {
     public required DateTime Timestamp { get; init; }
@@ -2283,6 +2294,8 @@ public sealed class EtlFileReader
     public event ImageLoadEventHandler? ImageDCStart;
     public event ImageLoadEventHandler? ImageDCStop;
 
+    public delegate void ImageLoadEventHandlerRef(in ImageLoadEventInfoRef data);
+    public event ImageLoadEventHandlerRef? ImageLoadRef;
     public delegate void KernelAcpiTemperatureNotificationEventHandler(in KernelAcpiEventInfo_TemperatureNotification data);
     public event KernelAcpiTemperatureNotificationEventHandler? KernelAcpiTemperatureNotification;
 
@@ -4441,4 +4454,65 @@ public sealed class EtlFileReader
                 : string.Empty,
         };
     }
+
+    private unsafe bool TryParseImageLoadPayloadRef(
+        DateTime timestamp,
+        byte opcode,
+        in EVENT_HEADER header,
+        nint userData,
+        int userDataLength,
+        out ImageLoadEventInfoRef result)
+    {
+        result = default;
+
+        var pointerSize = GetPointerSize(in header);
+
+        int imageBaseOffset = 0;
+        int imageSizeOffset = imageBaseOffset + (int)pointerSize;
+        int processIdOffset = imageSizeOffset + (int)pointerSize;
+        int imageCheckSumOffset = processIdOffset + sizeof(uint);
+        int timeDateStampOffset = imageCheckSumOffset + sizeof(uint);
+        int reserved0Offset = timeDateStampOffset + sizeof(uint);
+        int defaultBaseOffset = reserved0Offset + sizeof(uint);
+        int reservedTailOffset = defaultBaseOffset + (int)pointerSize;
+        int fileNameOffset = reservedTailOffset + 4 * sizeof(uint);
+
+        if (userData == 0 || userDataLength < processIdOffset + sizeof(uint))
+        {
+            return false;
+        }
+
+        uint processId = unchecked((uint)Marshal.ReadInt32(userData, processIdOffset));
+        bool hasFullFixedPayload = userDataLength >= fileNameOffset;
+        ReadOnlySpan<char> fileName = ReadOnlySpan<char>.Empty;
+
+        if (hasFullFixedPayload && fileNameOffset < userDataLength)
+        {
+            int fileNameCharLength = (userDataLength - fileNameOffset) / sizeof(char);
+            ReadOnlySpan<char> fileNameData = new(
+                (void*)(userData + fileNameOffset),
+                fileNameCharLength);
+            int terminatorIndex = fileNameData.IndexOf('\0');
+            fileName = terminatorIndex >= 0
+                ? fileNameData[..terminatorIndex]
+                : fileNameData;
+        }
+
+        result = new ImageLoadEventInfoRef
+        {
+            Timestamp = timestamp,
+            Opcode = opcode,
+            ProcessId = processId,
+            ThreadId = header.ThreadId,
+            ImageBase = hasFullFixedPayload ? ReadPointer(userData, imageBaseOffset, pointerSize) : 0,
+            ImageSize = hasFullFixedPayload ? ReadPointer(userData, imageSizeOffset, pointerSize) : 0,
+            ImageCheckSum = hasFullFixedPayload ? unchecked((uint)Marshal.ReadInt32(userData, imageCheckSumOffset)) : 0,
+            TimeDateStamp = hasFullFixedPayload ? unchecked((uint)Marshal.ReadInt32(userData, timeDateStampOffset)) : 0,
+            DefaultBase = hasFullFixedPayload ? ReadPointer(userData, defaultBaseOffset, pointerSize) : 0,
+            FileName = fileName,
+        };
+
+        return true;
+    }
+
 }

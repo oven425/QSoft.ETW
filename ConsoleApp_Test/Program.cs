@@ -11,7 +11,7 @@ using System.Xml.Linq;
 Console.OutputEncoding = Encoding.UTF8;
 var pppps = TdhManifestMapReader.QueryManifestEventInfo(Guid.Parse("{65cd4c8a-0848-4583-92a0-31c0fbaf00c0}"));
 //var ees = TdhManifestMapReader.QueryEnergyEstimateEventInfo();
-int durationSeconds = 30;
+int durationSeconds = 600;
 if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSeconds > 0)
 {
     durationSeconds = parsedSeconds;
@@ -24,7 +24,7 @@ if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSec
 //}
 var capturedEtlPath = args.Length > 0 && File.Exists(args[0])
     ? args[0]
-    : "capture_20260915_121502.etl";
+    : "capture_20260920_004357.etl";
 
 long etlFileSizeBytes = new FileInfo(capturedEtlPath).Length;
 double etlFileSizeMb = etlFileSizeBytes / 1024.0 / 1024.0;

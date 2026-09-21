@@ -38,12 +38,6 @@ internal sealed class InterruptHandlingDataSourceCollector(
 {
     private readonly List<ModuleInfo> _modules = [];
 
-    /// <summary>
-    /// 依 (ProcessId, ImageBase) 分組的模組索引，供 OnImageUnload/OnImageRundown 做 O(1) 精確鍵值查找，
-    /// 避免對 _modules 做全表 LINQ 掃描(掃描量會隨追蹤時間累積的模組數等比放大，是效能瓶頸主因之一)。
-    /// FindModule() 仍需針對「位址是否落在某模組範圍內」跨程序查找，無法比照精確鍵值索引，
-    /// 但已改寫成不經 LINQ 的單一迴圈(見該方法註解)。
-    /// </summary>
     private readonly Dictionary<(uint ProcessId, ulong ImageBase), List<ModuleInfo>> _modulesByProcessAndBase = [];
 
     private readonly List<InterruptEventInfo> _pendingIsrEvents = [];
@@ -239,10 +233,7 @@ internal sealed class InterruptHandlingDataSourceCollector(
             }
         }
 
-        if (best is not null)
-        {
-            best.UnloadTime = timestamp;
-        }
+        best?.UnloadTime = timestamp;
     }
 
     private void OnIsr(in InterruptEventInfo data) => _pendingIsrEvents.Add(data);
@@ -256,14 +247,6 @@ internal sealed class InterruptHandlingDataSourceCollector(
     private void OnTimerDpc(in DpcEventInfo data) =>
         _pendingDpcEvents.Add((data, EtlDeferredProcedureCallType.Timer));
 
-    /// <summary>
-    /// 依位址找出當下(timestamp)有效的模組。DPC/ISR 的處理常式位址可能屬於系統中任何一個程序載入的模組
-    /// (例如驅動程式常掛在 System 程序下)，因此必須對 _modules 做跨程序掃描，無法比照 OnImageUnload
-    /// 用 (ProcessId, ImageBase) 精確鍵值索引。這裡改成不經 LINQ 的單一迴圈手動找出 LoadTime 最新的相符模組，
-    /// 取代原本 Where().OrderByDescending().FirstOrDefault()：語意完全相同，但省掉 LINQ 疊代器/委派呼叫、
-    /// 以及「排序整個相符子集合只為取第一筆」的多餘排序開銷。此函式是 DPC/ISR 解析的主要熱路徑
-    /// (Complete() 時每筆事件呼叫一次)，事件量大時原本的 LINQ 版本是主要效能瓶頸。
-    /// </summary>
     private ModuleInfo? FindModule(ulong? address, DateTime timestamp)
     {
         if (address is not ulong value)
