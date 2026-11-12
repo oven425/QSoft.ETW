@@ -304,6 +304,9 @@ internal enum TdhInType : ushort
     Sid = 19,
     HexInt32 = 20,
     HexInt64 = 21,
+    /// <summary>MOF 固定長度 WCHAR 陣列(例如 SystemConfig 的 ComputerName/ProcessorName)。</summary>
+    UnicodeChar = 306,
+    AnsiChar = 307,
     WBEMSID = 310,
 }
 
@@ -362,6 +365,10 @@ public sealed class EtlReadResult
     /// <summary>QueryPerformanceCounter 頻率(ticks/秒),取自 ETL 檔頭(TRACE_LOGFILE_HEADER.PerfFreq),
     /// 供外部自行換算 DPC/ISR 等事件內嵌的原始 QPC 時間戳記使用。未知時為 0。</summary>
     public long PerfFreq { get; set; }
+    /// <summary>系統開機時間,取自 ETL 檔頭(TRACE_LOGFILE_HEADER.BootTime);未知時為 null。</summary>
+    public DateTime? BootTime { get; set; }
+    /// <summary>處理器基本頻率(MHz),取自 ETL 檔頭;未知時為 0。</summary>
+    public uint CpuSpeedInMHz { get; set; }
     public EtlAnalysisResult? Analysis { get; set; }
     public List<ThreadInfo> Threads { get; } = [];
     public List<CSwitchEventInfo> CSwitchEvents { get; } = [];
@@ -1122,6 +1129,10 @@ public sealed class ModuleInfo
     public ulong? DefaultBase { get; init; }
     public uint? ImageCheckSum { get; init; }
     public uint? TimeDateStamp { get; init; }
+    /// <summary>由合併 ETL 的 DbgID_RSDS 事件提供；可用於無原始映像檔時從符號伺服器精確搜尋 PDB。</summary>
+    public Guid? PdbGuid { get; set; }
+    public uint? PdbAge { get; set; }
+    public string? PdbFileName { get; set; }
     public uint? LoadingThreadId { get; init; }
     public uint? UnloadingThreadId { get; set; }
     public bool IsRundown { get; set; }
@@ -1153,6 +1164,387 @@ public sealed class DiskIoOperation
     public string? Operation { get; init; }
     public double? LatencyMilliseconds { get; init; }
     public required string MatchStatus { get; init; }
+}
+
+public enum DiskIoKind : byte
+{
+    Read,
+    Write,
+    Flush,
+}
+
+/// <summary>MemInfoWS 快照中單一行程的記憶體用量(單位:4KB 分頁)。</summary>
+public readonly record struct ProcessWorkingSetEntry
+{
+    public uint ProcessId { get; init; }
+    public long WorkingSetPageCount { get; init; }
+    public long CommitPageCount { get; init; }
+    public long VirtualSizePageCount { get; init; }
+    /// <summary>私用工作集,即工作管理員「記憶體(作用中的私用工作集)」欄位。</summary>
+    public long PrivateWorkingSetPageCount { get; init; }
+}
+
+/// <summary>Kernel-Memory MemInfoWS(Event Id=2)的一次全行程快照。<see cref="Processes"/> 為新配置陣列,可在回呼後保留。</summary>
+public readonly record struct MemoryWorkingSetSnapshotEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public byte Version { get; init; }
+    public IReadOnlyList<ProcessWorkingSetEntry> Processes { get; init; }
+}
+
+/// <summary>
+/// Kernel DiskIo 完成事件(EVENT_TRACE_FLAG_DISK_IO;opcode 10 Read / 11 Write / 14 FlushBuffers)。
+/// 完成事件常在 DPC/ISR 情境觸發,事件標頭的 ProcessId/ThreadId 通常不是發出 I/O 的行程;
+/// 應以 <see cref="IssuingThreadId"/>(Version 3 起提供)對應執行緒→行程,與 TraceProcessor/TraceEvent 作法一致。
+/// </summary>
+public readonly record struct DiskIoCompleteEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public DiskIoKind Kind { get; init; }
+    public byte Opcode { get; init; }
+    public byte Version { get; init; }
+    public ushort Processor { get; init; }
+    public uint HeaderProcessId { get; init; }
+    public uint HeaderThreadId { get; init; }
+    public uint DiskNumber { get; init; }
+    public uint IrpFlags { get; init; }
+    public uint TransferSize { get; init; }
+    public long ByteOffset { get; init; }
+    public ulong FileObject { get; init; }
+    public ulong Irp { get; init; }
+    /// <summary>I/O 從送出到完成的時間(QPC 單位原始值)。</summary>
+    public ulong HighResResponseTimeRaw { get; init; }
+    /// <summary>以 ETL 檔頭 PerfFreq 換算的 I/O 回應時間(毫秒);無法換算時為 null。</summary>
+    public double? ResponseTimeMSec { get; init; }
+    /// <summary>發出 I/O 的執行緒(DiskIo Version 3 起);舊版本為 null。</summary>
+    public uint? IssuingThreadId { get; init; }
+}
+
+public enum NetworkProtocol : byte
+{
+    Tcp,
+    Udp,
+}
+
+public enum NetworkDirection : byte
+{
+    Send,
+    Receive,
+}
+
+/// <summary>
+/// Kernel TcpIp/UdpIp 傳送/接收事件(EVENT_TRACE_FLAG_NETWORK_TCPIP;opcode 10 Send / 11 Recv,
+/// IPv6 為 26 / 27)。<see cref="ProcessId"/> 取自 payload 的 PID 欄位(標頭 PID 不可靠);
+/// 連接埠已由網路位元組順序轉為主機順序。
+/// </summary>
+public readonly record struct TcpIpTransferEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public NetworkProtocol Protocol { get; init; }
+    public NetworkDirection Direction { get; init; }
+    public bool IsIPv6 { get; init; }
+    public byte Opcode { get; init; }
+    public uint ProcessId { get; init; }
+    public uint Size { get; init; }
+    public ushort SourcePort { get; init; }
+    public ushort DestinationPort { get; init; }
+}
+
+/// <summary>
+/// NT Kernel Logger 自動產生的 SystemConfig rundown 事件(CPU、Processors、PhyDisk、LogDisk、NIC、Video、
+/// Platform、Virtualization 等)。<see cref="Properties"/> 為 TDH 解出的純量欄位(字串或十進位數字字串)。
+/// </summary>
+public readonly record struct SystemConfigEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public byte Opcode { get; init; }
+    public byte Version { get; init; }
+    public IReadOnlyDictionary<string, string> Properties { get; init; }
+}
+
+/// <summary>
+/// Microsoft-Windows-Kernel-Processor-Power Event 111 (DeliveredPerfChange,keyword 0x80 PerfDiag)。
+/// 每個 PPM 檢查週期(約 30 ms)每顆邏輯處理器一筆;<see cref="DeliveredFrequency"/> 為相對於基本頻率的百分比,
+/// 涵蓋事件時間往前 <see cref="DurationInUs"/> 微秒的區間。
+/// </summary>
+public readonly record struct ProcessorDeliveredPerformanceEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public ushort Group { get; init; }
+    public uint Number { get; init; }
+    public uint DeliveredPerformance { get; init; }
+    public uint DeliveredFrequency { get; init; }
+    public uint DurationInUs { get; init; }
+}
+
+/// <summary>系統電源/散熱狀態變化的種類(<see cref="SystemPowerEventInfo.Kind"/>)。</summary>
+public enum SystemPowerEventKind
+{
+    /// <summary>Kernel-Power 42 PreSleepNotification:即將進入 S3/S4。</summary>
+    SleepEnter,
+    /// <summary>Kernel-Power 107 PostSleepNotification:已從睡眠恢復。</summary>
+    SleepResume,
+    /// <summary>Kernel-Power 59:進入離開模式(Away Mode)。</summary>
+    AwayModeEnter,
+    /// <summary>Kernel-Power 506 CsEnterReason:進入新式待命。</summary>
+    ModernStandbyEnter,
+    /// <summary>Kernel-Power 507 CsExitReason:結束新式待命(含 DurationInUs、DripsResidencyInUs、EnergyDrain)。</summary>
+    ModernStandbyExit,
+    /// <summary>Kernel-Power 187:使用者模式呼叫 SetSuspendState/SetSystemPowerState。</summary>
+    PowerActionRequested,
+    /// <summary>Kernel-Power 566 SystemSessionSwitch:系統工作階段(螢幕開/關、待命)切換。</summary>
+    SystemSessionSwitch,
+    /// <summary>Kernel-Power 172:待命中網路連線能力狀態。</summary>
+    StandbyConnectivityChange,
+    /// <summary>Kernel-Power 105 AcDcStateChange:AC/電池切換(AcOnline、RemainingCapacity、FullChargeCapacity)。</summary>
+    PowerSourceChange,
+    /// <summary>UMPO 12 PowerSchemeChanged:某行程變更電源計畫(ProcessPath、OldSchemeGuid、NewSchemeGuid)。</summary>
+    PowerSchemeChanged,
+    /// <summary>UMPO 51 OverlayPowerSchemeChanged:電源模式(最佳效能/平衡/省電)變更。</summary>
+    PowerModeOverlayChanged,
+    /// <summary>UMPO 22:重新套用電源設定。</summary>
+    PowerSettingsReapplied,
+    /// <summary>Kernel-Power 80 CoolingModeChange:熱區主動/被動散熱模式切換。</summary>
+    ThermalCoolingModeChange,
+    /// <summary>Kernel-Power 82/114(Operational)、81/113(Diagnostic):熱區被動散熱(CPU 降頻,含 _PSV、_TMP 單位 0.1K)。</summary>
+    ThermalPassiveCooling,
+    /// <summary>Kernel-Power 84/116(Operational)、83/115(Diagnostic):熱區主動散熱(風扇)。</summary>
+    ThermalActiveCooling,
+    /// <summary>Kernel-ACPI 4:熱區警戒點(_PSV/_ACx/_HOT/_CRT)變更。</summary>
+    AcpiThermalTripPointChange,
+    /// <summary>Kernel-ACPI 5/6/8:主動散熱裝置(風扇)開關。</summary>
+    AcpiCoolingDevicePower,
+    /// <summary>Kernel-ACPI 9:被動散熱裝置節流百分比(Throttle)。</summary>
+    AcpiDevicePassiveCooling,
+    /// <summary>Kernel-ACPI 10:散熱裝置狀態 rundown。</summary>
+    AcpiDeviceCoolingRundown,
+    /// <summary>Kernel-ACPI 20:ACPI 裝置重設。</summary>
+    AcpiDeviceReset,
+    /// <summary>Kernel-Power 91(Operational)/90(Diagnostic):處理器被核心電源管理員以外的機制節流(ThrottleMSR)。</summary>
+    ExternalProcessorThrottle,
+    /// <summary>Kernel-Processor-Power 7/8/37/38:處理器速度受系統韌體限制(CapDurationInSeconds、PpcChanges…)。</summary>
+    FirmwareFrequencyCap,
+    /// <summary>Kernel-Processor-Power 136:處理器效能狀態控制在降級狀態運作。</summary>
+    ProcessorPerfStatesDegraded,
+    /// <summary>Kernel-Power 95:系統計時器解析度已變更(NewResolution,100 ns)。</summary>
+    TimerResolutionChanged,
+    /// <summary>Kernel-Power 96:計時器解析度 rundown(CurrentPeriod/MinimumPeriod/MaximumPeriod)。</summary>
+    TimerResolutionRundown,
+    /// <summary>Kernel-Power 97:目前有效的計時器解析度要求(RequestedPeriod、Pid、AppName)。</summary>
+    TimerResolutionRequestRundown,
+    /// <summary>Kernel-Power 557:核心內部要求變更計時器解析度。</summary>
+    KernelTimerResolutionRequest,
+    /// <summary>Kernel-Power 118:Idle resiliency 開始。</summary>
+    IdleResiliencyStart,
+    /// <summary>Kernel-Power 119:Idle resiliency 結束。</summary>
+    IdleResiliencyEnd,
+}
+
+/// <summary><see cref="SystemPowerEventKind"/> 的分類。</summary>
+public enum SystemPowerEventCategory
+{
+    SleepAndStandby,
+    PowerSource,
+    PowerPolicy,
+    Thermal,
+    ProcessorThrottle,
+    TimerResolution,
+    IdleResiliency,
+}
+
+/// <summary>
+/// 系統層級的電源/散熱/計時器狀態變化(Kernel-Power、Kernel-Processor-Power、UserModePowerService、Kernel-ACPI)。
+/// 這些事件會改變整機的效能基準(睡眠中斷時間序列、AC/DC 與電源模式改變頻率上限、散熱/韌體降頻),
+/// 分析 app 影響時應先以它們切分時間區段。<see cref="Properties"/> 為 TDH 解出的純量欄位;
+/// 有號整數以十進位(可能為負)、GUID 以 "D" 格式、FILETIME 以 ISO 8601 表示。
+/// 擷取設定見 <see cref="TraceSessionBuilder.WithSystemPowerMonitoring"/>。
+/// </summary>
+public readonly record struct SystemPowerEventInfo
+{
+    public DateTime Timestamp { get; init; }
+    public Guid ProviderId { get; init; }
+    public ushort EventId { get; init; }
+    public byte Version { get; init; }
+    public SystemPowerEventKind Kind { get; init; }
+    public uint ProcessId { get; init; }
+    public uint ThreadId { get; init; }
+    public IReadOnlyDictionary<string, string> Properties { get; init; }
+
+    public SystemPowerEventCategory Category => SystemPowerEvents.GetCategory(Kind);
+
+    public string GetString(string name) =>
+        Properties is not null && Properties.TryGetValue(name, out string? value) ? value : string.Empty;
+
+    public long? GetInt64(string name) =>
+        Properties is not null && Properties.TryGetValue(name, out string? value) &&
+        long.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out long result)
+            ? result
+            : null;
+}
+
+/// <summary>系統電源事件的 (Provider, EventId) → <see cref="SystemPowerEventKind"/> 對照表。</summary>
+public static class SystemPowerEvents
+{
+    private static readonly Dictionary<(Guid Provider, ushort EventId), SystemPowerEventKind> s_kinds = Build();
+
+    private static Dictionary<(Guid, ushort), SystemPowerEventKind> Build()
+    {
+        Guid kp = TraceSessionBuilder.KernelPowerProviderGuid;
+        Guid ppm = TraceSessionBuilder.KernelProcessorPowerProviderGuid;
+        Guid umpo = TraceSessionBuilder.UserModePowerServiceProviderGuid;
+        Guid acpi = TraceSessionBuilder.KernelAcpiProviderGuid;
+        return new()
+        {
+            [(kp, 42)] = SystemPowerEventKind.SleepEnter,
+            [(kp, 107)] = SystemPowerEventKind.SleepResume,
+            [(kp, 59)] = SystemPowerEventKind.AwayModeEnter,
+            [(kp, 506)] = SystemPowerEventKind.ModernStandbyEnter,
+            [(kp, 507)] = SystemPowerEventKind.ModernStandbyExit,
+            [(kp, 187)] = SystemPowerEventKind.PowerActionRequested,
+            [(kp, 566)] = SystemPowerEventKind.SystemSessionSwitch,
+            [(kp, 172)] = SystemPowerEventKind.StandbyConnectivityChange,
+            [(kp, 105)] = SystemPowerEventKind.PowerSourceChange,
+            [(kp, 80)] = SystemPowerEventKind.ThermalCoolingModeChange,
+            [(kp, 81)] = SystemPowerEventKind.ThermalPassiveCooling,
+            [(kp, 82)] = SystemPowerEventKind.ThermalPassiveCooling,
+            [(kp, 113)] = SystemPowerEventKind.ThermalPassiveCooling,
+            [(kp, 114)] = SystemPowerEventKind.ThermalPassiveCooling,
+            [(kp, 83)] = SystemPowerEventKind.ThermalActiveCooling,
+            [(kp, 84)] = SystemPowerEventKind.ThermalActiveCooling,
+            [(kp, 115)] = SystemPowerEventKind.ThermalActiveCooling,
+            [(kp, 116)] = SystemPowerEventKind.ThermalActiveCooling,
+            [(kp, 90)] = SystemPowerEventKind.ExternalProcessorThrottle,
+            [(kp, 91)] = SystemPowerEventKind.ExternalProcessorThrottle,
+            [(kp, 95)] = SystemPowerEventKind.TimerResolutionChanged,
+            [(kp, 96)] = SystemPowerEventKind.TimerResolutionRundown,
+            [(kp, 97)] = SystemPowerEventKind.TimerResolutionRequestRundown,
+            [(kp, 557)] = SystemPowerEventKind.KernelTimerResolutionRequest,
+            [(kp, 118)] = SystemPowerEventKind.IdleResiliencyStart,
+            [(kp, 119)] = SystemPowerEventKind.IdleResiliencyEnd,
+            [(ppm, 7)] = SystemPowerEventKind.FirmwareFrequencyCap,
+            [(ppm, 8)] = SystemPowerEventKind.FirmwareFrequencyCap,
+            [(ppm, 37)] = SystemPowerEventKind.FirmwareFrequencyCap,
+            [(ppm, 38)] = SystemPowerEventKind.FirmwareFrequencyCap,
+            [(ppm, 136)] = SystemPowerEventKind.ProcessorPerfStatesDegraded,
+            [(umpo, 12)] = SystemPowerEventKind.PowerSchemeChanged,
+            [(umpo, 51)] = SystemPowerEventKind.PowerModeOverlayChanged,
+            [(umpo, 22)] = SystemPowerEventKind.PowerSettingsReapplied,
+            [(acpi, 4)] = SystemPowerEventKind.AcpiThermalTripPointChange,
+            [(acpi, 5)] = SystemPowerEventKind.AcpiCoolingDevicePower,
+            [(acpi, 6)] = SystemPowerEventKind.AcpiCoolingDevicePower,
+            [(acpi, 8)] = SystemPowerEventKind.AcpiCoolingDevicePower,
+            [(acpi, 9)] = SystemPowerEventKind.AcpiDevicePassiveCooling,
+            [(acpi, 10)] = SystemPowerEventKind.AcpiDeviceCoolingRundown,
+            [(acpi, 20)] = SystemPowerEventKind.AcpiDeviceReset,
+        };
+    }
+
+    /// <summary>所有對應到 <see cref="SystemPowerEventKind"/> 的 (Provider, EventId)。</summary>
+    public static IReadOnlyCollection<(Guid Provider, ushort EventId)> Mapped => s_kinds.Keys;
+
+    public static bool TryGetKind(Guid providerId, ushort eventId, out SystemPowerEventKind kind) =>
+        s_kinds.TryGetValue((providerId, eventId), out kind);
+
+    internal static bool IsPowerProvider(in Guid providerId) =>
+        providerId == TraceSessionBuilder.KernelPowerProviderGuid ||
+        providerId == TraceSessionBuilder.KernelProcessorPowerProviderGuid ||
+        providerId == TraceSessionBuilder.UserModePowerServiceProviderGuid ||
+        providerId == TraceSessionBuilder.KernelAcpiProviderGuid;
+
+    public static SystemPowerEventCategory GetCategory(SystemPowerEventKind kind) => kind switch
+    {
+        SystemPowerEventKind.SleepEnter or SystemPowerEventKind.SleepResume or SystemPowerEventKind.AwayModeEnter or
+        SystemPowerEventKind.ModernStandbyEnter or SystemPowerEventKind.ModernStandbyExit or
+        SystemPowerEventKind.PowerActionRequested or SystemPowerEventKind.SystemSessionSwitch or
+        SystemPowerEventKind.StandbyConnectivityChange => SystemPowerEventCategory.SleepAndStandby,
+        SystemPowerEventKind.PowerSourceChange => SystemPowerEventCategory.PowerSource,
+        SystemPowerEventKind.PowerSchemeChanged or SystemPowerEventKind.PowerModeOverlayChanged or
+        SystemPowerEventKind.PowerSettingsReapplied => SystemPowerEventCategory.PowerPolicy,
+        SystemPowerEventKind.ExternalProcessorThrottle or SystemPowerEventKind.FirmwareFrequencyCap or
+        SystemPowerEventKind.ProcessorPerfStatesDegraded => SystemPowerEventCategory.ProcessorThrottle,
+        SystemPowerEventKind.TimerResolutionChanged or SystemPowerEventKind.TimerResolutionRundown or
+        SystemPowerEventKind.TimerResolutionRequestRundown or
+        SystemPowerEventKind.KernelTimerResolutionRequest => SystemPowerEventCategory.TimerResolution,
+        SystemPowerEventKind.IdleResiliencyStart or SystemPowerEventKind.IdleResiliencyEnd => SystemPowerEventCategory.IdleResiliency,
+        _ => SystemPowerEventCategory.Thermal,
+    };
+
+    private static readonly Dictionary<Guid, string> s_schemeNames = new()
+    {
+        [new("381b4222-f694-41f0-9685-ff5bb260df2e")] = "平衡",
+        [new("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c")] = "高效能",
+        [new("a1841308-3541-4fab-bc81-f71556f20b4a")] = "省電",
+        [new("e9a42b02-d5df-448d-aa00-03f14749eb61")] = "極致效能",
+        [new("961cc777-2547-4f9d-8174-7d86181b8a7a")] = "最佳電源效率",
+        [new("3af9b8d9-7c97-431d-ad78-34a8bfea439f")] = "較佳效能",
+        [new("ded574b5-45a0-4f42-8737-46345c09c238")] = "最佳效能",
+        [Guid.Empty] = "平衡(預設)",
+    };
+
+    /// <summary>電源計畫/電源模式 GUID 的中文名稱;不認得時回傳 GUID 本身。</summary>
+    public static string SchemeName(string guidText) =>
+        Guid.TryParse(guidText, out Guid guid) && s_schemeNames.TryGetValue(guid, out string? name) ? name : guidText;
+
+    /// <summary>以中文描述事件內容(供報告/時間軸顯示)。</summary>
+    public static string Describe(in SystemPowerEventInfo e)
+    {
+        static string Ms(long? hundredNs) => hundredNs is { } v ? $"{v / 10000.0:0.###} ms" : "?";
+        static string Celsius(long? deciKelvin) => deciKelvin is { } v and > 0 ? $"{v / 10.0 - 273.15:F1}°C" : "?";
+        string zone = e.GetString("ThermalZoneDeviceInstance");
+        return e.Kind switch
+        {
+            SystemPowerEventKind.SleepEnter => $"系統進入睡眠(S{e.GetInt64("TargetState")})",
+            SystemPowerEventKind.SleepResume => $"系統從睡眠(S{e.GetInt64("WakeFromState") ?? e.GetInt64("EffectiveState")})恢復",
+            SystemPowerEventKind.AwayModeEnter => "系統進入離開模式",
+            SystemPowerEventKind.ModernStandbyEnter => $"進入新式待命(Reason={e.GetInt64("Reason")})",
+            SystemPowerEventKind.ModernStandbyExit => e.GetInt64("DurationInUs") is { } dur and > 0
+                ? $"結束新式待命:持續 {dur / 1e6:F1} 秒,DRIPS {100.0 * (e.GetInt64("DripsResidencyInUs") ?? 0) / dur:F0}%"
+                : "結束新式待命",
+            SystemPowerEventKind.PowerActionRequested => $"{e.GetString("ApiCallerName")} 呼叫 API 要求變更系統電源狀態",
+            SystemPowerEventKind.SystemSessionSwitch => $"系統工作階段切換(Reason={e.GetInt64("Reason")})",
+            SystemPowerEventKind.StandbyConnectivityChange => $"待命連線狀態={e.GetInt64("State")}(Reason={e.GetInt64("Reason")})",
+            SystemPowerEventKind.PowerSourceChange =>
+                (e.GetInt64("AcOnline") == 1 ? "切換到 AC 電源" : "切換到電池") +
+                (e.GetInt64("FullChargeCapacity") is { } full and > 0
+                    ? $"(電量 {100.0 * (e.GetInt64("RemainingCapacity") ?? 0) / full:F0}%)"
+                    : string.Empty),
+            SystemPowerEventKind.PowerSchemeChanged =>
+                $"{Path.GetFileName(e.GetString("ProcessPath"))}(PID {e.GetInt64("ProcessPid")})將電源計畫「{SchemeName(e.GetString("OldSchemeGuid"))}」→「{SchemeName(e.GetString("NewSchemeGuid"))}」",
+            SystemPowerEventKind.PowerModeOverlayChanged =>
+                $"{Path.GetFileName(e.GetString("ProcessPath"))}(PID {e.GetInt64("ProcessPid")})將電源模式「{SchemeName(e.GetString("OldSchemeGuid"))}」→「{SchemeName(e.GetString("NewSchemeGuid"))}」",
+            SystemPowerEventKind.PowerSettingsReapplied => "重新套用電源設定",
+            SystemPowerEventKind.ThermalCoolingModeChange => $"熱區 {zone} 散熱模式改為 {e.GetString("CoolingMode")}",
+            SystemPowerEventKind.ThermalPassiveCooling =>
+                $"熱區 {zone} 被動散熱(CPU 降頻)狀態={e.GetString("PassiveCoolingState")},溫度 {Celsius(e.GetInt64("_TMP"))} / 被動門檻 {Celsius(e.GetInt64("_PSV"))}",
+            SystemPowerEventKind.ThermalActiveCooling =>
+                $"熱區 {zone} 主動散熱(風扇)狀態={e.GetString("ActiveCoolingState")},溫度 {Celsius(e.GetInt64("_TMP"))}",
+            SystemPowerEventKind.AcpiThermalTripPointChange =>
+                $"熱區 {zone} 警戒點變更:溫度 {Celsius(e.GetInt64("_TMP"))},被動 {Celsius(e.GetInt64("_PSV"))},臨界 {Celsius(e.GetInt64("_CRT"))}",
+            SystemPowerEventKind.AcpiCoolingDevicePower =>
+                $"散熱裝置 {FirstNonEmpty(e.GetString("FanDeviceInstance"), e.GetString("DeviceInstance"))} 電源={e.GetString("PowerState")}",
+            SystemPowerEventKind.AcpiDevicePassiveCooling => $"裝置 {e.GetString("DeviceInstance")} 被動散熱節流 {e.GetInt64("Throttle")}%",
+            SystemPowerEventKind.AcpiDeviceCoolingRundown =>
+                $"散熱裝置 {e.GetString("DeviceInstance")} 電源={e.GetInt64("PowerState")},節流 {e.GetInt64("Throttle")}%",
+            SystemPowerEventKind.AcpiDeviceReset => $"ACPI 裝置 {e.GetString("DeviceBiosName")} 重設(Status=0x{e.GetInt64("Status") ?? 0:X})",
+            SystemPowerEventKind.ExternalProcessorThrottle =>
+                $"CPU {e.GetInt64("ProcessorId")} 被核心電源管理員以外的機制節流(ThrottleMSR=0x{e.GetInt64("ThrottleMSR") ?? 0:X},{e.GetInt64("ElapsedTime")})",
+            SystemPowerEventKind.FirmwareFrequencyCap =>
+                $"CPU {(e.GetInt64("Number") ?? e.GetInt64("Processor"))} 速度受韌體限制 {e.GetInt64("CapDurationInSeconds")} 秒(PPC 變更 {e.GetInt64("PpcChanges")}、TPC 變更 {e.GetInt64("TpcChanges")})",
+            SystemPowerEventKind.ProcessorPerfStatesDegraded => "處理器效能狀態控制在降級狀態運作",
+            SystemPowerEventKind.TimerResolutionChanged => $"系統計時器解析度變為 {Ms(e.GetInt64("NewResolution"))}",
+            SystemPowerEventKind.TimerResolutionRundown =>
+                $"目前計時器解析度 {Ms(e.GetInt64("CurrentPeriod"))}(可用 {Ms(e.GetInt64("MinimumPeriod"))}–{Ms(e.GetInt64("MaximumPeriod"))})",
+            SystemPowerEventKind.TimerResolutionRequestRundown =>
+                $"{FirstNonEmpty(e.GetString("AppName"), "?")}(PID {e.GetInt64("Pid")})要求計時器解析度 {Ms(e.GetInt64("RequestedPeriod"))}" +
+                (e.GetInt64("RequestIgnored") == 1 ? "(已忽略)" : string.Empty),
+            SystemPowerEventKind.KernelTimerResolutionRequest => $"核心要求計時器解析度 {Ms(e.GetInt64("RequestedResolution"))}",
+            SystemPowerEventKind.IdleResiliencyStart => $"Idle resiliency 開始(時脈週期 {Ms(e.GetInt64("RequestedResolution"))})",
+            SystemPowerEventKind.IdleResiliencyEnd => "Idle resiliency 結束",
+            _ => e.Kind.ToString(),
+        };
+
+        static string FirstNonEmpty(string a, string b) => string.IsNullOrEmpty(a) ? b : a;
+    }
 }
 
 internal sealed class FileIoEventInfo
@@ -1669,6 +2061,16 @@ public readonly record struct ImageLoadEventInfo
     public string FileName { get; init; }
 }
 
+/// <summary>KernelTraceControl merge 注入的 DbgID_RSDS image-to-PDB 身分資料。</summary>
+public readonly record struct ImagePdbIdentityEventInfo
+{
+    public required DateTime Timestamp { get; init; }
+    public required ulong ImageBase { get; init; }
+    public required Guid PdbGuid { get; init; }
+    public required uint PdbAge { get; init; }
+    public string PdbFileName { get; init; }
+}
+
 public readonly ref struct ImageLoadEventInfoRef
 {
     public required DateTime Timestamp { get; init; }
@@ -1882,9 +2284,22 @@ public sealed class EtlFileReader
 {
     private readonly Guid s_processProviderId = new("3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c");
     private readonly Guid s_imageLoadProviderId = new("2cb15d1d-5fc1-11d2-abe1-00a0c911f518");
+    private readonly Guid s_kernelTraceControlTaskGuid = new("b3e675d7-2554-4f18-830b-2762732560de");
     private readonly Guid s_threadProviderId = new("3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c");
     private readonly Guid s_diskIoProviderId = new("3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c");
     private readonly Guid s_fileIoProviderId = new("90cbdc39-4a3e-11d1-84f4-0000f80464e3");
+    private readonly Guid s_tcpIpProviderId = new("9a280ac0-c8e0-11d1-84e2-00c04fb998a2");
+    private readonly Guid s_udpIpProviderId = new("bf3a50c5-a9c9-4988-a005-2df0b7c80f80");
+    private readonly Guid s_processorPowerProviderId = new("0f67e49f-fe51-4e9f-b490-6f2948cc6027");
+    private const ushort ProcessorDeliveredPerfEventId = 111;
+    private const byte DiskReadOpcode = 10;
+    private const byte DiskWriteOpcode = 11;
+    private const byte DiskFlushOpcode = 14;
+    private const byte NetSendOpcode = 10;
+    private const byte NetRecvOpcode = 11;
+    private const byte NetSendIPv6Opcode = 26;
+    private const byte NetRecvIPv6Opcode = 27;
+    private long _perfFrequency;
     private readonly Guid s_perfInfoProviderId = new("ce1dbfb4-137e-4da6-87b0-3f59aa102cbc");
     private readonly Guid s_kernelMemoryProviderId = new("d1d93ef7-e1f2-4f45-9943-03d245fe6c00");
     private readonly Guid s_systemConfigProviderId = new("01853a65-418f-4f36-aefc-dc0f1d2fd235");
@@ -1904,8 +2319,10 @@ public sealed class EtlFileReader
     private const byte ImageDCStartOpcode = 3;
     private const byte ImageDCStopOpcode = 4;
     private const byte ImageLoadOpcode = 10;
+    private const byte ImageIdDbgIdRsdsOpcode = 36;
     private const byte SystemConfigCpuOpcode = 10;
     private const byte SystemConfigServicesOpcode = 15;
+    private const byte SystemConfigPnPOpcode = 22;
     private long s_eventCount;
 
     private uint _timestampClockType;
@@ -1915,11 +2332,24 @@ public sealed class EtlFileReader
     private long _timestampReferenceFileTime;
     private bool _timestampReferenceInitialized;
 
+    // DateTime.MaxValue 對應的 FILETIME(3155378975999999999 - 504911232000000000);快取視窗只涵蓋離上限至少 2 天以外的值。
+    private const long MaxFileTimeTicks = 2650467743999999999L;
+    private const long MaxCacheableFileTime = MaxFileTimeTicks - 2 * TimeSpan.TicksPerDay;
+
+    // 以下欄位只服務每筆事件都會經過的「原始時間戳 → Local DateTime」熱路徑(ConvertRawTimestamp)。
+    private bool _timestampScaleIsIdentity;
+    private long _timestampScaleFastLimit;
+    private long _timestampWindowStart;
+    private long _timestampWindowSpan;
+    private DateTime _timestampWindowStartLocal;
+
 
     private EtlReadResult? _readResult;
 
     private readonly Dictionary<SchemaKey, nint> s_schemaCache = [];
     private readonly Dictionary<SchemaKey, CachedSchema?> s_cachedSchemaCache = [];
+    private readonly Dictionary<SchemaKey, UsbEventSchema?> _usbSchemaCache = [];
+    private readonly UsbEventFields _usbFields = new();
 
     public IList<IEtlReaderPlugin> Plugins { get; } = [];
 
@@ -1938,6 +2368,7 @@ public sealed class EtlFileReader
         s_eventCount = 0;
         s_schemaCache.Clear();
         s_cachedSchemaCache.Clear();
+        _usbSchemaCache.Clear();
         _readResult = new EtlReadResult
         {
             SourceFilePath = Path.GetFullPath(etlFilePath),
@@ -1948,6 +2379,11 @@ public sealed class EtlFileReader
         _timestampReferenceRaw = 0;
         _timestampReferenceFileTime = 0;
         _timestampReferenceInitialized = false;
+        _timestampScaleIsIdentity = false;
+        _timestampScaleFastLimit = 0;
+        _timestampWindowStart = 0;
+        _timestampWindowSpan = 0;
+        _timestampWindowStartLocal = default;
 
         nint logFileNamePtr = 0;
         ulong traceHandle = EtwNativeConstants.InvalidProcessTraceHandle;
@@ -1990,6 +2426,10 @@ public sealed class EtlFileReader
                 ? null
                 : DateTime.FromFileTime(logfile.LogfileHeader.EndTime);
             _readResult.PerfFreq = logfile.LogfileHeader.PerfFreq;
+            _readResult.BootTime = logfile.LogfileHeader.BootTime <= 0
+                ? null
+                : DateTime.FromFileTime(logfile.LogfileHeader.BootTime);
+            _readResult.CpuSpeedInMHz = logfile.LogfileHeader.LogInstance.CpuSpeedInMHz;
             ConfigureTimestampConversion(in logfile.LogfileHeader);
 
             Console.WriteLine("=== ETL 檔頭資訊 ===");
@@ -2047,6 +2487,8 @@ public sealed class EtlFileReader
 
             s_schemaCache.Clear();
             s_cachedSchemaCache.Clear();
+            _usbSchemaCache.Clear();
+            _usbFields.Clear();
         }
     }
 
@@ -2285,6 +2727,13 @@ public sealed class EtlFileReader
     public delegate void MemoryUtilizationEventHandler(in MemoryUtilizationEventInfo data);
     public event MemoryUtilizationEventHandler? MemoryUtilization;
 
+    /// <summary>
+    /// Microsoft-Windows-Kernel-Memory Event Id=2(MemInfoWS):所有行程的工作集/認可大小快照,
+    /// 需以 <see cref="TraceSessionBuilder.KernelMemoryProviderGuid"/> 搭配 MEMINFO_EX 關鍵字(0x40)擷取。
+    /// </summary>
+    public delegate void MemoryWorkingSetSnapshotEventHandler(in MemoryWorkingSetSnapshotEventInfo data);
+    public event MemoryWorkingSetSnapshotEventHandler? MemoryWorkingSetSnapshot;
+
     public delegate void PerfInfoProfileEventHandler(ProfileEventInfo data);
     public event PerfInfoProfileEventHandler? PerfInfoProfile;
 
@@ -2293,6 +2742,9 @@ public sealed class EtlFileReader
     public event ImageLoadEventHandler? ImageUnload;
     public event ImageLoadEventHandler? ImageDCStart;
     public event ImageLoadEventHandler? ImageDCStop;
+    public delegate void ImagePdbIdentityEventHandler(in ImagePdbIdentityEventInfo data);
+    /// <summary>讀取 KernelTraceControl merge 注入的 PDB GUID/Age，供跨機器符號解析使用。</summary>
+    public event ImagePdbIdentityEventHandler? ImagePdbIdentity;
 
     public delegate void ImageLoadEventHandlerRef(in ImageLoadEventInfoRef data);
     public event ImageLoadEventHandlerRef? ImageLoadRef;
@@ -2365,9 +2817,52 @@ public sealed class EtlFileReader
     public delegate void DiskIoOperationHandler(DiskIoOperation operation);
     public event DiskIoOperationHandler? DiskIoOperationCompleted;
 
+    /// <summary>Kernel DiskIo 讀/寫/Flush 完成事件,需以 EVENT_TRACE_FLAG_DISK_IO 擷取。</summary>
+    public delegate void DiskIoCompleteEventHandler(in DiskIoCompleteEventInfo data);
+    public event DiskIoCompleteEventHandler? DiskIoComplete;
+
+    /// <summary>Kernel TcpIp/UdpIp 傳送/接收事件(IPv4 與 IPv6),需以 EVENT_TRACE_FLAG_NETWORK_TCPIP 擷取。</summary>
+    public delegate void TcpIpTransferEventHandler(in TcpIpTransferEventInfo data);
+    public event TcpIpTransferEventHandler? TcpIpTransfer;
+
+    /// <summary>所有 SystemConfig rundown 事件(不論 opcode),欄位以名稱→字串提供。</summary>
+    public delegate void SystemConfigRecordEventHandler(in SystemConfigEventInfo data);
+    public event SystemConfigRecordEventHandler? SystemConfigRecord;
+
+    /// <summary>Kernel-Processor-Power Event 111 (每顆處理器的實際交付頻率),需啟用該 provider 的 keyword 0x80。</summary>
+    public delegate void ProcessorDeliveredPerformanceEventHandler(in ProcessorDeliveredPerformanceEventInfo data);
+    public event ProcessorDeliveredPerformanceEventHandler? ProcessorDeliveredPerformance;
+
     /// <summary>Kernel Power Event ID 63(電源請求解析度變更/是否忽略請求)。</summary>
     public delegate void KernelPowerEventHandler_63(in KernelPowerEventInfo_63 data);
     public event KernelPowerEventHandler_63? KernelPower_63;
+
+    /// <summary>
+    /// 系統電源/散熱/計時器狀態變化(對照表見 <see cref="SystemPowerEvents"/>):睡眠/喚醒、新式待命、AC/DC、
+    /// 電源計畫/模式、熱區被動/主動散熱、外部/韌體降頻、計時器解析度、Idle resiliency。
+    /// 擷取需 <see cref="TraceSessionBuilder.WithSystemPowerMonitoring"/>。
+    /// </summary>
+    public delegate void SystemPowerStateChangeEventHandler(in SystemPowerEventInfo data);
+    public event SystemPowerStateChangeEventHandler? SystemPowerStateChange;
+
+    /// <summary>
+    /// Microsoft-Windows-DxgKrnl(GPU / WDDM)的原始事件：DMA packet、Queue packet、Adapter / Node / Segment、
+    /// Device / Context、GPU 記憶體用量、GPU 效能資料…。<see cref="DxgKrnlEventInfo.Payload"/> 只在回呼期間有效。
+    /// 沒有訂閱者時，DxgKrnl 事件會在建立 TDH schema 之前就被略過，不增加額外成本。
+    /// </summary>
+    public delegate void DxgKrnlEventHandler(in DxgKrnlEventInfo data);
+    public event DxgKrnlEventHandler? DxgKrnl;
+
+    /// <summary>
+    /// USB（USBXHCI / UCX / USBHUB3 / USBPORT / USBHUB）與相機（USBVideo / MF-FrameServer）provider 的事件，
+    /// 欄位依 manifest 解碼（含 struct 成員）。沒有訂閱時這些事件不會被解碼。
+    /// </summary>
+    public delegate void UsbEventHandler(in UsbEventInfo data);
+    public event UsbEventHandler? Usb;
+
+    /// <summary>Kernel SystemConfig 的 PnP 裝置清單(opcode 22)，用來把 GPU Adapter 對應到裝置名稱與 Device Instance Id。</summary>
+    public delegate void SystemConfigPnPEventHandler(in SystemConfigPnPEventInfo data);
+    public event SystemConfigPnPEventHandler? SystemConfigPnP;
 
 
 
@@ -2388,6 +2883,17 @@ public sealed class EtlFileReader
         {
             byte systemConfigOpcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
             CachedSchema? systemConfigSchema = GetOrAddCachedSchema(eventRecordPtr);
+            if (systemConfigSchema is not null && SystemConfigRecord is not null)
+            {
+                SystemConfigEventInfo record = new()
+                {
+                    Timestamp = timestamp,
+                    Opcode = systemConfigOpcode,
+                    Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+                    Properties = ReadScalarProperties(eventRecordPtr, systemConfigSchema),
+                };
+                SystemConfigRecord(in record);
+            }
             if (systemConfigSchema is not null && systemConfigOpcode == SystemConfigCpuOpcode)
             {
                 uint memorySizeMegabytes =
@@ -2408,6 +2914,59 @@ public sealed class EtlFileReader
                 ServiceSnapshotEventInfo snapshot = ParseServiceSnapshotPayload(eventRecordPtr, systemConfigSchema);
                 ServiceSnapshot(in snapshot);
             }
+            else if (systemConfigSchema is not null &&
+                     systemConfigOpcode == SystemConfigPnPOpcode &&
+                     SystemConfigPnP is not null)
+            {
+                SystemConfigPnPEventInfo pnpEvent = ParseSystemConfigPnPPayload(timestamp, eventRecordPtr, systemConfigSchema);
+                SystemConfigPnP(in pnpEvent);
+            }
+            return;
+        }
+
+        if (SystemPowerStateChange is not null &&
+            SystemPowerEvents.IsPowerProvider(in eventRecordPtr->EventHeader.ProviderId) &&
+            SystemPowerEvents.TryGetKind(eventRecordPtr->EventHeader.ProviderId, eventRecordPtr->EventHeader.EventDescriptor.Id, out SystemPowerEventKind powerKind))
+        {
+            CachedSchema? powerEventSchema = GetOrAddCachedSchema(eventRecordPtr);
+            SystemPowerEventInfo powerEvent = new()
+            {
+                Timestamp = timestamp,
+                ProviderId = eventRecordPtr->EventHeader.ProviderId,
+                EventId = eventRecordPtr->EventHeader.EventDescriptor.Id,
+                Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+                Kind = powerKind,
+                ProcessId = eventRecordPtr->EventHeader.ProcessId,
+                ThreadId = eventRecordPtr->EventHeader.ThreadId,
+                Properties = powerEventSchema is null
+                    ? new Dictionary<string, string>(StringComparer.Ordinal)
+                    : ReadScalarProperties(eventRecordPtr, powerEventSchema),
+            };
+            SystemPowerStateChange(in powerEvent);
+            // Mapped IDs are not handled by any other branch below.
+            return;
+        }
+
+        if (eventRecordPtr->EventHeader.ProviderId == s_processorPowerProviderId)
+        {
+            if (ProcessorDeliveredPerformance is not null &&
+                eventRecordPtr->EventHeader.EventDescriptor.Id == ProcessorDeliveredPerfEventId)
+            {
+                CachedSchema? powerSchema = GetOrAddCachedSchema(eventRecordPtr);
+                if (powerSchema is not null)
+                {
+                    ProcessorDeliveredPerformanceEventInfo perf = new()
+                    {
+                        Timestamp = timestamp,
+                        Group = (ushort)GetRawPropertyUInt64(eventRecordPtr, "Group", powerSchema),
+                        Number = (uint)GetRawPropertyUInt64(eventRecordPtr, "Number", powerSchema),
+                        DeliveredPerformance = (uint)GetRawPropertyUInt64(eventRecordPtr, "DeliveredPerformance", powerSchema),
+                        DeliveredFrequency = (uint)GetRawPropertyUInt64(eventRecordPtr, "DeliveredFrequency", powerSchema),
+                        DurationInUs = (uint)GetRawPropertyUInt64(eventRecordPtr, "DurationInUs", powerSchema),
+                    };
+                    ProcessorDeliveredPerformance(in perf);
+                }
+            }
             return;
         }
 
@@ -2422,6 +2981,15 @@ public sealed class EtlFileReader
                 {
                     MemoryUtilizationEventInfo memoryEvent = ParseMemoryUtilizationPayload(timestamp, eventRecordPtr, memorySchema);
                     MemoryUtilization(in memoryEvent);
+                }
+            }
+            else if (MemoryWorkingSetSnapshot is not null &&
+                     eventRecordPtr->EventHeader.EventDescriptor.Id == 2)
+            {
+                MemoryWorkingSetSnapshotEventInfo? wsEvent = ParseMemInfoWsPayload(timestamp, eventRecordPtr);
+                if (wsEvent is { } wsEventValue)
+                {
+                    MemoryWorkingSetSnapshot(in wsEventValue);
                 }
             }
 
@@ -2523,6 +3091,21 @@ public sealed class EtlFileReader
             }
         }
 
+        if (eventRecordPtr->EventHeader.ProviderId == s_kernelTraceControlTaskGuid &&
+            eventRecordPtr->EventHeader.EventDescriptor.Opcode == ImageIdDbgIdRsdsOpcode)
+        {
+            ImagePdbIdentityEventInfo? identity = ParseImagePdbIdentity(
+                timestamp,
+                in eventRecordPtr->EventHeader,
+                eventRecordPtr->UserData,
+                eventRecordPtr->UserDataLength);
+            if (identity is { } identityValue)
+            {
+                ImagePdbIdentity?.Invoke(in identityValue);
+            }
+            return;
+        }
+
         if (eventRecordPtr->EventHeader.ProviderId == s_imageLoadProviderId)
         {
             byte imageOpcode = eventRecordPtr->EventHeader.EventDescriptor.Opcode;
@@ -2551,6 +3134,26 @@ public sealed class EtlFileReader
             return;
         }
 
+        if (TryGetUsbEventProvider(in eventRecordPtr->EventHeader.ProviderId, out UsbEventProvider usbProvider))
+        {
+            if (Usb is not null)
+            {
+                DispatchUsbEvent(timestamp, rawTimestamp, usbProvider, eventRecordPtr);
+            }
+
+            return;
+        }
+
+        if (eventRecordPtr->EventHeader.ProviderId == TraceSessionBuilder.DxgKrnlProviderGuid)
+        {
+            if (DxgKrnl is not null)
+            {
+                DispatchDxgKrnlEvent(timestamp, rawTimestamp, eventRecordPtr);
+            }
+
+            return;
+        }
+
         CachedSchema? cache = GetOrAddCachedSchema(eventRecordPtr);
         if (cache is null)
         {
@@ -2568,6 +3171,24 @@ public sealed class EtlFileReader
             
 
             //ProcessThreadEvent(opcode, timestamp, properties);
+        }
+        else if (eventRecordPtr->EventHeader.ProviderId == s_diskIoProviderId)
+        {
+            if (DiskIoComplete is not null && opcode is DiskReadOpcode or DiskWriteOpcode or DiskFlushOpcode)
+            {
+                DiskIoCompleteEventInfo diskEvent = ParseDiskIoCompletePayload(timestamp, opcode, eventRecordPtr, cache);
+                DiskIoComplete(in diskEvent);
+            }
+        }
+        else if (eventRecordPtr->EventHeader.ProviderId == s_tcpIpProviderId ||
+                 eventRecordPtr->EventHeader.ProviderId == s_udpIpProviderId)
+        {
+            if (TcpIpTransfer is not null &&
+                opcode is NetSendOpcode or NetRecvOpcode or NetSendIPv6Opcode or NetRecvIPv6Opcode)
+            {
+                TcpIpTransferEventInfo netEvent = ParseTcpIpTransferPayload(timestamp, opcode, eventRecordPtr, cache);
+                TcpIpTransfer(in netEvent);
+            }
         }
         //else if (eventRecordPtr->EventHeader.ProviderId == s_diskIoProviderId)
         //{
@@ -3533,6 +4154,117 @@ public sealed class EtlFileReader
         };
     }
 
+    /// <summary>以欄位實際的 TDH 整數型別讀取並轉成 ulong;非整數欄位回傳 defaultvalue。</summary>
+    private static unsafe ulong GetRawPropertyUInt64(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, ulong defaultvalue = 0)
+    {
+        if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
+        {
+            return defaultvalue;
+        }
+
+        return property.InType switch
+        {
+            TdhInType.UInt8 => GetRawProperty<byte>(eventRecordPtr, propertyName, cache),
+            TdhInType.Int8 => (ulong)GetRawProperty<sbyte>(eventRecordPtr, propertyName, cache),
+            TdhInType.UInt16 => GetRawProperty<ushort>(eventRecordPtr, propertyName, cache),
+            TdhInType.Int16 => (ulong)GetRawProperty<short>(eventRecordPtr, propertyName, cache),
+            TdhInType.UInt32 or TdhInType.HexInt32 => GetRawProperty<uint>(eventRecordPtr, propertyName, cache),
+            TdhInType.Int32 => (ulong)GetRawProperty<int>(eventRecordPtr, propertyName, cache),
+            TdhInType.UInt64 or TdhInType.HexInt64 => GetRawProperty<ulong>(eventRecordPtr, propertyName, cache),
+            TdhInType.Int64 => (ulong)GetRawProperty<long>(eventRecordPtr, propertyName, cache),
+            TdhInType.Boolean => GetRawProperty<bool>(eventRecordPtr, propertyName, cache) ? 1UL : 0UL,
+            TdhInType.Pointer => GetRawPointerProperty(eventRecordPtr, propertyName, cache),
+            _ => defaultvalue,
+        };
+    }
+
+    private struct RawFileTime
+    {
+#pragma warning disable CS0649 // Filled by TdhGetProperty through a pointer.
+        public long Value;
+#pragma warning restore CS0649
+    }
+
+    /// <summary>讀出 schema 中所有字串、整數、GUID 與 FILETIME 欄位(陣列/結構/二進位欄位略過)。</summary>
+    private static unsafe Dictionary<string, string> ReadScalarProperties(EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        Dictionary<string, string> result = new(StringComparer.Ordinal);
+        foreach ((string name, CachedProperty property) in cache.Properties)
+        {
+            switch (property.InType)
+            {
+                case TdhInType.UnicodeString or TdhInType.AnsiString:
+                    result[name] = GetRawPropertyString(eventRecordPtr, name, cache);
+                    break;
+                case TdhInType.UInt8 or TdhInType.UInt16 or
+                     TdhInType.UInt32 or TdhInType.HexInt32 or
+                     TdhInType.UInt64 or TdhInType.HexInt64 or
+                     TdhInType.Boolean or TdhInType.Pointer:
+                    result[name] = GetRawPropertyUInt64(eventRecordPtr, name, cache)
+                        .ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    break;
+                case TdhInType.Int8 or TdhInType.Int16 or TdhInType.Int32 or TdhInType.Int64:
+                    long signedValue = property.InType switch
+                    {
+                        TdhInType.Int8 => GetRawProperty<sbyte>(eventRecordPtr, name, cache),
+                        TdhInType.Int16 => GetRawProperty<short>(eventRecordPtr, name, cache),
+                        TdhInType.Int32 => GetRawProperty<int>(eventRecordPtr, name, cache),
+                        _ => GetRawProperty<long>(eventRecordPtr, name, cache),
+                    };
+                    result[name] = signedValue.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    break;
+                case TdhInType.Guid:
+                    result[name] = GetRawProperty<Guid>(eventRecordPtr, name, cache).ToString("D");
+                    break;
+                case TdhInType.FileTime:
+                    long fileTime = GetRawProperty<RawFileTime>(eventRecordPtr, name, cache).Value;
+                    result[name] = fileTime > 0 && fileTime < DateTime.MaxValue.ToFileTimeUtc()
+                        ? DateTime.FromFileTimeUtc(fileTime).ToString("O", System.Globalization.CultureInfo.InvariantCulture)
+                        : fileTime.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    break;
+                case TdhInType.UnicodeChar or TdhInType.AnsiChar:
+                    result[name] = GetRawPropertyCharArray(eventRecordPtr, name, property.InType);
+                    break;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>讀取固定長度字元陣列,截到第一個 NUL。</summary>
+    private static unsafe string GetRawPropertyCharArray(EVENT_RECORD* eventRecordPtr, string propertyName, TdhInType inType)
+    {
+        fixed (char* propertyNamePtr = propertyName)
+        {
+            PROPERTY_DATA_DESCRIPTOR descriptor = new()
+            {
+                PropertyName = (ulong)propertyNamePtr,
+                ArrayIndex = uint.MaxValue,
+            };
+            if (NativeMethods.TdhGetPropertySize(eventRecordPtr, 0, 0, 1, &descriptor, out uint size) != EtwNativeConstants.ERROR_SUCCESS || size == 0 || size > 65536)
+            {
+                return string.Empty;
+            }
+
+            byte* raw = stackalloc byte[(int)size];
+            if (NativeMethods.TdhGetProperty(eventRecordPtr, 0, 0, 1, &descriptor, size, raw) != EtwNativeConstants.ERROR_SUCCESS)
+            {
+                return string.Empty;
+            }
+
+            if (inType == TdhInType.UnicodeChar)
+            {
+                ReadOnlySpan<char> chars = new(raw, (int)size / sizeof(char));
+                int end = chars.IndexOf('\0');
+                return new string(end >= 0 ? chars[..end] : chars);
+            }
+
+            ReadOnlySpan<byte> bytes = new(raw, (int)size);
+            int nul = bytes.IndexOf((byte)0);
+            return Encoding.Default.GetString(nul >= 0 ? bytes[..nul] : bytes);
+        }
+    }
+
     private static unsafe string GetRawPropertyString(EVENT_RECORD* eventRecordPtr, string propertyName, CachedSchema cache, string defaultvalue = "")
     {
         if (!cache.Properties.TryGetValue(propertyName, out CachedProperty property))
@@ -3925,6 +4657,105 @@ public sealed class EtlFileReader
         };
     }
 
+    private static unsafe SystemConfigPnPEventInfo ParseSystemConfigPnPPayload(
+        DateTime timestamp,
+        EVENT_RECORD* eventRecordPtr,
+        CachedSchema schema)
+    {
+        return new SystemConfigPnPEventInfo
+        {
+            Timestamp = timestamp,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            DeviceId = GetRawPropertyString(eventRecordPtr, "DeviceID", schema),
+            DeviceDescription = GetRawPropertyString(eventRecordPtr, "DeviceDescription", schema),
+            FriendlyName = GetRawPropertyString(eventRecordPtr, "FriendlyName", schema),
+            PdoName = GetRawPropertyString(eventRecordPtr, "PdoName", schema),
+            ServiceName = GetRawPropertyString(eventRecordPtr, "ServiceName", schema),
+        };
+    }
+
+    private static bool TryGetUsbEventProvider(in Guid providerId, out UsbEventProvider provider)
+    {
+        if (providerId == TraceSessionBuilder.UsbUcxProviderGuid) { provider = UsbEventProvider.UsbUcx; return true; }
+        if (providerId == TraceSessionBuilder.UsbXhciProviderGuid) { provider = UsbEventProvider.UsbXhci; return true; }
+        if (providerId == TraceSessionBuilder.UsbHub3ProviderGuid) { provider = UsbEventProvider.UsbHub3; return true; }
+        if (providerId == TraceSessionBuilder.UsbVideoProviderGuid) { provider = UsbEventProvider.UsbVideo; return true; }
+        if (providerId == TraceSessionBuilder.CameraFrameServerProviderGuid) { provider = UsbEventProvider.CameraFrameServer; return true; }
+        if (providerId == TraceSessionBuilder.UsbPortProviderGuid) { provider = UsbEventProvider.UsbPort; return true; }
+        if (providerId == TraceSessionBuilder.UsbHubProviderGuid) { provider = UsbEventProvider.UsbHub; return true; }
+        provider = default;
+        return false;
+    }
+
+    private unsafe void DispatchUsbEvent(DateTime timestamp, long rawTimestamp, UsbEventProvider provider, EVENT_RECORD* eventRecordPtr)
+    {
+        ref readonly EVENT_HEADER header = ref eventRecordPtr->EventHeader;
+        var key = new SchemaKey(header.ProviderId, header.EventDescriptor.Id, header.EventDescriptor.Version, header.EventDescriptor.Opcode);
+        if (!_usbSchemaCache.TryGetValue(key, out UsbEventSchema? schema))
+        {
+            nint infoPtr = GetOrAddSchema((nint)eventRecordPtr, in header);
+            schema = infoPtr == 0 ? null : UsbEventSchema.Create(infoPtr);
+            _usbSchemaCache[key] = schema;
+        }
+
+        int pointerSize = (int)GetPointerSize(in header);
+        ReadOnlySpan<byte> payload = eventRecordPtr->UserData == 0
+            ? default
+            : new ReadOnlySpan<byte>((void*)eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
+
+        _usbFields.Clear();
+        bool decoded = schema is not null && schema.Decode(payload, pointerSize, _usbFields);
+
+        UsbEventInfo info = new()
+        {
+            Timestamp = timestamp,
+            RawTimestamp = rawTimestamp,
+            Provider = provider,
+            ProviderId = header.ProviderId,
+            ProcessId = header.ProcessId,
+            ThreadId = header.ThreadId,
+            EventId = header.EventDescriptor.Id,
+            Version = header.EventDescriptor.Version,
+            Opcode = header.EventDescriptor.Opcode,
+            Level = header.EventDescriptor.Level,
+            Task = header.EventDescriptor.Task,
+            Keyword = header.EventDescriptor.Keyword,
+            TaskName = schema?.TaskName ?? string.Empty,
+            OpcodeName = schema?.OpcodeName ?? string.Empty,
+            PointerSize = pointerSize,
+            IsFullyDecoded = decoded,
+            Fields = _usbFields,
+            Payload = payload,
+        };
+
+        Usb!(in info);
+    }
+
+    private unsafe void DispatchDxgKrnlEvent(DateTime timestamp, long rawTimestamp, EVENT_RECORD* eventRecordPtr)
+    {
+        ref readonly EVENT_HEADER header = ref eventRecordPtr->EventHeader;
+        DxgKrnlEventInfo info = new()
+        {
+            Timestamp = timestamp,
+            RawTimestamp = rawTimestamp,
+            ProcessId = header.ProcessId,
+            ThreadId = header.ThreadId,
+            ProcessorNumber = eventRecordPtr->BufferContext.ProcessorNumber,
+            EventId = header.EventDescriptor.Id,
+            Version = header.EventDescriptor.Version,
+            Opcode = header.EventDescriptor.Opcode,
+            Level = header.EventDescriptor.Level,
+            Task = header.EventDescriptor.Task,
+            Keyword = header.EventDescriptor.Keyword,
+            PointerSize = (int)GetPointerSize(in header),
+            Payload = eventRecordPtr->UserData == 0
+                ? default
+                : new ReadOnlySpan<byte>((void*)eventRecordPtr->UserData, eventRecordPtr->UserDataLength),
+        };
+
+        DxgKrnl!(in info);
+    }
+
     private void ProcessDiskIoEvent(DateTime timestamp, in EVENT_HEADER header, IReadOnlyDictionary<string, string> properties)
     {
         var diskIoEvent = new DiskIoEventInfo
@@ -4282,10 +5113,103 @@ public sealed class EtlFileReader
         };
     }
 
+    private unsafe MemoryWorkingSetSnapshotEventInfo? ParseMemInfoWsPayload(DateTime timestamp, EVENT_RECORD* eventRecordPtr)
+    {
+        // 依 manifest 的 WSCommitInfo 結構(緊密排列):UInt32 ProcessID + N 個 Pointer;
+        // Version 0 = 4 個(WS/Commit/VirtualSize/PrivateWS),Version 1 = 7 個,Version 2 = 8 個。
+        byte version = eventRecordPtr->EventHeader.EventDescriptor.Version;
+        int pointerCount = version switch { 0 => 4, 1 => 7, _ => 8 };
+        int pointerSize = (int)GetPointerSize(in eventRecordPtr->EventHeader);
+        int entrySize = 4 + pointerCount * pointerSize;
+        var data = new ReadOnlySpan<byte>((void*)eventRecordPtr->UserData, eventRecordPtr->UserDataLength);
+        if (data.Length < 4)
+        {
+            return null;
+        }
+
+        uint count = BinaryPrimitives.ReadUInt32LittleEndian(data);
+        if (count > (uint)((data.Length - 4) / entrySize))
+        {
+            return null;
+        }
+
+        var entries = new ProcessWorkingSetEntry[count];
+        int offset = 4;
+        for (int i = 0; i < entries.Length; i++, offset += entrySize)
+        {
+            ReadOnlySpan<byte> e = data.Slice(offset, entrySize);
+            entries[i] = new ProcessWorkingSetEntry
+            {
+                ProcessId = BinaryPrimitives.ReadUInt32LittleEndian(e),
+                WorkingSetPageCount = ReadPointer(e, 0),
+                CommitPageCount = ReadPointer(e, 1),
+                VirtualSizePageCount = ReadPointer(e, 2),
+                PrivateWorkingSetPageCount = ReadPointer(e, 3),
+            };
+        }
+
+        return new MemoryWorkingSetSnapshotEventInfo { Timestamp = timestamp, Version = version, Processes = entries };
+
+        long ReadPointer(ReadOnlySpan<byte> entry, int index)
+        {
+            ReadOnlySpan<byte> slice = entry.Slice(4 + index * pointerSize, pointerSize);
+            return pointerSize == 8
+                ? unchecked((long)BinaryPrimitives.ReadUInt64LittleEndian(slice))
+                : BinaryPrimitives.ReadUInt32LittleEndian(slice);
+        }
+    }
+
+    private unsafe DiskIoCompleteEventInfo ParseDiskIoCompletePayload(DateTime timestamp, byte opcode, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        ulong responseRaw = GetRawProperty<ulong>(eventRecordPtr, "HighResResponseTime", cache);
+        uint issuingThreadId = GetRawProperty(eventRecordPtr, "IssuingThreadId", cache, uint.MaxValue);
+        return new DiskIoCompleteEventInfo
+        {
+            Timestamp = timestamp,
+            Kind = opcode switch
+            {
+                DiskReadOpcode => DiskIoKind.Read,
+                DiskWriteOpcode => DiskIoKind.Write,
+                _ => DiskIoKind.Flush,
+            },
+            Opcode = opcode,
+            Version = eventRecordPtr->EventHeader.EventDescriptor.Version,
+            Processor = eventRecordPtr->BufferContext.ProcessorNumber,
+            HeaderProcessId = eventRecordPtr->EventHeader.ProcessId,
+            HeaderThreadId = eventRecordPtr->EventHeader.ThreadId,
+            DiskNumber = GetRawProperty<uint>(eventRecordPtr, "DiskNumber", cache),
+            IrpFlags = GetRawProperty<uint>(eventRecordPtr, "IrpFlags", cache),
+            TransferSize = GetRawProperty<uint>(eventRecordPtr, "TransferSize", cache),
+            ByteOffset = GetRawProperty<long>(eventRecordPtr, "ByteOffset", cache),
+            FileObject = GetRawPointerProperty(eventRecordPtr, "FileObject", cache),
+            Irp = GetRawPointerProperty(eventRecordPtr, "Irp", cache),
+            HighResResponseTimeRaw = responseRaw,
+            ResponseTimeMSec = _perfFrequency > 0 ? responseRaw * 1000.0 / _perfFrequency : null,
+            IssuingThreadId = issuingThreadId == uint.MaxValue ? null : issuingThreadId,
+        };
+    }
+
+    private unsafe TcpIpTransferEventInfo ParseTcpIpTransferPayload(DateTime timestamp, byte opcode, EVENT_RECORD* eventRecordPtr, CachedSchema cache)
+    {
+        return new TcpIpTransferEventInfo
+        {
+            Timestamp = timestamp,
+            Protocol = eventRecordPtr->EventHeader.ProviderId == s_udpIpProviderId ? NetworkProtocol.Udp : NetworkProtocol.Tcp,
+            Direction = opcode is NetSendOpcode or NetSendIPv6Opcode ? NetworkDirection.Send : NetworkDirection.Receive,
+            IsIPv6 = opcode is NetSendIPv6Opcode or NetRecvIPv6Opcode,
+            Opcode = opcode,
+            ProcessId = GetRawProperty<uint>(eventRecordPtr, "PID", cache),
+            Size = GetRawProperty<uint>(eventRecordPtr, "size", cache),
+            SourcePort = BinaryPrimitives.ReverseEndianness(GetRawProperty<ushort>(eventRecordPtr, "sport", cache)),
+            DestinationPort = BinaryPrimitives.ReverseEndianness(GetRawProperty<ushort>(eventRecordPtr, "dport", cache)),
+        };
+    }
+
     private void ConfigureTimestampConversion(in TRACE_LOGFILE_HEADER header)
     {
         _timestampClockType = header.ReservedFlags;
         _timestampReferenceFileTime = header.StartTime;
+        _perfFrequency = header.PerfFreq;
 
         switch (_timestampClockType)
         {
@@ -4312,13 +5236,16 @@ public sealed class EtlFileReader
         {
             throw new InvalidDataException("ETL 檔頭缺少 StartTime，無法將原始事件時間戳換算為 FILETIME。");
         }
+
+        _timestampScaleIsIdentity = _timestampScaleNumerator == _timestampScaleDenominator;
+        _timestampScaleFastLimit = long.MaxValue / _timestampScaleNumerator;
     }
 
     private DateTime ConvertRawTimestamp(long rawTimestamp)
     {
         if (_timestampClockType == EtwNativeConstants.EVENT_TRACE_CLOCK_SYSTEMTIME)
         {
-            return DateTime.FromFileTime(rawTimestamp);
+            return FileTimeToLocalDateTime(rawTimestamp);
         }
 
         if (!_timestampReferenceInitialized)
@@ -4329,20 +5256,89 @@ public sealed class EtlFileReader
 
         long fileTime = checked(
             _timestampReferenceFileTime +
-            ScaleRawTimestampDelta((Int128)rawTimestamp - _timestampReferenceRaw));
+            ScaleRawTimestampDelta(rawTimestamp, _timestampReferenceRaw));
+        return FileTimeToLocalDateTime(fileTime);
+    }
+
+    /// <summary>
+    /// 結果與 <c>DateTime.FromFileTime(fileTime)</c> 逐位元相同,但同一秒內的事件不再每筆都呼叫 BCL。
+    /// BCL 版每次約 50 ns(Windows 上需 P/Invoke FileTimeToSystemTime 處理閏秒,再查時區規則),
+    /// 而一份 ETL 有數千萬筆事件,同一秒內就有數十萬筆。
+    /// 做法:快取「對齊整秒」的 1 秒視窗起點之 Local DateTime,視窗內只做 AddTicks;視窗重建時以 BCL 驗證
+    /// 起訖兩端相差剛好 1 秒(視窗內沒有 DST 轉換或閏秒)且都不在 DST 重複時段,驗證不過就不快取、直接走 BCL。
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private DateTime FileTimeToLocalDateTime(long fileTime)
+    {
+        long offset = fileTime - _timestampWindowStart;
+        return (ulong)offset < (ulong)_timestampWindowSpan
+            ? _timestampWindowStartLocal.AddTicks(offset)
+            : FileTimeToLocalDateTimeSlow(fileTime);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private DateTime FileTimeToLocalDateTimeSlow(long fileTime)
+    {
+        // 負值與接近 DateTime.MaxValue 的 FILETIME 不快取,交給 BCL 以維持原本的例外與邊界行為。
+        if ((ulong)fileTime > MaxCacheableFileTime)
+        {
+            return DateTime.FromFileTime(fileTime);
+        }
+
+        long windowStart = fileTime - (fileTime % TimeSpan.TicksPerSecond);
+        DateTime startLocal = DateTime.FromFileTime(windowStart);
+        DateTime lastLocal = DateTime.FromFileTime(windowStart + TimeSpan.TicksPerSecond - 1);
+
+        TimeZoneInfo localZone = TimeZoneInfo.Local;
+        if (lastLocal.Ticks - startLocal.Ticks == TimeSpan.TicksPerSecond - 1 &&
+            !localZone.IsAmbiguousTime(startLocal) &&
+            !localZone.IsAmbiguousTime(lastLocal))
+        {
+            _timestampWindowStart = windowStart;
+            _timestampWindowSpan = TimeSpan.TicksPerSecond;
+            _timestampWindowStartLocal = startLocal;
+            return startLocal.AddTicks(fileTime - windowStart);
+        }
+
+        _timestampWindowSpan = 0;
         return DateTime.FromFileTime(fileTime);
     }
 
     private double? ComputeElapsedTimeMSec(long initialTimeRaw, long stopTimeRaw)
     {
-        Int128 rawDelta = (Int128)stopTimeRaw - initialTimeRaw;
-        if (rawDelta < 0)
+        if (stopTimeRaw < initialTimeRaw)
         {
             return null;
         }
 
-        long elapsedFileTimeTicks = ScaleRawTimestampDelta(rawDelta);
+        long elapsedFileTimeTicks = ScaleRawTimestampDelta(stopTimeRaw, initialTimeRaw);
         return elapsedFileTimeTicks / (double)TimeSpan.TicksPerMillisecond;
+    }
+
+    /// <summary>
+    /// 計算 <c>(later - earlier)</c> 換算後的 FILETIME ticks。差值與乘法都放得進 long 時只用 long 運算
+    /// (比例為 1 的常見情形直接回傳差值),否則退回 Int128,結果與例外行為與純 Int128 版本相同。
+    /// </summary>
+    private long ScaleRawTimestampDelta(long later, long earlier)
+    {
+        long delta = unchecked(later - earlier);
+
+        // 兩數異號且差值符號與 later 不同代表 long 減法溢位,必須走 Int128。
+        if (((later ^ earlier) & (later ^ delta)) >= 0)
+        {
+            if (_timestampScaleIsIdentity)
+            {
+                return delta;
+            }
+
+            long limit = _timestampScaleFastLimit;
+            if (delta >= -limit && delta <= limit)
+            {
+                return delta * _timestampScaleNumerator / _timestampScaleDenominator;
+            }
+        }
+
+        return ScaleRawTimestampDelta((Int128)later - earlier);
     }
 
     private long ScaleRawTimestampDelta(Int128 rawDelta) =>
@@ -4354,54 +5350,68 @@ public sealed class EtlFileReader
         return (header.Flags & EtwNativeConstants.EVENT_HEADER_FLAG_32_BIT_HEADER) != 0 ? 4u : 8u;
     }
 
-    private CSwitchEventInfo? ParseCSwitchPayload(DateTime timestamp, byte processorNumber, byte version, nint userData, int userDataLength)
+    /// <summary>
+    /// Thread CSwitch 事件 payload 的原生版面(MOF CSwitch / WMI_CONTEXTSWAP),固定 24 位元組,
+    /// 欄位順序即位元組 offset(NewThreadId=0、OldThreadId=4、…、OldThreadWaitReason=12、WaitModeOrFlags=13、NewThreadWaitTime=16),不可任意調整。
+    /// <see cref="WaitModeOrFlags"/> 在 Version &lt; 4 為 OldThreadWaitMode,Version &gt;= 4 為 BAM QoS 位元旗標。
+    /// <see cref="SpareByte"/>、<see cref="Reserved"/> 不使用,僅為讓結構大小與 offset 與原生版面一致。
+    /// Pack = 1:payload 起始位址不保證對齊,不容許任何隱含填充。
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private readonly struct CSwitchPayloadRaw
     {
-        const int CSwitchPayloadSize = 24;
-        const int FlagsOffset = 13;
-        if (userData == 0 || userDataLength < CSwitchPayloadSize)
+        public readonly uint NewThreadId;
+        public readonly uint OldThreadId;
+        public readonly sbyte NewThreadPriority;
+        public readonly sbyte OldThreadPriority;
+        public readonly byte PreviousCState;
+        public readonly byte SpareByte;
+        public readonly sbyte OldThreadWaitReason;
+        public readonly byte WaitModeOrFlags;
+        public readonly sbyte OldThreadState;
+        public readonly sbyte OldThreadWaitIdealProcessor;
+        public readonly uint NewThreadWaitTime;
+        public readonly uint Reserved;
+    }
+
+    private unsafe CSwitchEventInfo? ParseCSwitchPayload(DateTime timestamp, byte processorNumber, byte version, nint userData, int userDataLength)
+    {
+        if (userData == 0 || userDataLength < sizeof(CSwitchPayloadRaw))
         {
             return null;
         }
 
-        uint newThreadId = unchecked((uint)Marshal.ReadInt32(userData, 0));
-        uint oldThreadId = unchecked((uint)Marshal.ReadInt32(userData, 4));
-        sbyte newThreadPriority = unchecked((sbyte)Marshal.ReadByte(userData, 8));
-        sbyte oldThreadPriority = unchecked((sbyte)Marshal.ReadByte(userData, 9));
-        byte previousCState = Marshal.ReadByte(userData, 10);
-        sbyte oldThreadWaitReason = unchecked((sbyte)Marshal.ReadByte(userData, 12));
-        byte waitModeOrFlags = Marshal.ReadByte(userData, FlagsOffset);
-        sbyte oldThreadState = unchecked((sbyte)Marshal.ReadByte(userData, 14));
-        sbyte oldThreadWaitIdealProcessor = unchecked((sbyte)Marshal.ReadByte(userData, 15));
-        uint newThreadWaitTime = unchecked((uint)Marshal.ReadInt32(userData, 16));
+        // 一次讀出整個 24 位元組結構;ReadUnaligned 保留舊 Marshal.ReadXxx 對「未對齊位址」的支援。
+        CSwitchPayloadRaw raw = Unsafe.ReadUnaligned<CSwitchPayloadRaw>((void*)userData);
 
         int oldThreadWaitMode;
         int? oldThreadBamQosLevel = null;
         int? newThreadBamQosLevel = null;
         if (version >= 4)
         {
-            oldThreadWaitMode = waitModeOrFlags & 0x1;
-            oldThreadBamQosLevel = (waitModeOrFlags >> 1) & 0x7;
-            newThreadBamQosLevel = (waitModeOrFlags >> 4) & 0x7;
+            oldThreadWaitMode = raw.WaitModeOrFlags & 0x1;
+            oldThreadBamQosLevel = (raw.WaitModeOrFlags >> 1) & 0x7;
+            newThreadBamQosLevel = (raw.WaitModeOrFlags >> 4) & 0x7;
         }
         else
         {
-            oldThreadWaitMode = unchecked((sbyte)waitModeOrFlags);
+            oldThreadWaitMode = unchecked((sbyte)raw.WaitModeOrFlags);
         }
 
         return new CSwitchEventInfo
         {
             Timestamp = timestamp,
             ProcessorNumber = processorNumber,
-            NewThreadId = newThreadId,
-            OldThreadId = oldThreadId,
-            NewThreadPriority = newThreadPriority,
-            OldThreadPriority = oldThreadPriority,
-            PreviousCState = previousCState,
-            OldThreadWaitReason = oldThreadWaitReason,
+            NewThreadId = raw.NewThreadId,
+            OldThreadId = raw.OldThreadId,
+            NewThreadPriority = raw.NewThreadPriority,
+            OldThreadPriority = raw.OldThreadPriority,
+            PreviousCState = raw.PreviousCState,
+            OldThreadWaitReason = raw.OldThreadWaitReason,
             OldThreadWaitMode = oldThreadWaitMode,
-            OldThreadState = oldThreadState,
-            OldThreadWaitIdealProcessor = oldThreadWaitIdealProcessor,
-            NewThreadWaitTime = unchecked((int)newThreadWaitTime),
+            OldThreadState = raw.OldThreadState,
+            OldThreadWaitIdealProcessor = raw.OldThreadWaitIdealProcessor,
+            NewThreadWaitTime = unchecked((int)raw.NewThreadWaitTime),
             OldThreadBamQosLevel = oldThreadBamQosLevel,
             NewThreadBamQosLevel = newThreadBamQosLevel,
         };
@@ -4452,6 +5462,41 @@ public sealed class EtlFileReader
             FileName = hasFullFixedPayload && fileNameOffset < userDataLength
                 ? Marshal.PtrToStringUni(userData + fileNameOffset) ?? string.Empty
                 : string.Empty,
+        };
+    }
+
+    private unsafe ImagePdbIdentityEventInfo? ParseImagePdbIdentity(
+        DateTime timestamp,
+        in EVENT_HEADER header,
+        nint userData,
+        int userDataLength)
+    {
+        int pointerSize = (int)GetPointerSize(in header);
+        int guidOffset = pointerSize + sizeof(uint);
+        int ageOffset = guidOffset + 16;
+        int fileNameOffset = ageOffset + sizeof(uint);
+        if (userData == 0 || userDataLength < fileNameOffset)
+        {
+            return null;
+        }
+
+        ulong imageBase = ReadPointer(userData, 0, (uint)pointerSize);
+        Guid pdbGuid = Marshal.PtrToStructure<Guid>(userData + guidOffset);
+        uint age = unchecked((uint)Marshal.ReadInt32(userData, ageOffset));
+        int fileNameByteLength = userDataLength - fileNameOffset;
+        ReadOnlySpan<byte> fileNameData = new((void*)(userData + fileNameOffset), fileNameByteLength);
+        int terminatorIndex = fileNameData.IndexOf((byte)0);
+        ReadOnlySpan<byte> fileName = terminatorIndex >= 0
+            ? fileNameData[..terminatorIndex]
+            : fileNameData;
+
+        return new ImagePdbIdentityEventInfo
+        {
+            Timestamp = timestamp,
+            ImageBase = imageBase,
+            PdbGuid = pdbGuid,
+            PdbAge = age,
+            PdbFileName = Encoding.UTF8.GetString(fileName),
         };
     }
 

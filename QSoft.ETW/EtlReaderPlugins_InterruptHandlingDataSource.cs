@@ -39,6 +39,7 @@ internal sealed class InterruptHandlingDataSourceCollector(
     private readonly List<ModuleInfo> _modules = [];
 
     private readonly Dictionary<(uint ProcessId, ulong ImageBase), List<ModuleInfo>> _modulesByProcessAndBase = [];
+    private readonly Dictionary<ulong, List<ImagePdbIdentityEventInfo>> _pdbIdentitiesByImageBase = [];
 
     private readonly List<InterruptEventInfo> _pendingIsrEvents = [];
     private readonly List<(DpcEventInfo Data, EtlDeferredProcedureCallType CallType)> _pendingDpcEvents = [];
@@ -57,6 +58,7 @@ internal sealed class InterruptHandlingDataSourceCollector(
     {
         _modules.Clear();
         _modulesByProcessAndBase.Clear();
+        _pdbIdentitiesByImageBase.Clear();
         _pendingIsrEvents.Clear();
         _pendingDpcEvents.Clear();
         _isrIntervals.Clear();
@@ -65,6 +67,7 @@ internal sealed class InterruptHandlingDataSourceCollector(
         reader.ImageLoad += OnImageLoad;
         reader.ImageUnload += OnImageUnload;
         reader.ImageDCStart += OnImageRundown;
+        reader.ImagePdbIdentity += OnImagePdbIdentity;
         reader.PerfInfoISR += OnIsr;
         reader.PerfInfoDPC += OnNormalDpc;
         reader.PerfInfoThreadedDPC += OnThreadedDpc;
@@ -76,6 +79,7 @@ internal sealed class InterruptHandlingDataSourceCollector(
         reader.ImageLoad -= OnImageLoad;
         reader.ImageUnload -= OnImageUnload;
         reader.ImageDCStart -= OnImageRundown;
+        reader.ImagePdbIdentity -= OnImagePdbIdentity;
         reader.PerfInfoISR -= OnIsr;
         reader.PerfInfoDPC -= OnNormalDpc;
         reader.PerfInfoThreadedDPC -= OnThreadedDpc;
@@ -84,6 +88,8 @@ internal sealed class InterruptHandlingDataSourceCollector(
 
     public void Complete(EtlReadResult result)
     {
+        AttachPdbIdentitiesToModules();
+
         List<(InterruptEventInfo Data, ModuleInfo? Module)> isrEvents = [.. _pendingIsrEvents
             .Select(data => (data, FindModule(data.Routine, data.Timestamp)))];
         List<(DpcEventInfo Data, EtlDeferredProcedureCallType CallType, ModuleInfo? Module)> dpcEvents =
@@ -143,6 +149,58 @@ internal sealed class InterruptHandlingDataSourceCollector(
         elapsedTimeMSec is >= 0 ? initialTimestamp ?? stopTime : stopTime;
 
     private void OnImageLoad(in ImageLoadEventInfo info) => AddModule(info, info.Timestamp);
+
+    private void OnImagePdbIdentity(in ImagePdbIdentityEventInfo info)
+    {
+        if (!_pdbIdentitiesByImageBase.TryGetValue(info.ImageBase, out List<ImagePdbIdentityEventInfo>? identities))
+        {
+            identities = [];
+            _pdbIdentitiesByImageBase.Add(info.ImageBase, identities);
+        }
+
+        identities.Add(info);
+    }
+
+    private void AttachPdbIdentitiesToModules()
+    {
+        foreach (ModuleInfo module in _modules)
+        {
+            if (!_pdbIdentitiesByImageBase.TryGetValue(module.ImageBase, out List<ImagePdbIdentityEventInfo>? identities))
+            {
+                continue;
+            }
+
+            string moduleName = Path.GetFileNameWithoutExtension(module.FileName);
+            List<ImagePdbIdentityEventInfo> candidates = identities
+                .Where(identity =>
+                    string.Equals(
+                        Path.GetFileNameWithoutExtension(identity.PdbFileName),
+                        moduleName,
+                        StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (candidates.Count == 0)
+            {
+                // Start/stop rundown can repeat one identity even when image and PDB names differ.
+                ImagePdbIdentityEventInfo first = identities[0];
+                if (identities.Any(identity =>
+                    identity.PdbGuid != first.PdbGuid ||
+                    identity.PdbAge != first.PdbAge ||
+                    !string.Equals(identity.PdbFileName, first.PdbFileName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                candidates = identities;
+            }
+
+            ImagePdbIdentityEventInfo selected = module.LoadTime == DateTime.MinValue
+                ? candidates[^1]
+                : candidates.MinBy(identity => Math.Abs((identity.Timestamp - module.LoadTime).Ticks));
+            module.PdbGuid = selected.PdbGuid;
+            module.PdbAge = selected.PdbAge;
+            module.PdbFileName = selected.PdbFileName;
+        }
+    }
 
     private void OnImageRundown(in ImageLoadEventInfo info)
     {

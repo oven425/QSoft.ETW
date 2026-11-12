@@ -9,6 +9,11 @@ using System.Text;
 using System.Xml.Linq;
 
 Console.OutputEncoding = Encoding.UTF8;
+if (args.Length >= 2 && args[0] == "gpu-validate")
+{
+    return GpuValidation.Run(args[1], args.Length >= 3 ? args[2] : null);
+}
+
 var pppps = TdhManifestMapReader.QueryManifestEventInfo(Guid.Parse("{65cd4c8a-0848-4583-92a0-31c0fbaf00c0}"));
 //var ees = TdhManifestMapReader.QueryEnergyEstimateEventInfo();
 int durationSeconds = 600;
@@ -17,14 +22,14 @@ if (args.Length > 0 && int.TryParse(args[0], out int parsedSeconds) && parsedSec
     durationSeconds = parsedSeconds;
 }
 
-//string? capturedEtlPath = await RunTraceSessionCaptureDemo(durationSeconds);
-//if (capturedEtlPath is null)
-//{
-//    return 1;
-//}
-var capturedEtlPath = args.Length > 0 && File.Exists(args[0])
-    ? args[0]
-    : "capture_20260920_004357.etl";
+string? capturedEtlPath = await RunTraceSessionCaptureDemo(durationSeconds);
+if (capturedEtlPath is null)
+{
+    return 1;
+}
+//var capturedEtlPath = args.Length > 0 && File.Exists(args[0])
+//    ? args[0]
+//    : "capture_20260920_004357.etl";
 
 long etlFileSizeBytes = new FileInfo(capturedEtlPath).Length;
 double etlFileSizeMb = etlFileSizeBytes / 1024.0 / 1024.0;
@@ -127,7 +132,7 @@ static async Task<string?> RunTraceSessionCaptureDemo(int durationSeconds)
             TraceSessionBuilder.SystemMemoryWorkingSetKeyword |
             TraceSessionBuilder.SystemMemoryVirtualAllocKeyword)
         .WithProvider(TraceSessionBuilder.PowerMeterPollingProviderGuid, TraceSessionBuilder.PowerMeterPollingFiveSecondKeyword)
-        .WithProvider(TraceSessionBuilder.DxgKrnlProviderGuid)
+        .WithGpuMonitoring()
         .WithProvider(TraceSessionBuilder.KernelMemoryProviderGuid, TraceSessionBuilder.KernelMemoryMemInfoKeyword)
         .WithOutputPath(Path.Combine(AppContext.BaseDirectory, $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.etl"))
         .WithEtwFileCompression()

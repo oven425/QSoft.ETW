@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>工作管理員重播 (ETW)</title>
+<style>
+  :root { --bg:#1e1e1e; --panel:#252526; --panel2:#2d2d30; --line:#3c3c3c; --fg:#e6e6e6; --dim:#9da3ab; --acc:#4cc2ff;
+          --cpu:#1890ff; --mem:#a24fd6; --disk:#4caf50; --net:#d97f2f; --gpu:#2bb3a3; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px "Segoe UI","Microsoft JhengHei",sans-serif; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; align-items:center; gap:14px; padding:6px 12px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:14px; margin:0; font-weight:600; }
+  header .meta { color:var(--dim); font-size:12px; }
+  .timebar { display:flex; align-items:center; gap:8px; padding:6px 12px; background:var(--panel2); border-bottom:1px solid var(--line); }
+  .timebar button, .timebar select { background:#3a3a3d; color:var(--fg); border:1px solid #555; border-radius:4px; padding:3px 9px; cursor:pointer; font:inherit; }
+  .timebar button:hover { background:#46464a; }
+  #clock { font:600 18px Consolas,monospace; min-width:92px; color:var(--acc); }
+  #offset { color:var(--dim); font-family:Consolas,monospace; min-width:110px; }
+  .scrub { flex:1; position:relative; height:38px; }
+  #overview { position:absolute; inset:0 0 14px 0; width:100%; height:24px; cursor:pointer; }
+  #slider { position:absolute; left:0; right:0; bottom:0; width:100%; margin:0; accent-color:var(--acc); }
+  nav { display:flex; gap:2px; background:var(--panel); padding:0 10px; border-bottom:1px solid var(--line); }
+  nav button { background:none; border:0; color:var(--dim); padding:7px 14px; cursor:pointer; font:inherit; border-bottom:2px solid transparent; }
+  nav button.on { color:var(--fg); border-bottom-color:var(--acc); }
+  main { flex:1; min-height:0; display:flex; }
+  .page { display:none; flex:1; min-height:0; } .page.on { display:flex; }
+  /* processes */
+  .pcol { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .ptools { display:flex; gap:10px; align-items:center; padding:6px 12px; border-bottom:1px solid var(--line); }
+  .ptools input[type=text] { background:#333; border:1px solid #555; color:var(--fg); padding:3px 8px; width:240px; border-radius:4px; }
+  .ptools label { color:var(--dim); }
+  .ptools select { background:#333; color:var(--fg); border:1px solid #555; }
+  .tblwrap { flex:1; overflow:auto; }
+  table { border-collapse:collapse; width:100%; white-space:nowrap; }
+  thead th { position:sticky; top:0; background:var(--panel); z-index:2; border-bottom:1px solid var(--line); border-right:1px solid var(--line); padding:3px 8px; text-align:right; font-weight:normal; color:var(--dim); cursor:pointer; vertical-align:bottom; }
+  thead th.l { text-align:left; }
+  thead th .tot { display:block; font-size:16px; color:var(--fg); }
+  thead th.sorted { color:var(--acc); }
+  tbody td { padding:2px 8px; border-right:1px solid #2f2f2f; text-align:right; font-family:Consolas,"Microsoft JhengHei",monospace; font-size:12px; }
+  tbody td.l { text-align:left; font-family:"Segoe UI","Microsoft JhengHei",sans-serif; }
+  tbody tr:hover td { outline:1px solid #3d5a80; }
+  tbody tr.sel td { background-color:#264f78 !important; }
+  tbody tr.child td.l:first-child { padding-left:28px; }
+  tbody tr.dead td { color:#888; text-decoration:line-through; }
+  tbody tr.born td.l:first-child::after { content:" 新"; color:#5fd35f; font-size:10px; }
+  .tog { display:inline-block; width:14px; color:var(--dim); cursor:pointer; user-select:none; }
+  td.cmd { max-width:520px; overflow:hidden; text-overflow:ellipsis; color:var(--dim); }
+  /* performance */
+  .side { width:240px; min-width:240px; overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
+  .side .item { display:flex; gap:8px; padding:8px; cursor:pointer; border-left:3px solid transparent; }
+  .side .item.on { background:#37373d; border-left-color:var(--acc); }
+  .side .item svg { width:72px; height:44px; flex:none; border:1px solid #555; background:#111; }
+  .side .item .t { font-size:14px; }
+  .side .item .v { color:var(--dim); font-size:12px; }
+  .detail { flex:1; min-width:0; overflow:auto; padding:12px 18px; }
+  .dhead { display:flex; justify-content:space-between; align-items:baseline; }
+  .dhead h2 { margin:0; font-size:24px; font-weight:400; }
+  .dhead .sub { color:var(--dim); font-size:14px; }
+  .clabel { display:flex; justify-content:space-between; color:var(--dim); font-size:11px; margin-top:8px; }
+  svg.chart { width:100%; display:block; background:#111; cursor:crosshair; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .gridN { display:grid; gap:4px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px 22px; margin-top:12px; }
+  .stats div .k { color:var(--dim); font-size:12px; } .stats div .v { font-size:20px; }
+  .cpuinfo { display:flex; gap:48px; margin-top:12px; }
+  .gridN svg.chart { width:100%; min-width:0; }
+  .cpuinfo .live { display:grid; grid-template-columns:repeat(3,max-content); gap:10px 36px; align-content:start; white-space:nowrap; }
+  .cpuinfo .live .k { color:var(--dim); font-size:12px; } .cpuinfo .live .v { font-size:22px; }
+  .cpuinfo table { border-collapse:collapse; font-size:12px; align-self:start; }
+  .cpuinfo td { padding:2px 14px 2px 0; text-align:left; font-family:inherit; border:0; } .cpuinfo td:first-child { color:var(--dim); }
+  .compbar { display:flex; height:26px; border:1px solid var(--mem); margin-top:6px; }
+  .compbar div { height:100%; border-right:1px solid var(--mem); }
+  .toplist { margin-top:14px; } .toplist h3 { font-size:13px; color:var(--dim); font-weight:400; margin:0 0 4px; }
+  .toplist table { width:auto; min-width:360px; } .toplist table td { font-size:12px; }
+  .engsel { background:#333; color:var(--fg); border:1px solid #555; font-size:12px; max-width:100%; }
+  .notes { color:var(--dim); font-size:12px; margin-top:16px; line-height:1.6; }
+  .notes code { color:#ccc; }
+  #tip { position:fixed; pointer-events:none; background:#000d; border:1px solid #555; padding:3px 7px; font-size:12px; display:none; z-index:10; }
+  tbody tr.now td { background-color:#2d3b2d; }
+  .evcat { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<header>
+  <h1>工作管理員重播</h1>
+  <span class="meta" id="hdrMeta"></span>
+</header>
+<div class="timebar">
+  <button id="btnPlay" title="播放/暫停 (空白鍵)">▶ 播放</button>
+  <button id="btnPrev" title="上一秒 (←, Shift+← 10 秒)">◀</button>
+  <button id="btnNext" title="下一秒 (→, Shift+→ 10 秒)">▶</button>
+  <select id="speed" title="播放速度"><option value="1">1×</option><option value="2">2×</option><option value="5" selected>5×</option><option value="10">10×</option><option value="30">30×</option></select>
+  <span id="clock"></span><span id="offset"></span>
+  <div class="scrub"><svg id="overview" preserveAspectRatio="none"></svg><input type="range" id="slider" min="0" value="0" step="1"></div>
+</div>
+<nav>
+  <button data-page="procs" class="on">處理程序</button>
+  <button data-page="perf">效能</button>
+  <button data-page="details">詳細資料</button>
+  <button data-page="events">系統事件 <span id="evBadge" style="color:var(--dim)"></span></button>
+  <button data-page="about">關於資料</button>
+</nav>
+<main>
+  <section class="page on" id="page-procs">
+    <div class="pcol">
+      <div class="ptools">
+        <input type="text" id="pFilter" placeholder="搜尋名稱 / PID / 命令列">
+        <label>檢視 <select id="pView"><option value="group">依名稱分組</option><option value="tree">父子樹狀</option></select></label>
+        <label><input type="checkbox" id="pDead"> 顯示此秒已結束的處理程序</label>
+        <span id="pCount" style="color:var(--dim)"></span>
+      </div>
+      <div class="tblwrap"><table id="pTable"><thead></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+  <section class="page" id="page-perf">
+    <div class="side" id="perfSide"></div>
+    <div class="detail" id="perfDetail"></div>
+  </section>
+  <section class="page" id="page-details">
+    <div class="pcol">
+      <div class="ptools"><input type="text" id="dFilter" placeholder="搜尋名稱 / PID / 命令列"><span id="dCount" style="color:var(--dim)"></span></div>
+      <div class="tblwrap"><table id="dTable"><thead></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+  <section class="page" id="page-events">
+    <div class="pcol">
+      <div class="ptools">
+        <label>類別 <select id="evCat"></select></label>
+        <label><input type="checkbox" id="evRundown"> 顯示狀態快照 (rundown)</label>
+        <span id="evCount" style="color:var(--dim)"></span>
+      </div>
+      <div class="tblwrap"><table id="evTable"><thead><tr><th class="l">時間</th><th>秒</th><th class="l">類別</th><th>事件 ID</th><th class="l">說明</th></tr></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+  <section class="page" id="page-about"><div class="detail" id="aboutBody"></div></section>
+</main>
+<div id="tip"></div>
+<script>
+const DATA=/*__REPLAY_DATA__*/null;
+(() => {
+'use strict';
+const M = DATA.meta, S = DATA.system, N = M.seconds, WIN = 60;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+const at = (a, k) => a ? (a[k] ?? 0) : 0;
+const MB = 1048576, GB = 1073741824;
+const fmtBytes = b => b >= GB ? (b / GB).toFixed(1) + ' GB' : b >= MB ? (b / MB).toFixed(1) + ' MB' : (b / 1024).toFixed(0) + ' KB';
+const fmtRate = b => b >= MB ? (b / MB).toFixed(1) + ' MB/秒' : b >= 1024 ? (b / 1024).toFixed(0) + ' KB/秒' : b > 0 ? b + ' B/秒' : '0 MB/秒';
+const fmtBits = b => { const bits = b * 8; return bits >= 1e6 ? (bits / 1e6).toFixed(1) + ' Mbps' : bits >= 1e3 ? (bits / 1e3).toFixed(0) + ' Kbps' : bits > 0 ? bits + ' bps' : '0 Mbps'; };
+const pct = v => (v ?? 0).toFixed(1) + '%';
+const start = new Date(M.startLocal);
+const clockAt = k => { const d = new Date(start.getTime() + k * 1000); return d.toTimeString().slice(0, 8); };
+const visibleGpus = DATA.gpus.filter(g => !g.isSoftware);
+const EV = DATA.systemEvents ?? [];
+const EVC = { SleepAndStandby: ['睡眠/待命', '#c586ff'], PowerSource: ['電源 AC/DC', '#ffd54f'], PowerPolicy: ['電源計畫/模式', '#ffb74d'],
+  Thermal: ['散熱', '#ff5252'], ProcessorThrottle: ['CPU 降頻', '#ff8a65'], TimerResolution: ['計時器解析度', '#4dd0e1'], IdleResiliency: ['Idle resiliency', '#90a4ae'] };
+
+let cur = 0, timer = null;
+const listeners = [];
+function setTime(k) {
+  cur = Math.max(0, Math.min(N - 1, k | 0));
+  $('slider').value = cur;
+  $('clock').textContent = clockAt(cur);
+  $('offset').textContent = `+${cur}s / ${N}s`;
+  drawOverview();
+  listeners.forEach(f => f());
+}
+
+// ---------- charts ----------
+function line(data, from, to, max, w, h) {
+  let p = '';
+  for (let k = Math.max(from, 0); k <= to && k < N; k++) {
+    const x = (k - from) / (to - from) * w, y = h - Math.min(1, (data[k] ?? 0) / max) * h;
+    p += (p ? 'L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1);
+  }
+  return p;
+}
+/** series: [{d, color, fill, dash}]; window [from,to]; click sets time. */
+function chart(svg, series, max, from, to, opts = {}) {
+  const w = 600, h = opts.h ?? 160;
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  if (!opts.small) svg.style.height = (opts.px ?? h) + 'px';
+  const gc = opts.color ?? '#555';
+  let s = '';
+  if (!opts.small) {
+    for (let i = 1; i < 10; i++) s += `<line x1="${w * i / 10}" x2="${w * i / 10}" y1="0" y2="${h}" stroke="${gc}" stroke-opacity=".25" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+    for (let i = 1; i < 4; i++) s += `<line x1="0" x2="${w}" y1="${h * i / 4}" y2="${h * i / 4}" stroke="${gc}" stroke-opacity=".25" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+  }
+  for (const se of series) {
+    const p = line(se.d, from, to, max, w, h);
+    if (!p) continue;
+    if (se.fill) {
+      const x0 = (Math.max(from, 0) - from) / (to - from) * w, x1 = (Math.min(to, N - 1) - from) / (to - from) * w;
+      s += `<path d="${p}L${x1.toFixed(1)},${h}L${x0.toFixed(1)},${h}Z" fill="${se.color}" fill-opacity=".18"/>`;
+    }
+    s += `<path d="${p}" fill="none" stroke="${se.color}" stroke-width="${opts.small ? 1.2 : 1.5}" ${se.dash ? 'stroke-dasharray="4 3"' : ''} vector-effect="non-scaling-stroke"/>`;
+  }
+  if (opts.cursor !== undefined && opts.cursor >= from && opts.cursor <= to) {
+    const x = (opts.cursor - from) / (to - from) * w;
+    s += `<line x1="${x}" x2="${x}" y1="0" y2="${h}" stroke="#fff" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+  }
+  svg.innerHTML = s;
+  svg.onclick = opts.small ? null : e => { const r = svg.getBoundingClientRect(); setTime(Math.round(from + (e.clientX - r.left) / r.width * (to - from))); };
+  svg.onmousemove = opts.small ? null : e => {
+    const r = svg.getBoundingClientRect(), k = Math.round(from + (e.clientX - r.left) / r.width * (to - from));
+    if (k < 0 || k >= N) return hideTip();
+    showTip(e, `${clockAt(k)} (+${k}s)<br>` + series.map(se => `<span style="color:${se.color}">■</span> ${esc(se.name ?? '')} ${se.fmt ? se.fmt(se.d[k] ?? 0) : (se.d[k] ?? 0)}`).join('<br>'));
+  };
+  svg.onmouseleave = hideTip;
+}
+const win = () => [cur - WIN + 1, cur];
+function showTip(e, html) { const t = $('tip'); t.innerHTML = html; t.style.display = 'block'; t.style.left = (e.clientX + 14) + 'px'; t.style.top = (e.clientY + 10) + 'px'; }
+function hideTip() { $('tip').style.display = 'none'; }
+
+function drawOverview() {
+  const svg = $('overview'), w = 1000, h = 24;
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  const to = Math.max(N - 1, 1);
+  const p = line(S.cpu, 0, to, 100, w, h);
+  const x = cur / to * w, x0 = Math.max(0, cur - WIN + 1) / to * w;
+  const marks = EV.filter(e => !e.rundown).map(e => `<rect x="${(e.sec / to * w - 1).toFixed(1)}" y="0" width="3" height="5" fill="${EVC[e.category]?.[1] ?? '#ccc'}"/>`).join('');
+  svg.innerHTML = `<rect x="${x0}" y="0" width="${Math.max(1, x - x0)}" height="${h}" fill="#4cc2ff" fill-opacity=".12"/>`
+    + `<path d="${p}L${w},${h}L0,${h}Z" fill="#1890ff" fill-opacity=".35"/><path d="${p}" fill="none" stroke="#1890ff" vector-effect="non-scaling-stroke"/>`
+    + marks
+    + `<line x1="${x}" x2="${x}" y1="0" y2="${h}" stroke="#fff" vector-effect="non-scaling-stroke"/>`;
+}
+$('overview').onclick = e => { const r = $('overview').getBoundingClientRect(); setTime(Math.round((e.clientX - r.left) / r.width * (N - 1))); };
+$('overview').onmousemove = e => {
+  const r = $('overview').getBoundingClientRect(), k = Math.round((e.clientX - r.left) / r.width * (N - 1));
+  const near = EV.filter(v => !v.rundown && Math.abs(v.sec - k) <= Math.max(1, N / 200));
+  showTip(e, `${clockAt(k)} (+${k}s)<br>CPU ${pct(S.cpu[k])}` + near.slice(0, 6).map(v => `<br>⚑ ${esc(v.text)}`).join(''));
+};
+$('overview').onmouseleave = hideTip;
+
+// ---------- process helpers ----------
+const P = DATA.processes;
+const alive = (p, k) => (p.startSec == null || k >= p.startSec) && (p.endSec == null || k <= p.endSec);
+const engName = i => i == null || i < 0 ? '' : (M.gpuEngineNames[i] ?? `engine ${i}`);
+function rowVals(p, k) {
+  const ge = p.gpuEngine ? p.gpuEngine[k] : -1;
+  return {
+    cpu: at(p.cpu, k), mem: at(p.privateWs, k) * 1024, ws: at(p.ws, k) * 1024,
+    disk: at(p.diskRead, k) + at(p.diskWrite, k), diskR: at(p.diskRead, k), diskW: at(p.diskWrite, k),
+    net: at(p.netSend, k) + at(p.netRecv, k), netS: at(p.netSend, k), netR: at(p.netRecv, k),
+    gpu: at(p.gpu, k), gpuEng: at(p.gpu, k) > 0 ? engName(ge) : '',
+    gpuDed: at(p.gpuDedicated, k) * 1024, gpuSh: at(p.gpuShared, k) * 1024,
+    threads: at(p.threads, k),
+  };
+}
+function sumVals(list) {
+  const r = { cpu:0, mem:0, ws:0, disk:0, diskR:0, diskW:0, net:0, netS:0, netR:0, gpu:0, gpuEng:'', gpuDed:0, gpuSh:0, threads:0 };
+  for (const v of list) {
+    for (const key of ['cpu','mem','ws','disk','diskR','diskW','net','netS','netR','gpuDed','gpuSh','threads']) r[key] += v[key];
+    if (v.gpu > r.gpu) { r.gpu = v.gpu; r.gpuEng = v.gpuEng; }
+  }
+  return r;
+}
+function heat(v, scale) {
+  const a = Math.min(1, v / scale);
+  if (a <= 0.005) return '';
+  return `background-color:rgba(255,${Math.round(200 - a * 110)},0,${(0.12 + a * 0.5).toFixed(2)})`;
+}
+const memTotal = M.totalMemoryBytes;
+const COLS = [
+  { key:'name', label:'名稱', l:true },
+  { key:'pid', label:'PID' },
+  { key:'cpu', label:'CPU', tot: () => pct(S.cpu[cur]), f: v => pct(v), scale:50 },
+  { key:'mem', label:'記憶體 (私人工作集)', tot: () => S.memInUse ? Math.round(S.memInUse[cur] / memTotal * 100) + '%' : '', f: v => (v / MB).toFixed(1) + ' MB', scale: memTotal / 8 },
+  { key:'disk', label:'磁碟', tot: () => Math.round(Math.max(0, ...DATA.disks.map(d => d.activePct[cur]))) + '%', f: v => v > 0 ? (v / MB).toFixed(1) + ' MB/秒' : '0 MB/秒', scale: 20 * MB },
+  { key:'net', label:'網路', tot: () => fmtBits(S.netSend[cur] + S.netRecv[cur]), f: v => v > 0 ? (v * 8 / 1e6).toFixed(2) + ' Mbps' : '0 Mbps', scale: 1.25e6 },
+  { key:'gpu', label:'GPU', tot: () => Math.round(Math.max(0, ...visibleGpus.map(g => g.util[cur]))) + '%', f: v => pct(v), scale:50 },
+  { key:'gpuEng', label:'GPU 引擎', l:true },
+  { key:'threads', label:'執行緒' },
+  { key:'cmd', label:'命令列', l:true },
+];
+let pSort = { key:'cpu', desc:true };
+const expanded = new Set(), collapsedTree = new Set();
+let selId = null;
+
+function header(table, cols, sort, onSort) {
+  table.tHead.innerHTML = '<tr>' + cols.map(c => `<th class="${c.l ? 'l' : ''} ${sort.key === c.key ? 'sorted' : ''}" data-k="${c.key}">${c.tot ? `<span class="tot">${c.tot()}</span>` : ''}${c.label}${sort.key === c.key ? (sort.desc ? ' ▼' : ' ▲') : ''}</th>`).join('') + '</tr>';
+  table.tHead.querySelectorAll('th').forEach(th => th.onclick = () => onSort(th.dataset.k));
+}
+function sorter(sort) {
+  return (a, b) => {
+    const x = a.v[sort.key] ?? a[sort.key], y = b.v[sort.key] ?? b[sort.key];
+    const r = typeof x === 'string' ? String(x).localeCompare(String(y)) : (x - y);
+    return sort.desc ? -r : r;
+  };
+}
+function cells(cols, r) {
+  return cols.map(c => {
+    if (c.key === 'name') return null;
+    if (c.key === 'pid') return `<td>${r.pid ?? ''}</td>`;
+    if (c.key === 'cmd') return `<td class="l cmd" title="${esc(r.cmd)}">${esc(r.cmd)}</td>`;
+    if (c.key === 'gpuEng') return `<td class="l">${esc(r.v.gpuEng)}</td>`;
+    const v = r.v[c.key];
+    return `<td style="${c.scale ? heat(v, c.scale) : ''}">${c.f ? c.f(v) : v}</td>`;
+  }).filter(x => x !== null).join('');
+}
+const matches = (p, q) => !q || p.name.toLowerCase().includes(q) || String(p.pid) === q || (p.commandLine ?? '').toLowerCase().includes(q);
+function procRow(p, k) { return { id:p.id, name:p.name, pid:p.pid, cmd:p.commandLine, p, v:rowVals(p, k) }; }
+const rowClass = (p, k) => [p.endSec === k ? 'dead' : '', p.startSec === k ? 'born' : '', p.id === selId ? 'sel' : ''].join(' ');
+
+function renderProcs() {
+  const k = cur, q = $('pFilter').value.trim().toLowerCase(), showDead = $('pDead').checked;
+  const live = P.filter(p => alive(p, k) && (showDead || p.endSec !== k));
+  const table = $('pTable');
+  header(table, COLS, pSort, key => { pSort = { key, desc: pSort.key === key ? !pSort.desc : key !== 'name' }; renderProcs(); });
+  let html = '';
+  if ($('pView').value === 'group') {
+    const groups = new Map();
+    for (const p of live) { if (!matches(p, q)) continue; const g = groups.get(p.name) ?? []; g.push(procRow(p, k)); groups.set(p.name, g); }
+    const rows = [...groups].map(([name, list]) => ({ name, list, pid: list.length === 1 ? list[0].pid : null, cmd: list.length === 1 ? list[0].cmd : '', v: sumVals(list.map(r => r.v)) }));
+    rows.sort(sorter(pSort));
+    for (const g of rows) {
+      if (g.list.length === 1) {
+        const r = g.list[0];
+        html += `<tr data-id="${r.id}" class="${rowClass(r.p, k)}"><td class="l"><span class="tog"></span>${esc(g.name)}</td>${cells(COLS, r)}</tr>`;
+        continue;
+      }
+      const open = expanded.has(g.name);
+      html += `<tr data-g="${esc(g.name)}"><td class="l"><span class="tog">${open ? '▾' : '▸'}</span>${esc(g.name)} (${g.list.length})</td>${cells(COLS, g)}</tr>`;
+      if (open) for (const r of g.list.sort(sorter(pSort))) html += `<tr class="child ${rowClass(r.p, k)}" data-id="${r.id}"><td class="l">${esc(r.name)}</td>${cells(COLS, r)}</tr>`;
+    }
+    $('pCount').textContent = `處理程序 ${live.length} 個 · ${groups.size} 組`;
+  } else {
+    const ids = new Set(live.map(p => p.id)), kids = new Map(), roots = [];
+    for (const p of live) {
+      const parent = p.parentId != null && ids.has(p.parentId) ? p.parentId : null;
+      if (parent == null) roots.push(p); else { const a = kids.get(parent) ?? []; a.push(p); kids.set(parent, a); }
+    }
+    const memo = new Map();
+    const subtree = p => { if (memo.has(p.id)) return memo.get(p.id); const r = procRow(p, k); const ch = (kids.get(p.id) ?? []).map(subtree); r.total = sumVals([r.v, ...ch.map(c => c.total)]); r.ch = ch; r.hit = matches(p, q) || ch.some(c => c.hit); memo.set(p.id, r); return r; };
+    const walk = (r, depth) => {
+      if (!r.hit) return;
+      const hasKids = r.ch.length > 0, open = hasKids && !collapsedTree.has(r.id);
+      const show = { ...r, v: open || !hasKids ? r.v : r.total };
+      html += `<tr data-id="${r.id}" class="${rowClass(r.p, k)}"><td class="l" style="padding-left:${8 + depth * 16}px"><span class="tog" data-t="${r.id}">${hasKids ? (open ? '▾' : '▸') : ''}</span>${esc(r.name)}</td>${cells(COLS, show)}</tr>`;
+      if (open) r.ch.map(c => ({ ...c, v: c.ch.length && collapsedTree.has(c.id) ? c.total : c.v })).sort(sorter(pSort)).forEach(c => walk(memo.get(c.id), depth + 1));
+    };
+    roots.map(subtree).sort(sorter(pSort)).forEach(r => walk(r, 0));
+    $('pCount').textContent = `處理程序 ${live.length} 個 · 根節點 ${roots.length} 個`;
+  }
+  table.tBodies[0].innerHTML = html;
+}
+$('pTable').tBodies[0].onclick = e => {
+  const tr = e.target.closest('tr'); if (!tr) return;
+  if (tr.dataset.g) { expanded.has(tr.dataset.g) ? expanded.delete(tr.dataset.g) : expanded.add(tr.dataset.g); }
+  else if (e.target.dataset.t) { const id = +e.target.dataset.t; collapsedTree.has(id) ? collapsedTree.delete(id) : collapsedTree.add(id); }
+  else selId = +tr.dataset.id;
+  renderProcs();
+};
+['pFilter', 'pView', 'pDead'].forEach(id => $(id).addEventListener('input', renderProcs));
+
+// ---------- details ----------
+const DCOLS = [
+  { key:'name', label:'名稱', l:true }, { key:'pid', label:'PID' }, { key:'ppid', label:'父 PID' },
+  { key:'state', label:'狀態', l:true },
+  { key:'cpu', label:'CPU', f: v => pct(v), scale:50 },
+  { key:'mem', label:'記憶體 (私人工作集)', f: v => (v / 1024).toFixed(0) + ' K', scale: memTotal / 8 },
+  { key:'ws', label:'工作集', f: v => (v / 1024).toFixed(0) + ' K' },
+  { key:'diskR', label:'磁碟讀取', f: fmtRate }, { key:'diskW', label:'磁碟寫入', f: fmtRate },
+  { key:'netS', label:'網路傳送', f: fmtBits }, { key:'netR', label:'網路接收', f: fmtBits },
+  { key:'gpu', label:'GPU', f: v => pct(v), scale:50 }, { key:'gpuEng', label:'GPU 引擎', l:true },
+  { key:'gpuDed', label:'專用 GPU 記憶體', f: v => (v / 1024).toFixed(0) + ' K' },
+  { key:'gpuSh', label:'共用 GPU 記憶體', f: v => (v / 1024).toFixed(0) + ' K' },
+  { key:'threads', label:'執行緒' },
+  { key:'handles', label:'控制代碼 (擷取結束時)', f: v => v < 0 ? '' : v.toLocaleString() },
+  { key:'life', label:'存活區間', l:true },
+  { key:'cmd', label:'命令列', l:true },
+];
+let dSort = { key:'cpu', desc:true };
+function renderDetails() {
+  const k = cur, q = $('dFilter').value.trim().toLowerCase();
+  const rows = P.filter(p => alive(p, k) && matches(p, q)).map(p => {
+    const r = procRow(p, k);
+    r.v.ppid = p.parentPid; r.v.state = p.endSec === k ? '已結束' : p.startSec === k ? '已啟動' : '執行中';
+    r.v.life = `${p.startSec == null ? '擷取前' : clockAt(p.startSec)} → ${p.endSec == null ? '擷取後' : clockAt(p.endSec)}`;
+    r.v.name = p.name; r.v.pid = p.pid; r.v.cmd = p.commandLine ?? ''; r.v.handles = p.handlesAtEnd ?? -1;
+    return r;
+  }).sort(sorter(dSort));
+  const t = $('dTable');
+  header(t, DCOLS, dSort, key => { dSort = { key, desc: dSort.key === key ? !dSort.desc : !['name','state','life','cmd','gpuEng'].includes(key) }; renderDetails(); });
+  t.tBodies[0].innerHTML = rows.map(r => `<tr class="${rowClass(r.p, k)}">${DCOLS.map(c => {
+    const v = r.v[c.key];
+    if (c.key === 'cmd') return `<td class="l cmd" title="${esc(v)}">${esc(v)}</td>`;
+    if (c.l) return `<td class="l">${esc(v)}</td>`;
+    return `<td style="${c.scale ? heat(v, c.scale) : ''}">${c.f ? c.f(v) : v}</td>`;
+  }).join('')}</tr>`).join('');
+  $('dCount').textContent = `此秒存在 ${rows.length} 個處理程序`;
+}
+$('dFilter').addEventListener('input', renderDetails);
+
+// ---------- performance ----------
+const maxOf = a => a ? Math.max(0, ...a) : 0;
+const niceMax = v => { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 5, 10]) if (v <= m * p) return m * p; return 10 * p; };
+const diskTotal = d => d.readBps.map((r, i) => r + d.writeBps[i]);
+const netTotal = S.netSend.map((s, i) => s + S.netRecv[i]);
+const netMax = niceMax(maxOf(netTotal) * 8) / 8;
+const gpuMemUsed = g => g.localUsed.map((v, i) => v + g.nonLocalUsed[i]);
+
+const HW = M.hardware ?? {};
+const CPU_C = '#17a2c8';
+const ghz = k => S.cpuMHz ? (S.cpuMHz[k] / 1000).toFixed(2) + ' GHz' : '—';
+const kb = b => b == null ? '—' : b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB';
+const bootMs = HW.bootTimeLocal ? new Date(HW.bootTimeLocal).getTime() : null;
+function uptime(k) {
+  if (bootMs == null) return '—';
+  let s = Math.max(0, Math.floor((new Date(M.startLocal).getTime() + (k + 1) * 1000 - bootMs) / 1000));
+  const d = Math.floor(s / 86400); s %= 86400;
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d}:${p2(Math.floor(s / 3600))}:${p2(Math.floor(s % 3600 / 60))}:${p2(s % 60)}`;
+}
+const perfItems = [
+  { id:'cpu', title:'CPU', c:CPU_C, spark: () => [S.cpu, 100], val: k => `${Math.round(S.cpu[k])}%  ${S.cpuMHz ? ghz(k) : ''}` },
+  ...(S.memInUse ? [{ id:'mem', title:'記憶體', c:'#a24fd6', spark: () => [S.memInUse, memTotal], val: k => `${(S.memInUse[k] / GB).toFixed(1)}/${(memTotal / GB).toFixed(1)} GB (${Math.round(S.memInUse[k] / memTotal * 100)}%)` }] : []),
+  ...DATA.disks.map(d => ({ id:'disk' + d.number, title:`磁碟 ${d.number}${d.letters ? ` (${esc(d.letters)})` : ''}`, c:'#4caf50', disk:d, spark: () => [d.activePct, 100], val: k => `${d.model ? esc(d.model) + '<br>' : ''}${Math.round(d.activePct[k])}%` })),
+  { id:'net', title:'網路', c:'#d97f2f', spark: () => [netTotal, netMax], val: k => `傳送: ${fmtBits(S.netSend[k])} 接收: ${fmtBits(S.netRecv[k])}` },
+  ...visibleGpus.map(g => ({ id:'gpu' + g.id, title:`GPU ${g.id}`, c:'#2bb3a3', gpu:g, spark: () => [g.util, 100], val: k => `${esc(g.name)}<br>${Math.round(g.util[k])}%` })),
+];
+let perfSel = 'cpu', cpuMode = 'cores';
+const gpuEngSel = new Map();
+$('perfSide').innerHTML = perfItems.map(it => `<div class="item" data-id="${it.id}"><svg></svg><div><div class="t">${it.title}</div><div class="v"></div></div></div>`).join('');
+$('perfSide').onclick = e => { const it = e.target.closest('.item'); if (it) { perfSel = it.dataset.id; buildPerfDetail(); renderPerf(); } };
+
+function stat(k, v) { return `<div><div class="k">${k}</div><div class="v">${v}</div></div>`; }
+function topProcs(metric, fmt, n = 5) {
+  const rows = P.filter(p => alive(p, cur)).map(p => ({ p, v: metric(p) })).filter(r => r.v > 0).sort((a, b) => b.v - a.v).slice(0, n);
+  if (!rows.length) return '<div class="toplist"><h3>此秒沒有使用量</h3></div>';
+  return `<div class="toplist"><h3>此秒前 ${n} 名處理程序</h3><table>${rows.map(r => `<tr><td class="l">${esc(r.p.name)}</td><td>${r.p.pid}</td><td>${fmt(r.v)}</td></tr>`).join('')}</table></div>`;
+}
+
+function buildPerfDetail() {
+  const it = perfItems.find(x => x.id === perfSel), el = $('perfDetail');
+  document.querySelectorAll('#perfSide .item').forEach(x => x.classList.toggle('on', x.dataset.id === perfSel));
+  const head = (title, sub) => `<div class="dhead"><h2>${title}</h2><span class="sub">${sub}</span></div>`;
+  if (it.id === 'cpu') {
+    el.innerHTML = head('CPU', esc(M.cpuName))
+      + `<div class="clabel"><span><span id="cpuLbl"></span> <select class="engsel" id="cpuMode"><option value="all">整體使用率</option><option value="cores">邏輯處理器</option></select></span><span>100%</span></div>`
+      + `<div id="cpuCharts"></div><div class="clabel"><span>60 秒</span><span>0</span></div><div class="cpuinfo"><div class="live" id="cpuStats"></div><table id="cpuInfo"></table></div>`
+      + `<div class="stats" id="cpuExtra"></div><div id="cpuTop"></div>`;
+    $('cpuMode').value = cpuMode;
+    $('cpuMode').onchange = e => { cpuMode = e.target.value; buildPerfDetail(); renderPerf(); };
+    $('cpuLbl').textContent = cpuMode === 'cores' ? '過去 60 秒的使用率 %' : '60 秒內的 % 使用率';
+    const yn = v => v == null ? '—' : v ? '已啟用' : '已停用';
+    const info = [
+      ['基本速度:', HW.baseMHz ? (HW.baseMHz / 1000).toFixed(2) + ' GHz' : '—'], ['插槽:', HW.sockets ?? '—'],
+      ['核心數目:', HW.physicalCores ?? '—'], ['邏輯處理器:', M.cores], ['模擬:', yn(HW.virtualization)],
+      ['L1 快取:', kb(HW.l1Bytes)], ['L2 快取:', kb(HW.l2Bytes)], ['L3 快取:', kb(HW.l3Bytes)],
+    ];
+    $('cpuInfo').innerHTML = info.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
+    if (cpuMode === 'cores') {
+      const n = M.cores, cols = n <= 4 ? Math.ceil(Math.sqrt(n)) : Math.ceil(Math.sqrt(2 * n)), rows = Math.ceil(n / cols);
+      $('cpuCharts').className = 'gridN'; $('cpuCharts').style.gridTemplateColumns = `repeat(${cols},minmax(0,1fr))`;
+      $('cpuCharts').dataset.px = Math.max(56, Math.floor(300 / rows));
+      $('cpuCharts').innerHTML = S.coreCpu.map(() => '<svg class="chart"></svg>').join('');
+    } else $('cpuCharts').innerHTML = '<svg class="chart"></svg>';
+  } else if (it.id === 'mem') {
+    el.innerHTML = head('記憶體', `${(memTotal / GB).toFixed(1)} GB`)
+      + `<div class="clabel"><span>記憶體使用量</span><span>${(memTotal / GB).toFixed(1)} GB</span></div><svg class="chart" id="memChart"></svg><div class="clabel"><span>60 秒</span><span>0</span></div>`
+      + `<div class="clabel"><span>記憶體組合 (使用中 / 可用；可用包含待命)</span></div><div class="compbar" id="memComp"></div><div class="stats" id="memStats"></div><div id="memTop"></div>`;
+  } else if (it.disk) {
+    el.innerHTML = head(`磁碟 ${it.disk.number}`, `${it.disk.operations.toLocaleString()} 次 I/O`)
+      + `<div class="clabel"><span>作用中時間</span><span>100%</span></div><svg class="chart" id="dkAct"></svg><div class="clabel"><span>60 秒</span><span>0</span></div>`
+      + `<div class="clabel"><span>磁碟傳輸速率 (實線讀取、虛線寫入)</span><span id="dkMax"></span></div><svg class="chart" id="dkRate"></svg><div class="clabel"><span>60 秒</span><span>0</span></div>`
+      + `<div class="stats" id="dkStats"></div><div id="dkTop"></div>`;
+  } else if (it.id === 'net') {
+    el.innerHTML = head('網路', 'TCP/UDP (所有介面)')
+      + `<div class="clabel"><span>輸送量 (實線接收、虛線傳送)</span><span>${fmtBits(netMax)}</span></div><svg class="chart" id="netChart"></svg><div class="clabel"><span>60 秒</span><span>0</span></div>`
+      + `<div class="stats" id="netStats"></div><div id="netTop"></div>`;
+  } else if (it.gpu) {
+    const g = it.gpu;
+    const sel = gpuEngSel.get(g.id) ?? (() => {
+      const order = ['Graphics3D', 'Copy', 'VideoDecode', 'VideoProcessing', 'VideoEncode', 'Compute', 'Overlay', 'Other'];
+      const busy = [...g.engines].sort((a, b) => (order.indexOf(a.type) - order.indexOf(b.type)) || (maxOf(b.util) - maxOf(a.util)));
+      const s = []; for (const e of busy) if (!s.some(x => x.type === e.type)) s.push(e);
+      while (s.length < 4 && s.length < g.engines.length) s.push(busy.find(e => !s.includes(e)));
+      return s.slice(0, 4).map(e => e.index);
+    })();
+    gpuEngSel.set(g.id, sel);
+    const opts = cur => g.engines.map(e => `<option value="${e.index}" ${e.index === cur ? 'selected' : ''}>${esc(e.name)}</option>`).join('');
+    el.innerHTML = head(`GPU ${g.id}`, esc(g.name))
+      + `<div class="grid4">${sel.map((ix, i) => `<div><div class="clabel"><select class="engsel" data-slot="${i}">${opts(ix)}</select><span>100%</span></div><svg class="chart" data-eng="${i}"></svg></div>`).join('')}</div>`
+      + `<div class="clabel"><span>本機 (Local) GPU 記憶體使用量 — 各處理程序 VidMm 用量合計</span><span id="gpuLocMax"></span></div><svg class="chart" id="gpuLoc"></svg>`
+      + `<div class="clabel"><span>非本機 (NonLocal / 共用) GPU 記憶體使用量</span><span id="gpuNlMax"></span></div><svg class="chart" id="gpuNl"></svg>`
+      + `<div class="stats" id="gpuStats"></div><div id="gpuTop"></div>`;
+    el.querySelectorAll('select[data-slot]').forEach(s => s.onchange = () => { sel[+s.dataset.slot] = +s.value; renderPerf(); });
+  }
+}
+
+function renderPerf() {
+  const k = cur, [from, to] = win();
+  document.querySelectorAll('#perfSide .item').forEach((el, i) => {
+    const it = perfItems[i], [d, max] = it.spark();
+    chart(el.querySelector('svg'), [{ d, color: it.c, fill: true }], max, from, to, { small: true, h: 44 });
+    el.querySelector('.v').innerHTML = it.val(k);
+  });
+  const it = perfItems.find(x => x.id === perfSel);
+  if (it.id === 'cpu') {
+    const svgs = $('cpuCharts').querySelectorAll('svg');
+    if (cpuMode === 'cores') { const px = +$('cpuCharts').dataset.px; svgs.forEach((svg, c) => chart(svg, [{ d: S.coreCpu[c], color: CPU_C, fill: true, name: `CPU ${c}`, fmt: pct }], 100, from, to, { h: px, px, cursor: k })); }
+    else chart(svgs[0], [{ d: S.cpu, color: CPU_C, fill: true, name: '使用率', fmt: pct }, { d: S.dpc.map((v, i) => v + S.isr[i]), color: '#ff6b6b', name: 'DPC+ISR', fmt: pct }], 100, from, to, { h: 260, px: 300, cursor: k });
+    const live = (a, b) => `<div><div class="k">${a}</div><div class="v">${b}</div></div>`;
+    $('cpuStats').innerHTML = live('使用率', pct(S.cpu[k])) + live('速度', ghz(k)) + '<div></div>'
+      + live('處理程序', S.processCount[k]) + live('執行緒', S.threadCount[k].toLocaleString())
+      + live('控制代碼 <span title="ETW 只在擷取結束的 rundown 回報控制代碼數" style="font-size:10px">(擷取結束時)</span>', HW.handlesAtEnd != null ? HW.handlesAtEnd.toLocaleString() : '—')
+      + live('運作時間', uptime(k));
+    $('cpuExtra').innerHTML = stat('DPC 時間', pct(S.dpc[k])) + stat('中斷 (ISR) 時間', pct(S.isr[k]))
+      + stat('最忙核心', (() => { let b = 0; S.coreCpu.forEach((c, i) => { if (c[k] > S.coreCpu[b][k]) b = i; }); return `CPU ${b} · ${pct(S.coreCpu[b][k])}`; })());
+    $('cpuTop').innerHTML = topProcs(p => at(p.cpu, k), pct);
+  } else if (it.id === 'mem') {
+    chart($('memChart'), [{ d: S.memInUse, color: '#a24fd6', fill: true, name: '使用中', fmt: fmtBytes }, { d: S.memCommitted ?? [], color: '#d6a2ff', dash: true, name: '已認可', fmt: fmtBytes }], memTotal, from, to, { h: 220, px: 260, cursor: k });
+    const parts = [[S.memInUse[k], '#a24fd6', '使用中'], [at(S.memAvailable, k), '#5a2d78', '可用 (含待命)']];
+    $('memComp').innerHTML = parts.map(([v, c, n]) => `<div style="width:${(v / memTotal * 100).toFixed(2)}%;background:${c}" title="${n} ${fmtBytes(v)}"></div>`).join('');
+    $('memStats').innerHTML = stat('使用中', fmtBytes(S.memInUse[k])) + stat('可用', fmtBytes(at(S.memAvailable, k))) + stat('已認可', fmtBytes(at(S.memCommitted, k)))
+      + stat('已快取', fmtBytes(at(S.memCached, k))) + stat('分頁集區', fmtBytes(at(S.memPagedPool, k))) + stat('非分頁集區', fmtBytes(at(S.memNonPagedPool, k)));
+    $('memTop').innerHTML = topProcs(p => at(p.privateWs, k) * 1024, fmtBytes);
+  } else if (it.disk) {
+    const d = it.disk, mx = niceMax(Math.max(maxOf(d.readBps), maxOf(d.writeBps)));
+    chart($('dkAct'), [{ d: d.activePct, color: '#4caf50', fill: true, name: '作用中', fmt: pct }], 100, from, to, { h: 150, px: 170, cursor: k });
+    chart($('dkRate'), [{ d: d.readBps, color: '#4caf50', fill: true, name: '讀取', fmt: fmtRate }, { d: d.writeBps, color: '#9be59e', dash: true, name: '寫入', fmt: fmtRate }], mx, from, to, { h: 120, px: 140, cursor: k });
+    $('dkMax').textContent = fmtRate(mx);
+    $('dkStats').innerHTML = stat('作用中時間', pct(d.activePct[k])) + stat('平均回應時間', d.avgResponseMs[k].toFixed(1) + ' 毫秒') + stat('讀取速度', fmtRate(d.readBps[k])) + stat('寫入速度', fmtRate(d.writeBps[k]));
+    $('dkTop').innerHTML = topProcs(p => at(p.diskRead, k) + at(p.diskWrite, k), fmtRate);
+  } else if (it.id === 'net') {
+    chart($('netChart'), [{ d: S.netRecv, color: '#d97f2f', fill: true, name: '接收', fmt: fmtBits }, { d: S.netSend, color: '#ffc38a', dash: true, name: '傳送', fmt: fmtBits }], netMax, from, to, { h: 220, px: 260, cursor: k });
+    $('netStats').innerHTML = stat('傳送', fmtBits(S.netSend[k])) + stat('接收', fmtBits(S.netRecv[k])) + stat('整段平均', fmtBits(netTotal.reduce((a, b) => a + b, 0) / N));
+    $('netTop').innerHTML = topProcs(p => at(p.netSend, k) + at(p.netRecv, k), fmtBits);
+  } else if (it.gpu) {
+    const g = it.gpu, sel = gpuEngSel.get(g.id);
+    $('perfDetail').querySelectorAll('svg[data-eng]').forEach(svg => {
+      const e = g.engines.find(x => x.index === sel[+svg.dataset.eng]);
+      chart(svg, [{ d: e.util, color: '#2bb3a3', fill: true, name: e.name, fmt: pct }], 100, from, to, { h: 120, px: 130, cursor: k });
+    });
+    const lm = niceMax(maxOf(g.localUsed)), nm = niceMax(maxOf(g.nonLocalUsed));
+    chart($('gpuLoc'), [{ d: g.localUsed, color: '#2bb3a3', fill: true, name: '本機', fmt: fmtBytes }], lm, from, to, { h: 70, px: 80, cursor: k });
+    chart($('gpuNl'), [{ d: g.nonLocalUsed, color: '#7fd8cc', fill: true, name: '非本機', fmt: fmtBytes }], nm, from, to, { h: 70, px: 80, cursor: k });
+    $('gpuLocMax').textContent = fmtBytes(lm); $('gpuNlMax').textContent = fmtBytes(nm);
+    const busiest = [...g.engines].sort((a, b) => b.util[k] - a.util[k])[0];
+    $('gpuStats').innerHTML = stat('使用率', pct(g.util[k])) + stat('最忙引擎', busiest ? `${esc(busiest.name)} · ${pct(busiest.util[k])}` : '-')
+      + stat('本機 GPU 記憶體', fmtBytes(g.localUsed[k])) + stat('非本機 GPU 記憶體', fmtBytes(g.nonLocalUsed[k]))
+      + stat('區段常駐 (Residency)', g.residentBytes[k] > 0 ? fmtBytes(g.residentBytes[k]) : '尚無事件');
+    const myEng = new Set(g.engines.map(e => e.index));
+    $('gpuTop').innerHTML = topProcs(p => p.gpuEngine && myEng.has(p.gpuEngine[k]) ? at(p.gpu, k) : 0, pct);
+  }
+}
+
+// ---------- system events ----------
+{
+  const cats = [...new Set(EV.map(e => e.category))];
+  $('evCat').innerHTML = '<option value="">全部</option>' + cats.map(c => `<option value="${c}">${esc(EVC[c]?.[0] ?? c)}</option>`).join('');
+  $('evBadge').textContent = EV.filter(e => !e.rundown).length ? `(${EV.filter(e => !e.rundown).length})` : '';
+  $('evCat').onchange = $('evRundown').onchange = () => renderEvents();
+}
+function renderEvents() {
+  const cat = $('evCat').value, showRd = $('evRundown').checked;
+  const rows = EV.filter(e => (!cat || e.category === cat) && (showRd || !e.rundown));
+  $('evCount').textContent = `${rows.length} / ${EV.length} 筆` + (EV.length ? '' : '(ETL 沒有系統電源事件,請以新版擷取)');
+  $('evTable').tBodies[0].innerHTML = rows.map(e =>
+    `<tr data-sec="${e.sec}" class="${e.sec === cur ? 'now' : ''}" style="cursor:pointer"><td class="l">${clockAt(e.sec)}</td><td>+${e.offsetSec.toFixed(3)}</td>`
+    + `<td class="l"><span class="evcat" style="background:${EVC[e.category]?.[1] ?? '#ccc'}"></span>${esc(EVC[e.category]?.[0] ?? e.category)}${e.rundown ? ' (快照)' : ''}</td>`
+    + `<td>${e.eventId}</td><td class="l">${esc(e.text)}</td></tr>`).join('');
+}
+$('evTable').onclick = e => { const tr = e.target.closest('tr[data-sec]'); if (tr) setTime(+tr.dataset.sec); };
+
+// ---------- about ----------
+function renderAbout() {
+  const ec = M.eventCounts;
+  $('aboutBody').innerHTML = `<div class="dhead"><h2>資料來源</h2><span class="sub">${esc(M.machineName)} · ${M.startLocal} 起 ${M.durationSec.toFixed(1)} 秒</span></div>`
+    + `<div class="stats">${Object.entries(ec).map(([k, v]) => stat(k, v.toLocaleString())).join('')}${stat('遺失事件', M.eventsLost)}${stat('遺失緩衝區', M.buffersLost)}</div>`
+    + `<div class="notes"><b>計算方式</b><ul>
+      <li>CPU:由 CSwitch 重建每個核心在每一秒的執行片段;DPC/ISR 的時間從被中斷的執行緒扣除,改列入「系統中斷 (DPC/ISR)」。整體使用率 = 各核心平均。</li>
+      <li>記憶體:Kernel-Memory MemInfo (約每 0.5 秒) 的分頁清單;「使用中」= 總記憶體 - 可用 (零頁 + 空閒頁 + 待命頁);處理程序記憶體取自 MemInfoWS 的私人工作集,每秒取該秒結束前最新的快照。</li>
+      <li>磁碟:DiskIo 完成事件,位元組計入完成的那一秒;作用中時間 = 各 I/O 回應區間的聯集;處理程序由發出 I/O 的執行緒對應。</li>
+      <li>網路:TcpIp / UdpIp 傳送與接收事件的 payload 大小 (不含封包標頭),依事件中的 PID 歸屬。</li>
+      <li>GPU:DxgKrnl 的 DMA 封包送出到完成視為引擎忙碌;處理程序 GPU% 取其各引擎中最高者 (與工作管理員相同)。GPU 記憶體為各處理程序 VidMm 用量合計;整合式顯示卡的「本機」區段實際上仍在系統記憶體中。「Microsoft 基本轉譯驅動程式」已隱藏。</li>
+      <li>點擊任一圖表或上方總覽列可跳到該秒;←/→ 單步、Shift+←/→ 10 秒、空白鍵播放/暫停。</li></ul>
+      ${M.notes.length ? '<b>注意事項</b><ul>' + M.notes.map(n => `<li>${esc(n)}</li>`).join('') + '</ul>' : ''}</div>`;
+}
+
+// ---------- wiring ----------
+let page = 'procs';
+const renderPage = () => { if (page === 'procs') renderProcs(); else if (page === 'perf') renderPerf(); else if (page === 'details') renderDetails(); else if (page === 'events') renderEvents(); };
+listeners.push(renderPage);
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  page = b.dataset.page;
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('on', p.id === 'page-' + page));
+  if (page === 'perf') buildPerfDetail();
+  renderPage();
+});
+$('slider').max = N - 1;
+$('slider').oninput = e => setTime(+e.target.value);
+$('btnPrev').onclick = () => setTime(cur - 1);
+$('btnNext').onclick = () => setTime(cur + 1);
+function togglePlay() {
+  if (timer) { clearInterval(timer); timer = null; $('btnPlay').textContent = '▶ 播放'; return; }
+  if (cur >= N - 1) setTime(0);
+  $('btnPlay').textContent = '⏸ 暫停';
+  timer = setInterval(() => { if (cur >= N - 1) togglePlay(); else setTime(cur + 1); }, 1000 / +$('speed').value);
+}
+$('btnPlay').onclick = togglePlay;
+$('speed').onchange = () => { if (timer) { togglePlay(); togglePlay(); } };
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.key === 'ArrowLeft') { setTime(cur - (e.shiftKey ? 10 : 1)); e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { setTime(cur + (e.shiftKey ? 10 : 1)); e.preventDefault(); }
+  else if (e.key === ' ') { togglePlay(); e.preventDefault(); }
+});
+$('hdrMeta').textContent = `${M.machineName} · ${M.cpuName} · ${M.cores} 邏輯處理器 · ${(memTotal / GB).toFixed(1)} GB · ${M.startLocal.replace('T', ' ')} · ${N} 秒 · ${P.length} 個處理程序實例`;
+renderAbout();
+const peak = S.cpu.indexOf(Math.max(...S.cpu));
+setTime(peak >= 0 ? peak : 0);
+})();
+</script>
+</body>
+</html>

@@ -28,6 +28,8 @@ namespace QSoft.ETW
         readonly string sessionNamePrefix;
         readonly STACK_TRACING_EVENT_ID[] stackTracingEventIds;
         readonly TextWriter? statusWriter;
+        readonly bool mergeSymbolMetadata;
+        readonly string? kernelTraceControlPath;
         bool isStarted = false;
         bool isDisposed = false;
 
@@ -36,6 +38,10 @@ namespace QSoft.ETW
         public string? LogFilePath => logFilePath;
 
         public string? SessionName => sessionName;
+
+        /// <summary>停止後 metadata merge 的結果；未啟用時狀態為 <see cref="TraceMetadataMergeStatus.NotRequested"/>。</summary>
+        public TraceMetadataMergeResult SymbolMetadataMergeResult { get; private set; } =
+            new(TraceMetadataMergeStatus.NotRequested);
 
         internal TraceSession(
             KernelTraceFlags kernelEnableFlags,
@@ -46,7 +52,9 @@ namespace QSoft.ETW
             bool enableFileCompression = false,
             string sessionNamePrefix = "QSoft",
             STACK_TRACING_EVENT_ID[]? stackTracingEventIds = null,
-            TextWriter? statusWriter = null)
+            TextWriter? statusWriter = null,
+            bool mergeSymbolMetadata = false,
+            string? kernelTraceControlPath = null)
         {
             this.kernelEnableFlags = kernelEnableFlags;
             this.userProviders = userProviders ?? [];
@@ -57,6 +65,8 @@ namespace QSoft.ETW
             this.sessionNamePrefix = string.IsNullOrWhiteSpace(sessionNamePrefix) ? "QSoft" : sessionNamePrefix;
             this.stackTracingEventIds = stackTracingEventIds ?? [];
             this.statusWriter = statusWriter;
+            this.mergeSymbolMetadata = mergeSymbolMetadata;
+            this.kernelTraceControlPath = kernelTraceControlPath;
         }
 
         internal readonly record struct ProviderConfiguration(
@@ -64,7 +74,8 @@ namespace QSoft.ETW
             ulong MatchAnyKeyword,
             byte Level = TRACE_LEVEL_VERBOSE,
             bool CaptureStateOnEnable = false,
-            bool CaptureStateOnStop = false);
+            bool CaptureStateOnStop = false,
+            ushort[]? ExcludedEventIds = null);
 
         public void Start()
         {
@@ -76,6 +87,7 @@ namespace QSoft.ETW
             }
 
             timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            SymbolMetadataMergeResult = new(TraceMetadataMergeStatus.NotRequested);
             sessionName = $"{sessionNamePrefix}_{Environment.ProcessId}_{timestamp}";
             logFilePath = Path.Combine(baseDir, string.IsNullOrWhiteSpace(outputFileName) ? $"trace_{timestamp}.etl" : outputFileName);
 
@@ -117,18 +129,51 @@ namespace QSoft.ETW
             if (sessionHandle != 0 && sessionProps is not null)
             {
                 CaptureProvidersStateOnStop(sessionHandle);
-                _ = ControlTraceW(sessionHandle, null, ref sessionProps.Properties, EVENT_TRACE_CONTROL_STOP);
+                int stopError = ControlTraceW(sessionHandle, null, ref sessionProps.Properties, EVENT_TRACE_CONTROL_STOP);
                 ReportTraceStatistics("Session", in sessionProps.Properties);
                 Status.WriteLine($"追蹤檔案：{logFilePath}");
+
+                if (mergeSymbolMetadata)
+                {
+                    SymbolMetadataMergeResult = stopError == 0
+                        ? TraceMetadataMerger.Merge(logFilePath, kernelTraceControlPath)
+                        : new(
+                            TraceMetadataMergeStatus.MergeFailed,
+                            logFilePath,
+                            stopError,
+                            $"ControlTraceW(STOP) 失敗，Win32 錯誤碼 {stopError}；保留原始 ETL。");
+                    ReportSymbolMetadataMergeResult();
+                }
             }
             else
             {
                 Status.WriteLine("Session 未啟動，無追蹤檔案可處理。");
+                if (mergeSymbolMetadata)
+                {
+                    SymbolMetadataMergeResult = new(
+                        TraceMetadataMergeStatus.SkippedNoTraceFile,
+                        logFilePath,
+                        Detail: "Session 未啟動，略過 metadata merge。");
+                    ReportSymbolMetadataMergeResult();
+                }
             }
 
             sessionHandle = 0;
             sessionProps = null;
             isStarted = false;
+        }
+
+        void ReportSymbolMetadataMergeResult()
+        {
+            if (SymbolMetadataMergeResult.Status == TraceMetadataMergeStatus.Merged)
+            {
+                Status.WriteLine($"ETL symbol metadata merge 完成：{SymbolMetadataMergeResult.TraceFilePath}");
+            }
+            else
+            {
+                Console.Error.WriteLine($"警告：ETL symbol metadata merge 未完成：{SymbolMetadataMergeResult.Detail}");
+                Status.WriteLine($"ETL symbol metadata merge 狀態：{SymbolMetadataMergeResult.Status}。");
+            }
         }
 
         public void Dispose()
@@ -352,18 +397,45 @@ namespace QSoft.ETW
             {
                 Guid providerId = provider.ProviderId;
                 var enableParams = new ENABLE_TRACE_PARAMETERS { Version = ENABLE_TRACE_PARAMETERS_VERSION_2 };
+                ushort[]? excluded = provider.ExcludedEventIds is { Length: > 0 } ids ? ids.Distinct().ToArray() : null;
+                // EVENT_FILTER_EVENT_ID: BOOLEAN FilterIn, UCHAR Reserved, USHORT Count, USHORT Events[Count].
+                int filterSize = excluded is null ? 0 : 4 + 2 * excluded.Length;
+                nint filter = excluded is null ? 0 : Marshal.AllocHGlobal(filterSize);
+                nint descriptor = excluded is null ? 0 : Marshal.AllocHGlobal(Unsafe.SizeOf<EVENT_FILTER_DESCRIPTOR>());
+                try
+                {
+                    if (excluded is not null)
+                    {
+                        Marshal.WriteByte(filter, 0, 0); // FilterIn = FALSE: drop the listed IDs.
+                        Marshal.WriteByte(filter, 1, 0);
+                        Marshal.WriteInt16(filter, 2, (short)excluded.Length);
+                        for (int i = 0; i < excluded.Length; i++)
+                            Marshal.WriteInt16(filter, 4 + 2 * i, unchecked((short)excluded[i]));
+                        Marshal.StructureToPtr(new EVENT_FILTER_DESCRIPTOR
+                        {
+                            Ptr = (ulong)filter, Size = (uint)filterSize, Type = EVENT_FILTER_TYPE_EVENT_ID
+                        }, descriptor, false);
+                        enableParams.EnableFilterDesc = descriptor;
+                        enableParams.FilterDescCount = 1;
+                    }
 
-                ThrowIfError(
-                    EnableTraceEx2(
-                        sessionHandle,
-                        in providerId,
-                        EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                        provider.Level,
-                        matchAnyKeyword: provider.MatchAnyKeyword,
-                        matchAllKeyword: 0,
-                        timeout: 0,
-                        in enableParams),
-                    $"{nameof(EnableTraceEx2)}({provider.ProviderId})");
+                    ThrowIfError(
+                        EnableTraceEx2(
+                            sessionHandle,
+                            in providerId,
+                            EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                            provider.Level,
+                            matchAnyKeyword: provider.MatchAnyKeyword,
+                            matchAllKeyword: 0,
+                            timeout: 0,
+                            in enableParams),
+                        $"{nameof(EnableTraceEx2)}({provider.ProviderId})");
+                }
+                finally
+                {
+                    if (descriptor != 0) Marshal.FreeHGlobal(descriptor);
+                    if (filter != 0) Marshal.FreeHGlobal(filter);
+                }
 
                 if (provider.CaptureStateOnEnable)
                 {
@@ -579,6 +651,16 @@ namespace QSoft.ETW
             public uint LoggerNameOffset;
         }
 
+        const uint EVENT_FILTER_TYPE_EVENT_ID = 0x80000200;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct EVENT_FILTER_DESCRIPTOR
+        {
+            public ulong Ptr;
+            public uint Size;
+            public uint Type;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         internal struct ENABLE_TRACE_PARAMETERS
         {
@@ -755,6 +837,30 @@ namespace QSoft.ETW
         Profile,
     }
 
+    /// <summary>
+    /// USB 傳輸(URB)事件的詳細程度,對應 USB 3.0 堆疊(USBXHCI/UCX/USBHUB3)的 BusTrace keyword。
+    /// 影音串流(例如 webcam 的 isochronous/bulk 傳輸)每秒可產生數千筆事件,等級越高 ETL 越大。
+    /// </summary>
+    /// <remarks>
+    /// UCX manifest 雖定義了帶資料的完成事件(22/25/28/29/32/33),但在 Windows 11 26200(ucx01000.sys 10.0.26100)上實測,
+    /// <see cref="PartialData"/>/<see cref="FullData"/> 與 <see cref="Headers"/> 產生的事件完全相同,不含任何傳輸內容(logman 結果相同),
+    /// 因此無法從 ETL 還原 webcam 影像。
+    /// </remarks>
+    public enum UsbTransferTraceLevel
+    {
+        /// <summary>不記錄個別傳輸,只保留裝置/錯誤/電源/PnP/列舉事件。</summary>
+        None,
+
+        /// <summary>HeadersBusTrace(0x40):每筆傳輸只記錄 URB 標頭(端點、長度、狀態),不含資料內容。</summary>
+        Headers,
+
+        /// <summary>PartialDataBusTrace(0x80):URB 標頭加上部分資料內容(Microsoft 文件建議的 USB 擷取等級)。</summary>
+        PartialData,
+
+        /// <summary>FullDataBusTrace(0x100):URB 標頭加上完整資料內容,量最大。</summary>
+        FullData,
+    }
+
     public class TraceSessionBuilder
     {
         public static readonly Guid KernelProcessProviderGuid = new("22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716");
@@ -765,6 +871,63 @@ namespace QSoft.ETW
         public static readonly Guid PowerMeterPollingProviderGuid = new("306c4e0b-e148-543d-315b-c618eb93157c");
         public static readonly Guid SystemMemoryProviderGuid = new("82958ca9-b6cd-47f8-a3a8-03ae85a4bc24");
         public static readonly Guid DxgKrnlProviderGuid = new("802ec45a-1e99-4b83-9920-87c98277ba9d");
+        /// <summary>Microsoft-Windows-Kernel-Processor-Power(PPM:交付頻率 111、韌體限頻 7/8/37/38、效能狀態降級 136)。</summary>
+        public static readonly Guid KernelProcessorPowerProviderGuid = new("0f67e49f-fe51-4e9f-b490-6f2948cc6027");
+        /// <summary>Microsoft-Windows-UserModePowerService(UMPO:電源計畫 12、電源模式 overlay 51、重新套用設定 22)。</summary>
+        public static readonly Guid UserModePowerServiceProviderGuid = new("ce8dee0b-d539-4000-b0f8-77bed049c590");
+
+        // 下列 channel keyword 取自本機 manifest(Get-WinEvent -ListProvider 的 Events[].Keywords)。
+        // 這些事件只帶 channel 位元,沒有一般 keyword,因此以 channel 位元選取。
+        /// <summary>
+        /// Kernel-Power:System(0x8000…:42/59/105/107/172/187/506/507/566)+ 0x4000…(63/95/96/97/118/119/557)
+        /// + Operational 散熱(0x1000…:82/84/91/114/116)。刻意不含 0x2000…(81/83/90/113/115 Diagnostic,
+        /// 與 Operational 內容重複)。
+        /// </summary>
+        public const ulong KernelPowerSystemStateKeywords = 0x8000000000000000 | 0x4000000000000000 | 0x1000000000000000;
+        /// <summary>Kernel-Processor-Power:韌體限頻 37/7(0x8000…)、38/8(0x4000…)、136。</summary>
+        public const ulong KernelProcessorPowerCapKeywords = 0x8000000000000000 | 0x4000000000000000;
+        /// <summary>Kernel-Processor-Power PerfDiag:111 DeliveredPerfChange(每核約 30 ms 一筆)。</summary>
+        public const ulong KernelProcessorPowerPerfDiagKeyword = 0x0000000000000080;
+        /// <summary>UserModePowerService:12/22/51 皆為 0x4000…。</summary>
+        public const ulong UserModePowerServicePolicyKeywords = 0x4000000000000000;
+        /// <summary>Kernel-ACPI:4/5/6/8/9/10/20 皆為 0x8000…;另加 acpi:Thermal(0x2,3/11 溫度通知)。</summary>
+        public const ulong KernelAcpiThermalKeywords = 0x8000000000000000 | 0x0000000000000002;
+
+        // Microsoft-Windows-DxgKrnl 的 Keyword（取自 provider manifest：logman query providers Microsoft-Windows-DxgKrnl
+        // 或 Windows SDK 內 GPUView\LDDMCore.man）。
+        /// <summary>DxgKrnl Base：DMA packet(175/176/177)、Queue packet、EventNodeMetadata(250)、EventReportSegment(78)、DpiReportAdapter(110)、TotalBytesResidentInSegment(274)…</summary>
+        public const ulong DxgKrnlBaseKeyword = 0x0000000000000001;
+        /// <summary>DxgKrnl References：含 VidMmProcessUsageChange(367)/VidMmProcessBudgetChange(366)，即每個行程在各記憶體區段群組(Local/NonLocal)的 GPU 記憶體用量與預算。</summary>
+        public const ulong DxgKrnlReferencesKeyword = 0x0000000000000004;
+        /// <summary>DxgKrnl Resource：逐筆 Allocation 的 Report/Create 事件（ReportAdapterAllocation 35、ReportDeviceAllocation 38…），資料量大，GPU 使用率／記憶體總量不需要。</summary>
+        public const ulong DxgKrnlResourceKeyword = 0x0000000000000040;
+        /// <summary>DxgKrnl_Power：NodePerfData(468) 各 Node(Engine) 的頻率/電壓，以及大量電源元件 idle/active 回呼（約佔 GPU 滿載時 DxgKrnl 事件量的 13%）；工作管理員 GPU 頁面不顯示這些資料。</summary>
+        public const ulong DxgKrnlPowerKeyword = 0x0000000000000200;
+        /// <summary>
+        /// DxgKrnl LongHaul：Adapter/Device/Context 的 Create/Destroy/Report(ReportAdapter 26、ReportDevice 29、CreateContext 30、ReportContext 32、AssociateContext 433)
+        /// 事件同時帶有 Resource 與 LongHaul 兩個 Keyword，只啟用 LongHaul 即可取得用來把 DMA packet 的 hContext 對應到 Node(Engine)/裝置/行程的資料，
+        /// 又不會打開 Resource 的逐筆 Allocation 事件。
+        /// </summary>
+        public const ulong DxgKrnlLongHaulKeyword = 0x0000000000000800;
+        /// <summary>DxgKrnl GPUScheduler：EventUpdateContextStatus(20) 等排程器事件（資料量大，GPU 使用率計算不需要）。</summary>
+        public const ulong DxgKrnlGpuSchedulerKeyword = 0x0000000000008000;
+        /// <summary>DxgKrnl HardwareSchedulingLog：啟用 HAGS(硬體加速 GPU 排程)時由 GPU 排程記錄(EventSchedulingLog 432/452)取代 DMA packet 事件。</summary>
+        public const ulong DxgKrnlHardwareSchedulingLogKeyword = 0x0000000004000000;
+        /// <summary>DxgKrnl PerfData：GpuPerfTracing(509)，GPU 溫度/功耗/風扇轉速/記憶體與 Engine 頻率（需 GPU 驅動程式支援，否則 Task Manager 也顯示「N/A」）。</summary>
+        public const ulong DxgKrnlPerfDataKeyword = 0x0000000020000000;
+
+        /// <summary>
+        /// 重建 Windows 工作管理員「GPU」頁面所需的 DxgKrnl Keyword 集合：
+        /// Base（DMA packet／Engine 清單／記憶體區段／Adapter 識別）+ References（各行程 GPU 記憶體用量）+
+        /// LongHaul（Context／Device／Adapter rundown，用來把 packet 對應回 Engine）+ PerfData（溫度等）。
+        /// 刻意不含 Resource(0x40)、Power(0x200)、Profiler(0x2)、GPUScheduler(0x8000) 等高流量、與上述資料無關的 Keyword。
+        /// </summary>
+        public const ulong DxgKrnlGpuMonitoringKeywords =
+            DxgKrnlBaseKeyword |
+            DxgKrnlReferencesKeyword |
+            DxgKrnlLongHaulKeyword |
+            DxgKrnlPerfDataKeyword;
+
         /// <summary>
         /// Microsoft-Windows-Kernel-Memory(現代 manifest-based 提供者)。與 <see cref="SystemMemoryProviderGuid"/>
         /// 是兩個不同的提供者:後者(System Memory Provider)僅是啟用用的控制平面 GUID,依官方文件其輸出事件
@@ -792,6 +955,53 @@ namespace QSoft.ETW
         /// <summary>Microsoft-Windows-Kernel-Memory 的 KERNEL_MEM_KEYWORD_MEMINFO,已用 logman query providers 查證。</summary>
         public const ulong KernelMemoryMemInfoKeyword = 0x0000000000000020;
 
+        /// <summary>Microsoft-Windows-Kernel-Memory 的 KERNEL_MEM_KEYWORD_MEMINFO_EX,產生 Event Id=2(MemInfoWS)各行程工作集快照。</summary>
+        public const ulong KernelMemoryMemInfoExKeyword = 0x0000000000000040;
+
+        // USB 3.0 堆疊(USBXHCI/UCX/USBHUB3)三個 provider 的 keyword 定義相同,已用 logman query providers 查證。
+        /// <summary>Microsoft-Windows-USB-USBXHCI(xHCI 控制器屬性、命令與完成碼)。</summary>
+        public static readonly Guid UsbXhciProviderGuid = new("30e1d284-5d88-459c-83fd-6345b39b19ec");
+        /// <summary>Microsoft-Windows-USB-UCX(用戶端驅動程式 I/O、端點與串流開關)。</summary>
+        public static readonly Guid UsbUcxProviderGuid = new("36da592d-e43a-4e28-af6f-4bc57c5a11e8");
+        /// <summary>Microsoft-Windows-USB-USBHUB3(Hub/裝置加入移除、連接埠狀態、列舉階段、裝置電源狀態)。</summary>
+        public static readonly Guid UsbHub3ProviderGuid = new("ac52ad17-cc01-4f85-8df5-4dce4333c99b");
+        /// <summary>Microsoft-Windows-USB-USBPORT(USB 2.0 EHCI/OHCI/UHCI 堆疊;只有 xHCI 的系統不會產生事件)。</summary>
+        public static readonly Guid UsbPortProviderGuid = new("c88a4ef5-d048-4013-9408-e04b7db2814a");
+        /// <summary>Microsoft-Windows-USB-USBHUB(USB 2.0 Hub 驅動程式;只有 xHCI 的系統不會產生事件)。</summary>
+        public static readonly Guid UsbHubProviderGuid = new("7426a56b-e2d5-4b30-bdef-b31815c1a74a");
+        /// <summary>Microsoft-Windows-USBVideo(usbvideo.sys,UVC 攝影機類別驅動程式)。</summary>
+        public static readonly Guid UsbVideoProviderGuid = new("da1d1dbd-3186-4fa2-bc2d-075efd9e43e2");
+        /// <summary>Microsoft-Windows-MF-FrameServer(Windows Camera Frame Server,攝影機分享與串流)。</summary>
+        public static readonly Guid CameraFrameServerProviderGuid = new("9e22a3ed-7b32-4b99-b6c2-21dd6ace01e1");
+
+        public const ulong UsbDefaultKeyword = 0x0000000000000001;
+        public const ulong UsbErrorKeyword = 0x0000000000000002;
+        public const ulong UsbIrpKeyword = 0x0000000000000004;
+        public const ulong UsbPowerKeyword = 0x0000000000000008;
+        public const ulong UsbPnPKeyword = 0x0000000000000010;
+        public const ulong UsbHeadersBusTraceKeyword = 0x0000000000000040;
+        public const ulong UsbPartialDataBusTraceKeyword = 0x0000000000000080;
+        public const ulong UsbFullDataBusTraceKeyword = 0x0000000000000100;
+        public const ulong UsbStateMachineKeyword = 0x0000000000000200;
+        public const ulong UsbEnumerationKeyword = 0x0000000000000400;
+        public const ulong UsbRundownKeyword = 0x0000000000008000;
+        public const ulong UsbDeviceKeyword = 0x0000000000010000;
+        public const ulong UsbHubKeyword = 0x0000000000020000;
+
+        /// <summary>
+        /// USB 3.0 堆疊的基本 keyword:裝置/Hub 摘要、錯誤、IRP、電源、PnP、列舉與 rundown,不含逐筆傳輸與內部狀態機。
+        /// </summary>
+        public const ulong UsbMonitoringKeywords =
+            UsbDefaultKeyword |
+            UsbErrorKeyword |
+            UsbIrpKeyword |
+            UsbPowerKeyword |
+            UsbPnPKeyword |
+            UsbEnumerationKeyword |
+            UsbRundownKeyword |
+            UsbDeviceKeyword |
+            UsbHubKeyword;
+
         // Thread Provider（NT Kernel Logger 的 Thread/CSwitch 事件）；Type 36 為 CSwitch，用於
         // STACK_TRACING_EVENT_ID，讓 Context Switch 事件附帶呼叫堆疊（見 WithKernelStackTracing）。
         public static readonly Guid ContextSwitchEventGuid = new("3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c");
@@ -811,6 +1021,8 @@ namespace QSoft.ETW
         internal string m_SessionNamePrefix = "QSoft";
         internal readonly List<TraceSession.STACK_TRACING_EVENT_ID> m_StackTracingEventIds = [];
         internal TextWriter? m_StatusWriter;
+        internal bool m_MergeSymbolMetadata;
+        internal string? m_KernelTraceControlPath;
 
         /// <summary>
         /// Configures ETW to compress the ETL file while it is recorded.
@@ -835,17 +1047,15 @@ namespace QSoft.ETW
             return this;
         }
 
+        /// <summary>啟用 provider 的所有 keyword(Verbose)。同一 GUID 後設定者覆蓋先前設定。</summary>
         public TraceSessionBuilder WithProvider(Guid guid)
-        {
-            m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, 0xFFFFFFFFFFFFFFFF));
-            return this;
-        }
+            => WithProvider(guid, TraceLevelVerbose, 0xFFFFFFFFFFFFFFFF);
 
+        /// <summary>以指定 keyword(Verbose)啟用 provider。同一 GUID 後設定者覆蓋先前設定。</summary>
         public TraceSessionBuilder WithProvider(Guid guid, ulong matchAnyKeyword)
-        {
-            m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, matchAnyKeyword));
-            return this;
-        }
+            => WithProvider(guid, TraceLevelVerbose, matchAnyKeyword);
+
+        const byte TraceLevelVerbose = 5;
 
         /// <summary>
         /// Adds a user-mode provider identified by GUID, with an explicit trace level and optional
@@ -858,16 +1068,36 @@ namespace QSoft.ETW
         /// <param name="matchAnyKeyword">The provider keyword mask.</param>
         /// <param name="captureStateOnEnable">If true, requests a state-dump immediately after enabling.</param>
         /// <param name="captureStateOnStop">If true, requests a state-dump right before the session stops.</param>
+        /// <param name="excludedEventIds">
+        /// 在擷取端以 EVENT_FILTER_EVENT_ID 排除的事件 ID(例如每秒數千筆、分析用不到的事件)。null 或空集合表示不排除。
+        /// </param>
         /// <returns>The current builder.</returns>
-        public TraceSessionBuilder WithProvider(Guid providerGuid, byte level, ulong matchAnyKeyword, bool captureStateOnEnable = false, bool captureStateOnStop = false)
+        /// <remarks>
+        /// 這是所有 provider 設定(其他 <c>WithProvider</c> 多載、<see cref="WithProviders"/>、<see cref="WithGpuMonitoring"/>、
+        /// <see cref="WithKernelPowerMonitoring"/> 等專用函式)最終呼叫的基礎函式。同一個 GUID 只會保留一筆設定:
+        /// 後呼叫者整筆覆蓋先前的 keyword/level/CaptureState/排除事件(與對同一 session 重複呼叫 EnableTraceEx2 的行為一致),
+        /// 但保留在清單中原本的位置。
+        /// </remarks>
+        public TraceSessionBuilder WithProvider(Guid providerGuid, byte level, ulong matchAnyKeyword, bool captureStateOnEnable = false, bool captureStateOnStop = false, IReadOnlyCollection<ushort>? excludedEventIds = null)
         {
-            m_UserProviders.Add(new TraceSession.ProviderConfiguration(providerGuid, matchAnyKeyword, level, captureStateOnEnable, captureStateOnStop));
+            var configuration = new TraceSession.ProviderConfiguration(providerGuid, matchAnyKeyword, level, captureStateOnEnable, captureStateOnStop,
+                excludedEventIds is { Count: > 0 } ? [.. excludedEventIds.Distinct()] : null);
+            int existing = m_UserProviders.FindIndex(p => p.ProviderId == providerGuid);
+            if (existing >= 0)
+            {
+                m_UserProviders[existing] = configuration;
+            }
+            else
+            {
+                m_UserProviders.Add(configuration);
+            }
+
             return this;
         }
 
         /// <summary>
         /// Adds a user-mode provider identified by name, with an explicit trace level and optional
-        /// CaptureState requests. See <see cref="WithProvider(Guid, byte, ulong, bool, bool)"/> for the
+        /// CaptureState requests. See <see cref="WithProvider(Guid, byte, ulong, bool, bool, IReadOnlyCollection{ushort})"/> for the
         /// CaptureState semantics.
         /// </summary>
         /// <remarks>
@@ -885,17 +1115,16 @@ namespace QSoft.ETW
         /// <param name="matchAnyKeyword">The provider keyword mask.</param>
         /// <param name="captureStateOnEnable">If true, requests a state-dump immediately after enabling.</param>
         /// <param name="captureStateOnStop">If true, requests a state-dump right before the session stops.</param>
+        /// <param name="excludedEventIds">在擷取端排除的事件 ID;null 或空集合表示不排除。</param>
         /// <returns>The current builder.</returns>
-        public TraceSessionBuilder WithProvider(string providerName, byte level, ulong matchAnyKeyword, bool captureStateOnEnable = false, bool captureStateOnStop = false)
+        public TraceSessionBuilder WithProvider(string providerName, byte level, ulong matchAnyKeyword, bool captureStateOnEnable = false, bool captureStateOnStop = false, IReadOnlyCollection<ushort>? excludedEventIds = null)
         {
             if (string.IsNullOrWhiteSpace(providerName))
             {
                 throw new ArgumentException("Provider 名稱不可為空。", nameof(providerName));
             }
 
-            Guid providerGuid = ResolveProviderGuidByName(providerName);
-            m_UserProviders.Add(new TraceSession.ProviderConfiguration(providerGuid, matchAnyKeyword, level, captureStateOnEnable, captureStateOnStop));
-            return this;
+            return WithProvider(ResolveProviderGuidByName(providerName), level, matchAnyKeyword, captureStateOnEnable, captureStateOnStop, excludedEventIds);
         }
 
         static Guid ResolveProviderGuidByName(string providerName)
@@ -936,16 +1165,160 @@ namespace QSoft.ETW
         {
             foreach (Guid guid in guids)
             {
-                m_UserProviders.Add(new TraceSession.ProviderConfiguration(guid, 0));
+                WithProvider(guid, TraceLevelVerbose, 0);
             }
 
             return this;
         }
 
         /// <summary>
+        /// 啟用重建 Windows 工作管理員「GPU」頁面所需的全部 ETW 資料（各 Engine 使用率、總使用率、專用/共用 GPU 記憶體、
+        /// Adapter 識別、GPU 溫度——溫度需驅動程式支援）。
+        /// </summary>
+        /// <remarks>
+        /// 單純 <c>WithProvider(DxgKrnlProviderGuid)</c> 只會收到 DMA packet / Queue 這類「執行期事件」，卻沒有 Node(Engine) 清單、
+        /// Context→Node 對應、記憶體區段與各行程用量的初始狀態——這些資料 DxgKrnl 只會在 CaptureState（rundown）時輸出，
+        /// 因此無法回推每個 Engine 的使用率與 GPU 記憶體總量。此方法會：
+        /// (1) 以 <see cref="DxgKrnlGpuMonitoringKeywords"/>（Verbose）啟用 Microsoft-Windows-DxgKrnl；
+        /// (2) 啟動後與停止前各送一次 CaptureState，取得 Engine 清單／Adapter／Segment／Device／Context／行程記憶體用量的快照；
+        /// (3) 開啟 Kernel PROCESS 與 THREAD 旗標，取得 PID→映像檔名、TID→PID 對應，以及 Kernel SystemConfig rundown（含 GPU 名稱，Video/PnP 事件）。
+        /// 沒有 THREAD 事件時，Microsoft.Windows.EventTracing（<c>UseDirectXData()</c>）無法把 DMA packet 對應回行程而不會產生任何 DmaPackets。
+        /// 此方法建立在 <see cref="WithProvider(Guid, byte, ulong, bool, bool, IReadOnlyCollection{ushort})"/> 之上:
+        /// 與其他 DxgKrnl 設定一樣「後呼叫者覆蓋」——之後再呼叫 <c>WithProvider(DxgKrnlProviderGuid, …)</c> 會取代這裡的設定(包含 rundown);
+        /// 要額外的 keyword 請用 <paramref name="additionalDxgKrnlKeywords"/>。
+        /// <para>
+        /// 解析時的事件對應（已與 D3DKMTQueryStatistics／PDH 即時數據逐筆比對）：
+        /// Engine 清單／名稱＝EventNodeMetadata(250)；Engine 使用率＝DmaSubmit(175)→DmaIsrComplete(177) 的忙碌區間
+        /// （hContext 經 ReportContext(32)／CreateContext(30)／AssociateContext(433) 對應到 Node，同一 Node 取區間聯集；
+        /// 不可用較晚發生的 DmaDpcComplete(176) 當結束點）；整體使用率＝各 Engine 的最大值；
+        /// 共用 GPU 記憶體用量＝非專用區段的 TotalBytesResidentInSegment(274) 加總（只在數值變動時才送，第一筆之前的初始值不在 rundown 內）；
+        /// 各行程用量＝VidMmProcessUsageChange(367)；共用記憶體上限＝實體記憶體的一半（即 <see cref="GpuAdapterInfo.SharedSystemMemory"/>）；
+        /// 溫度＝GpuPerfTracing(509)，驅動程式不支援時不會有事件（工作管理員顯示 N/A）。
+        /// </para>
+        /// <para>
+        /// GPU 名稱在 Kernel SystemConfig 的 PnP/Video 事件中；驅動程式版本/日期、DirectX 版本、PCI 實體位置不是 ETW 事件，
+        /// 無法由 TraceSession 取得，請改用 <see cref="GpuAdapterInfo"/>。
+        /// </para>
+        /// </remarks>
+        /// <param name="additionalDxgKrnlKeywords">額外要加入的 DxgKrnl Keyword，例如 <see cref="DxgKrnlHardwareSchedulingLogKeyword"/>（HAGS 系統）或 <see cref="DxgKrnlPowerKeyword"/>（Engine 頻率/電壓）。</param>
+        /// <returns>The current builder.</returns>
+        public TraceSessionBuilder WithGpuMonitoring(ulong additionalDxgKrnlKeywords = 0)
+        {
+            m_EnableFlags |= KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS | KernelTraceFlags.EVENT_TRACE_FLAG_THREAD;
+            return WithProvider(DxgKrnlProviderGuid, TraceLevelVerbose, DxgKrnlGpuMonitoringKeywords | additionalDxgKrnlKeywords,
+                captureStateOnEnable: true, captureStateOnStop: true);
+        }
+
+        /// <summary>Kernel-Power 預設在擷取端排除的事件:557(核心內部要求計時器解析度,實測約 7,000 筆/秒)。</summary>
+        public static readonly IReadOnlyList<ushort> KernelPowerAlwaysExcludedEventIds = [557];
+        /// <summary>Kernel-Power 95(每次全系統計時器解析度切換,實測約 65 筆/秒);預設排除。</summary>
+        public const ushort KernelPowerTimerResolutionChangedEventId = 95;
+
+        /// <summary>
+        /// 啟用 Microsoft-Windows-Kernel-Power(<see cref="KernelPowerSystemStateKeywords"/>,level 4,啟動時 CaptureState):
+        /// 睡眠/喚醒(42/107)、新式待命(506/507)、離開模式(59)、AC/DC(105)、熱區散熱模式(82/84/114/116)、外部降頻(91)、
+        /// 計時器解析度(63/96/97 rundown)、idle resiliency(118/119)等。
+        /// </summary>
+        /// <param name="includeTimerResolutionChanges">
+        /// 保留 Kernel-Power 95(每次全系統計時器解析度切換,約 65 筆/秒)。557 一律排除;要求解析度的 app 仍可由擷取開始的 96/97 rundown 得知。
+        /// </param>
+        /// <remarks>建立在 <c>WithProvider</c> 之上,同一 GUID 後呼叫者覆蓋先前設定。</remarks>
+        public TraceSessionBuilder WithKernelPowerMonitoring(bool includeTimerResolutionChanges = false)
+            => WithProvider(KernelPowerProviderGuid, 4, KernelPowerSystemStateKeywords, captureStateOnEnable: true,
+                excludedEventIds: includeTimerResolutionChanges
+                    ? KernelPowerAlwaysExcludedEventIds.ToArray()
+                    : [.. KernelPowerAlwaysExcludedEventIds, KernelPowerTimerResolutionChangedEventId]);
+
+        /// <summary>
+        /// 啟用 Microsoft-Windows-Kernel-Processor-Power(<see cref="KernelProcessorPowerCapKeywords"/>,level 4):
+        /// 韌體限頻(7/8/37/38)與效能狀態降級(136)。
+        /// </summary>
+        /// <param name="includeDeliveredFrequency">同時啟用 111 DeliveredPerfChange(每核實際頻率,每核約 30 ms 一筆)。</param>
+        /// <remarks>建立在 <c>WithProvider</c> 之上,同一 GUID 後呼叫者覆蓋先前設定。</remarks>
+        public TraceSessionBuilder WithProcessorPowerMonitoring(bool includeDeliveredFrequency = false)
+            => WithProvider(KernelProcessorPowerProviderGuid, 4,
+                KernelProcessorPowerCapKeywords | (includeDeliveredFrequency ? KernelProcessorPowerPerfDiagKeyword : 0));
+
+        /// <summary>
+        /// 啟用 Microsoft-Windows-UserModePowerService(UMPO,<see cref="UserModePowerServicePolicyKeywords"/>,level 4):
+        /// 電源計畫變更(12)、電源模式 overlay 變更(51)、重新套用電源設定(22),含發起變更的處理程序。
+        /// </summary>
+        /// <remarks>建立在 <c>WithProvider</c> 之上,同一 GUID 後呼叫者覆蓋先前設定。</remarks>
+        public TraceSessionBuilder WithPowerPolicyMonitoring()
+            => WithProvider(UserModePowerServiceProviderGuid, 4, UserModePowerServicePolicyKeywords);
+
+        /// <summary>
+        /// 啟用 Microsoft-Windows-Kernel-ACPI 散熱相關事件(<see cref="KernelAcpiThermalKeywords"/>,level 4,啟動時 CaptureState):
+        /// 溫度通知(3/11)、警戒點變更(4)、風扇開關(5/6/8)、被動散熱節流百分比(9)、散熱狀態(10)、裝置電源狀態(20)。
+        /// </summary>
+        /// <remarks>建立在 <c>WithProvider</c> 之上,同一 GUID 後呼叫者覆蓋先前設定。</remarks>
+        public TraceSessionBuilder WithAcpiThermalMonitoring()
+            => WithProvider(KernelAcpiProviderGuid, 4, KernelAcpiThermalKeywords, captureStateOnEnable: true);
+
+        /// <summary>
+        /// 一次啟用系統電源/散熱狀態相關的四個 provider,供 <see cref="EtlFileReader.SystemPowerStateChange"/> 使用,
+        /// 等同依序呼叫 <see cref="WithKernelPowerMonitoring"/>、<see cref="WithProcessorPowerMonitoring"/>、
+        /// <see cref="WithPowerPolicyMonitoring"/>、<see cref="WithAcpiThermalMonitoring"/>。
+        /// 與其他設定一樣「後呼叫者覆蓋」:之後再對其中某個 GUID 呼叫 <c>WithProvider</c> 或個別函式,會取代這裡的設定。
+        /// </summary>
+        /// <param name="includeProcessorDeliveredFrequency">同時啟用 Kernel-Processor-Power 111(每核實際頻率,量較大)。</param>
+        /// <param name="includeTimerResolutionChanges">保留 Kernel-Power 95(約 65 筆/秒);557 一律排除。</param>
+        public TraceSessionBuilder WithSystemPowerMonitoring(bool includeProcessorDeliveredFrequency = false, bool includeTimerResolutionChanges = false)
+            => WithKernelPowerMonitoring(includeTimerResolutionChanges)
+                .WithProcessorPowerMonitoring(includeProcessorDeliveredFrequency)
+                .WithPowerPolicyMonitoring()
+                .WithAcpiThermalMonitoring();
+
+        /// <summary>
+        /// 啟用 USB 驅動程式堆疊的事件(level Verbose,啟動與停止前各送一次 CaptureState 取得裝置摘要 rundown):
+        /// USB 3.0 的 USBXHCI/UCX/USBHUB3 使用 <see cref="UsbMonitoringKeywords"/> 加上 <paramref name="transfers"/>
+        /// 對應的 BusTrace keyword;USB 2.0 的 USBPORT/USBHUB 啟用全部 keyword(只有 xHCI 的系統不會有事件)。
+        /// 同時開啟 Kernel PROCESS 旗標,以便把事件的 PID 對應到映像檔名。
+        /// </summary>
+        /// <param name="transfers">逐筆 USB 傳輸的記錄等級。觀察 webcam 等串流裝置的資料流量時至少需要 <see cref="UsbTransferTraceLevel.Headers"/>。</param>
+        /// <param name="includeStateMachine">加入 StateMachine keyword(Hub/Port/Endpoint 內部狀態機),用於除錯列舉或電源問題,量較大。</param>
+        /// <remarks>
+        /// 對照 Microsoft「USB event tracing for Windows」文件建議的 logman 擷取設定。
+        /// 建立在 <c>WithProvider</c> 之上,同一 GUID 後呼叫者覆蓋先前設定。
+        /// </remarks>
+        public TraceSessionBuilder WithUsbMonitoring(UsbTransferTraceLevel transfers = UsbTransferTraceLevel.None, bool includeStateMachine = false)
+        {
+            ulong usb3Keywords = UsbMonitoringKeywords |
+                (includeStateMachine ? UsbStateMachineKeyword : 0) |
+                transfers switch
+                {
+                    UsbTransferTraceLevel.None => 0,
+                    UsbTransferTraceLevel.Headers => UsbHeadersBusTraceKeyword,
+                    UsbTransferTraceLevel.PartialData => UsbPartialDataBusTraceKeyword,
+                    UsbTransferTraceLevel.FullData => UsbFullDataBusTraceKeyword,
+                    _ => throw new ArgumentOutOfRangeException(nameof(transfers)),
+                };
+
+            m_EnableFlags |= KernelTraceFlags.EVENT_TRACE_FLAG_PROCESS;
+            return WithProvider(UsbXhciProviderGuid, TraceLevelVerbose, usb3Keywords, captureStateOnEnable: true, captureStateOnStop: true)
+                .WithProvider(UsbUcxProviderGuid, TraceLevelVerbose, usb3Keywords, captureStateOnEnable: true, captureStateOnStop: true)
+                .WithProvider(UsbHub3ProviderGuid, TraceLevelVerbose, usb3Keywords, captureStateOnEnable: true, captureStateOnStop: true)
+                .WithProvider(UsbPortProviderGuid, TraceLevelVerbose, 0xFFFFFFFFFFFFFFFF)
+                .WithProvider(UsbHubProviderGuid, TraceLevelVerbose, 0xFFFFFFFFFFFFFFFF);
+        }
+
+        /// <summary>
+        /// 啟用 USB 攝影機(UVC webcam)相關事件:<see cref="WithUsbMonitoring"/> 的 USB 堆疊事件,
+        /// 再加上 Microsoft-Windows-USBVideo(usbvideo.sys)與 Microsoft-Windows-MF-FrameServer(Camera Frame Server)的全部 keyword。
+        /// </summary>
+        /// <param name="transfers">逐筆 USB 傳輸的記錄等級;預設 <see cref="UsbTransferTraceLevel.Headers"/> 以觀察影像串流的傳輸量。</param>
+        /// <param name="includeStateMachine">加入 USB StateMachine keyword。</param>
+        /// <remarks>建立在 <c>WithProvider</c> 之上,同一 GUID 後呼叫者覆蓋先前設定。</remarks>
+        public TraceSessionBuilder WithCameraMonitoring(UsbTransferTraceLevel transfers = UsbTransferTraceLevel.Headers, bool includeStateMachine = false)
+            => WithUsbMonitoring(transfers, includeStateMachine)
+                .WithProvider(UsbVideoProviderGuid, TraceLevelVerbose, 0xFFFFFFFFFFFFFFFF)
+                .WithProvider(CameraFrameServerProviderGuid, TraceLevelVerbose, 0xFFFFFFFFFFFFFFFF);
+
+        /// <summary>
         /// Sets where the recorded ETL is written. If <paramref name="path"/> is (or looks like) a directory, only
         /// the output directory is changed; if it is a file path, its directory becomes the output directory and
-        /// its file name becomes the recorded ETL's file name directly (no merge step is performed).
+        /// its file name becomes the recorded ETL's file name directly. Metadata merge is performed only
+        /// when explicitly enabled with <see cref="WithSymbolMetadataMerge"/>.
         /// </summary>
         public TraceSessionBuilder WithOutputPath(string path)
         {
@@ -1011,6 +1384,27 @@ namespace QSoft.ETW
             return this;
         }
 
+        /// <summary>
+        /// 停止擷取後使用 KernelTraceControl.dll 將 ImageID/DbgID_RSDS、事件 metadata、volume mapping 等資訊併入 ETL，
+        /// 讓其他電腦可依 ETL 內的 PDB GUID/Age 從 symbol server 取得精確符號。
+        /// 此選項會自動啟用 IMAGE_LOAD 事件。若 DLL 缺失或 merge 失敗，原始 ETL 會保留不變，並透過
+        /// <see cref="TraceSession.SymbolMetadataMergeResult"/> 與狀態訊息回報原因。
+        /// </summary>
+        /// <param name="kernelTraceControlPath">
+        /// 選用的 KernelTraceControl.dll 完整路徑；未指定時會依序搜尋應用程式目錄與 Windows Performance Toolkit 標準安裝目錄。
+        /// </param>
+        public TraceSessionBuilder WithSymbolMetadataMerge(string? kernelTraceControlPath = null)
+        {
+            if (!string.IsNullOrWhiteSpace(kernelTraceControlPath))
+            {
+                m_KernelTraceControlPath = Path.GetFullPath(kernelTraceControlPath);
+            }
+
+            m_MergeSymbolMetadata = true;
+            m_EnableFlags |= KernelTraceFlags.EVENT_TRACE_FLAG_IMAGE_LOAD;
+            return this;
+        }
+
         public TraceSession Build() => new(
             m_EnableFlags,
             [.. m_UserProviders],
@@ -1020,6 +1414,8 @@ namespace QSoft.ETW
             m_EnableFileCompression,
             m_SessionNamePrefix,
             [.. m_StackTracingEventIds],
-            m_StatusWriter);
+            m_StatusWriter,
+            m_MergeSymbolMetadata,
+            m_KernelTraceControlPath);
     }
 }

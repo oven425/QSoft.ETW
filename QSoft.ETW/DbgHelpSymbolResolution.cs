@@ -30,6 +30,9 @@ public enum HandlerSymbolResolutionStatus
 
     /// <summary>已成功解析符號。</summary>
     Resolved,
+
+    /// <summary>ETL 提供了 PDB GUID/Age，但在指定的 symbol path 找不到相符的 PDB。</summary>
+    PdbFileNotFound,
 }
 
 /// <summary>
@@ -199,7 +202,7 @@ internal static partial class DbgHelpHandlerSymbolResolver
         return results;
     }
 
-    private static void ResolveModuleGroup(
+    private static unsafe void ResolveModuleGroup(
         nint sessionHandle,
         IGrouping<ModuleInfo, HandlerSymbolRequest> moduleGroup,
         DbgHelpSymbolResolutionOptions options,
@@ -207,7 +210,32 @@ internal static partial class DbgHelpHandlerSymbolResolver
     {
         ModuleInfo module = moduleGroup.Key;
         ImagePathResolution image = ResolveImagePath(module, options);
-        if (image.Path is null)
+        string? modulePath = image.Path;
+        bool loadingPdbDirectly = false;
+        if (modulePath is null &&
+            module.PdbGuid is Guid pdbGuid &&
+            module.PdbAge is uint pdbAge &&
+            !string.IsNullOrWhiteSpace(module.PdbFileName))
+        {
+            modulePath = FindPdbFile(sessionHandle, module.PdbFileName, pdbGuid, pdbAge, options.SymbolPath, out int pdbError);
+            if (modulePath is null)
+            {
+                foreach (HandlerSymbolRequest request in moduleGroup)
+                {
+                    results[request] = new HandlerSymbolResolution(
+                        HandlerSymbolResolutionStatus.PdbFileNotFound,
+                        null,
+                        null,
+                        pdbError);
+                }
+
+                return;
+            }
+
+            loadingPdbDirectly = true;
+        }
+
+        if (modulePath is null)
         {
             foreach (HandlerSymbolRequest request in moduleGroup)
             {
@@ -235,11 +263,12 @@ internal static partial class DbgHelpHandlerSymbolResolver
             return;
         }
 
+        string? moduleName = loadingPdbDirectly ? Path.GetFileName(module.FileName) : null;
         ulong loadedBase = SymLoadModuleEx(
             sessionHandle,
             0,
-            image.Path,
-            null,
+            modulePath,
+            moduleName,
             module.ImageBase,
             (uint)module.ImageSize,
             0,
@@ -273,9 +302,42 @@ internal static partial class DbgHelpHandlerSymbolResolver
             {
                 throw new Win32Exception(
                     Marshal.GetLastPInvokeError(),
-                    $"SymUnloadModule64 失敗：{image.Path}");
+                    $"SymUnloadModule64 失敗：{modulePath}");
             }
         }
+    }
+
+    private static unsafe string? FindPdbFile(
+        nint sessionHandle,
+        string pdbFileName,
+        Guid pdbGuid,
+        uint pdbAge,
+        string symbolPath,
+        out int error)
+    {
+        const uint SsrvOptGuidPtr = 0x00000008;
+        const int MaxPathLength = 32768;
+        char* foundPath = stackalloc char[MaxPathLength];
+        NativeMemory.Clear(foundPath, (nuint)(MaxPathLength * sizeof(char)));
+
+        if (SymFindFileInPath(
+                sessionHandle,
+                symbolPath,
+                pdbFileName,
+                &pdbGuid,
+                pdbAge,
+                0,
+                SsrvOptGuidPtr,
+                foundPath,
+                0,
+                0) != 0)
+        {
+            error = 0;
+            return new string(foundPath);
+        }
+
+        error = Marshal.GetLastPInvokeError();
+        return null;
     }
 
     private static unsafe HandlerSymbolResolution ResolveAddress(nint processHandle, ulong address)
@@ -558,6 +620,23 @@ internal static partial class DbgHelpHandlerSymbolResolver
 
     [LibraryImport("dbghelp.dll", EntryPoint = "SymUnloadModule64", SetLastError = true)]
     private static partial int SymUnloadModule64(nint processHandle, ulong baseOfDll);
+
+    [LibraryImport(
+        "dbghelp.dll",
+        EntryPoint = "SymFindFileInPathW",
+        SetLastError = true,
+        StringMarshalling = StringMarshalling.Utf16)]
+    private static unsafe partial int SymFindFileInPath(
+        nint processHandle,
+        string? searchPath,
+        string fileName,
+        Guid* id,
+        uint two,
+        uint three,
+        uint flags,
+        char* foundFile,
+        nint callback,
+        nint context);
 
     [LibraryImport("dbghelp.dll", EntryPoint = "SymCleanup", SetLastError = true)]
     private static partial int SymCleanup(nint processHandle);
