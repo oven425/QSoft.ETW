@@ -9,6 +9,15 @@ collects events through reader callbacks into in-memory Lists, and scores proces
 thread and CSwitch evidence, issues and fixes) plus an explicitly heuristic 0-100 system score.
 No SQLite or reader plugins are used.
 
+## SRUM energy by CPU cycles
+
+[ConsoleApp_SrumCycles](ConsoleApp_SrumCycles/README.md) collects per-process CPU cycles from a real-time
+Microsoft-Windows-Kernel-Process session (ProcessStart/ProcessStop `CPUCycleCount`) plus periodic
+`SystemProcessInformation` samples. It uses them to split each SRUM energy row (`powercfg /srumutil`)
+over the processes behind one AppId: cycles per interval, a per-process ledger for late reports, and
+exact largest-remainder integer splits, with a shared-bucket fallback. `e2e` validates the method with
+[ConsoleApp_CpuBurner](ConsoleApp_CpuBurner/Program.cs) loads that follow known duty schedules.
+
 ## USB and webcam capture
 
 `WithUsbMonitoring()` enables the USB 3.0 stack providers (USBXHCI, UCX, USBHUB3) plus the
