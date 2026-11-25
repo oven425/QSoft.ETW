@@ -2,7 +2,7 @@ using System.Text;
 using System.Text.Json;
 using ConsoleApp_TaskManagerReplay;
 using QSoft.ETW;
-
+Console.OutputEncoding = Encoding.UTF8;
 try
 {
     if (args is ["--self-test"])
